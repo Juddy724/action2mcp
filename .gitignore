@@ -1,0 +1,8 @@
+dist/
+data/
+*.db
+*.db-*
+secret.key
+*.log
+e2e/screens/
+.work-*/
