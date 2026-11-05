@@ -126,6 +126,10 @@ func TestNoiseClassification(t *testing.T) {
 		{ReqRecord{Method: "GET", URL: "https://x.com/static/app.js", ResourceType: "Script"}, true},
 		{ReqRecord{Method: "OPTIONS", URL: "https://x.com/api/order"}, true},
 		{ReqRecord{Method: "POST", URL: "https://x.com/api/order/create", ResourceType: "Fetch", Status: 200, RespMime: "application/json"}, false},
+		{ReqRecord{Method: "WS", URL: "wss://x.com/ws/logs", ResourceType: "WebSocket", Status: 101}, false},
+		{ReqRecord{Method: "WS", URL: "wss://x.com/ws", ResourceType: "WebSocket", Status: 0}, true},
+		{ReqRecord{Method: "WS", URL: "wss://www.google-analytics.com/g/collect", ResourceType: "WebSocket", Status: 101}, true},
+		{ReqRecord{Method: "WS", URL: "wss://logs.example.com/log", ResourceType: "WebSocket", Status: 101}, false},
 	}
 	for _, c := range cases {
 		if n, why := ClassifyNoise(&c.q); n != c.noise {

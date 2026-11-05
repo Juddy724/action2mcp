@@ -80,10 +80,14 @@ type Pack struct {
 	Description   string  `json:"description"`
 	Enabled       bool    `json:"enabled"`
 	Scenarios     string  `json:"scenarios"`
+	Guide         string  `json:"guide"`
 	ToolIDs       []int64 `json:"tool_ids"`
 	MiddlewareIDs []int64 `json:"middleware_ids"`
 	CreatedAt     string  `json:"created_at,omitempty"`
 }
+
+// maxPackGuideBytes is the stored size of one pack's usage guide.
+const maxPackGuideBytes = 8 * 1024
 
 type Cookie struct {
 	Name     string  `json:"name"`
@@ -128,6 +132,12 @@ CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 	// 0.4.0: packs.scenarios (适用场景)
 	if !s.hasColumn("packs", "scenarios") {
 		if _, err := db.Exec(`ALTER TABLE packs ADD COLUMN scenarios TEXT DEFAULT ''`); err != nil {
+			return nil, err
+		}
+	}
+	// pack usage guide shown to the model after load_pack (flat mode: initialize instructions)
+	if !s.hasColumn("packs", "guide") {
+		if _, err := db.Exec(`ALTER TABLE packs ADD COLUMN guide TEXT DEFAULT ''`); err != nil {
 			return nil, err
 		}
 	}
@@ -224,6 +234,12 @@ func (s *Store) GetRecording(id int64) (*Recording, error) {
 
 func (s *Store) DeleteRecording(id int64) error {
 	_, err := s.db.Exec(`DELETE FROM recordings WHERE id=?`, id)
+	return err
+}
+
+func (s *Store) UpdateRequest(q *ReqRecord) error {
+	_, err := s.db.Exec(`UPDATE requests SET url=?, status=?, req_headers=?, req_body=?, resp_headers=?, resp_body=?, resp_mime=?, noise=?, noise_reason=? WHERE id=?`,
+		q.URL, q.Status, js(q.ReqHeaders), q.ReqBody, js(q.RespHeaders), q.RespBody, q.RespMime, b2i(q.Noise), q.NoiseReason, q.ID)
 	return err
 }
 
@@ -399,7 +415,7 @@ func (s *Store) ExposedTools() ([]*Tool, error) {
 // ---------- packs ----------
 
 func (s *Store) ListPacks() ([]*Pack, error) {
-	rows, err := s.db.Query(`SELECT id,name,description,enabled,COALESCE(scenarios,''),created_at FROM packs ORDER BY id`)
+	rows, err := s.db.Query(`SELECT id,name,description,enabled,COALESCE(scenarios,''),COALESCE(guide,''),created_at FROM packs ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -407,7 +423,7 @@ func (s *Store) ListPacks() ([]*Pack, error) {
 	for rows.Next() {
 		var p Pack
 		var e int
-		rows.Scan(&p.ID, &p.Name, &p.Description, &e, &p.Scenarios, &p.CreatedAt)
+		rows.Scan(&p.ID, &p.Name, &p.Description, &e, &p.Scenarios, &p.Guide, &p.CreatedAt)
 		p.Enabled = e != 0
 		p.ToolIDs = []int64{}
 		p.MiddlewareIDs = []int64{}
@@ -447,13 +463,17 @@ func (s *Store) SavePack(p *Pack) error {
 	if strings.TrimSpace(p.Name) == "" {
 		return errors.New("流程包名称不能为空")
 	}
+	p.Guide = strings.TrimSpace(p.Guide)
+	if len(p.Guide) > maxPackGuideBytes {
+		return fmt.Errorf("使用说明最长 %dKB", maxPackGuideBytes/1024)
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	if p.ID == 0 {
-		r, err := tx.Exec(`INSERT INTO packs(name,description,enabled,scenarios,created_at) VALUES(?,?,?,?,?)`, p.Name, p.Description, b2i(p.Enabled), p.Scenarios, now())
+		r, err := tx.Exec(`INSERT INTO packs(name,description,enabled,scenarios,guide,created_at) VALUES(?,?,?,?,?,?)`, p.Name, p.Description, b2i(p.Enabled), p.Scenarios, p.Guide, now())
 		if err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
 				return fmt.Errorf("流程包 %q 已存在", p.Name)
@@ -462,7 +482,7 @@ func (s *Store) SavePack(p *Pack) error {
 		}
 		p.ID, _ = r.LastInsertId()
 	} else {
-		if _, err := tx.Exec(`UPDATE packs SET name=?,description=?,enabled=?,scenarios=? WHERE id=?`, p.Name, p.Description, b2i(p.Enabled), p.Scenarios, p.ID); err != nil {
+		if _, err := tx.Exec(`UPDATE packs SET name=?,description=?,enabled=?,scenarios=?,guide=? WHERE id=?`, p.Name, p.Description, b2i(p.Enabled), p.Scenarios, p.Guide, p.ID); err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
 				return fmt.Errorf("流程包 %q 已存在", p.Name)
 			}

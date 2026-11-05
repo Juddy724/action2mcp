@@ -37,7 +37,7 @@ tr.click{cursor:pointer}
 tr.click:hover td{background:#fafbff}
 tr.sel td{background:var(--pri2)}
 .badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11.5px;font-weight:600;background:#eef1f6;color:#475569}
-.m-GET{background:#e0f2fe;color:#0369a1}.m-POST{background:#dcfce7;color:#15803d}.m-PUT{background:#fef3c7;color:#b45309}.m-DELETE{background:#fee2e2;color:#b91c1c}.m-PATCH{background:#ede9fe;color:#6d28d9}
+.m-GET{background:#e0f2fe;color:#0369a1}.m-POST{background:#dcfce7;color:#15803d}.m-PUT{background:#fef3c7;color:#b45309}.m-DELETE{background:#fee2e2;color:#b91c1c}.m-PATCH{background:#ede9fe;color:#6d28d9}.m-WS{background:#ede9fe;color:#6d28d9}
 .st-ok{color:var(--green)}.st-bad{color:var(--red)}
 .pill{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:16px;background:#f1f5f9}
 .pill.recording{background:#fee2e2;color:#b91c1c;font-weight:600}
@@ -89,7 +89,7 @@ pre{background:#0f172a;color:#e2e8f0;padding:12px 14px;border-radius:8px;overflo
 .login-box{margin:8px 0}
 details summary{cursor:pointer;color:var(--muted)}
 .mw-type{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11.5px;font-weight:600;background:#eef1f6;color:#475569}
-.mw-type.t-mysql{background:#e0f2fe;color:#0369a1}.mw-type.t-redis{background:#fee2e2;color:#b91c1c}.mw-type.t-mq{background:#fef3c7;color:#b45309}
+.mw-type.t-mysql{background:#e0f2fe;color:#0369a1}.mw-type.t-redis{background:#fee2e2;color:#b91c1c}.mw-type.t-mq{background:#fef3c7;color:#b45309}.mw-type.t-websocket{background:#ede9fe;color:#6d28d9}
 .perm{display:inline-block;padding:1px 8px;margin:1px 3px 1px 0;border-radius:10px;font-size:12px;background:#f1f5f9;color:#94a3b8;text-decoration:line-through}
 .perm.on{background:#dcfce7;color:#15803d;text-decoration:none}
 .perms{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:8px}
@@ -101,6 +101,8 @@ table.audit .act{max-width:420px;overflow:hidden;text-overflow:ellipsis;white-sp
 .mode-opt input{margin-top:4px}
 .pack-meta{display:grid;grid-template-columns:70px 1fr;gap:6px 10px;align-items:center;margin-top:10px}
 .pack-meta input{width:100%}
+.pack-guide{margin-top:10px}
+.pack-guide textarea{width:100%;min-height:88px;margin-top:4px}
 @media (max-width:800px){.mode-opts{grid-template-columns:1fr}}
 .sec-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:12px}
 button.sm{padding:4px 10px;font-size:13px}
