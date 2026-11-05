@@ -30,6 +30,21 @@ func ClassifyNoise(q *ReqRecord) (bool, string) {
 	if q.Method == "OPTIONS" {
 		return true, "跨域预检"
 	}
+	if q.ResourceType == "WebSocket" || q.Method == "WS" {
+		if q.Status == 0 {
+			return true, "未完成"
+		}
+		h := strings.ToLower(u.Hostname())
+		for _, a := range analyticsHosts {
+			if strings.Contains(a, "/") {
+				continue
+			}
+			if h == a || strings.HasSuffix(h, "."+a) || strings.Contains(h, a) {
+				return true, "埋点/监控"
+			}
+		}
+		return false, ""
+	}
 	switch q.ResourceType {
 	case "Script", "Stylesheet", "Image", "Font", "Media", "Manifest", "TextTrack":
 		return true, "静态资源"

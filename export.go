@@ -24,6 +24,7 @@ type exportPack struct {
 	Description string   `json:"description"`
 	Enabled     bool     `json:"enabled"`
 	Scenarios   string   `json:"scenarios,omitempty"`
+	Guide       *string  `json:"guide,omitempty"`
 	Tools       []string `json:"tools"`
 	Middleware  []string `json:"middleware,omitempty"`
 }
@@ -68,7 +69,7 @@ func (a *App) Export() ([]byte, error) {
 	}
 	packs, _ := a.store.ListPacks()
 	f := exportFile{Format: "action2mcp", Version: 1, ExportedAt: time.Now().Format(time.RFC3339),
-		Note: "只包含工具定义、流程包、登录配置和配置项名称，不包含任何 Cookie / Token / 登录态，也不包含配置项的值（密码等）；中间件只包含连接地址、权限和密码配置项的名称，不包含密码。导入后请在「配置管理」里填写配置值，并用自己的账号登录一次。", Tools: []exportTool{}, Packs: []exportPack{}}
+		Note: "只包含工具定义、流程包、登录配置和配置项名称，不包含任何 Cookie / Token / 登录态，也不包含配置项的值（密码等）；中间件只包含连接地址、权限和密码配置项的名称，不包含密码。流程包使用说明会一并导出，请不要在里面写密码或 Cookie；配置管理里已有的密文会在导出时替换成 ******。导入后请在「配置管理」里填写配置值，并用自己的账号登录一次。", Tools: []exportTool{}, Packs: []exportPack{}}
 	mws, _ := a.store.ListMiddleware()
 	mwNames := map[int64]string{}
 	for _, m := range mws {
@@ -90,7 +91,8 @@ func (a *App) Export() ([]byte, error) {
 		f.Tools = append(f.Tools, exportTool{t.Name, t.Title, t.Description, t.Method, a.vault.Scrub(a.vault.ToRefs(t.URL)), h, a.vault.Scrub(a.vault.ToRefs(t.Body)), t.Params, t.CredHeaders})
 	}
 	for _, p := range packs {
-		ep := exportPack{Name: p.Name, Description: p.Description, Enabled: p.Enabled, Scenarios: p.Scenarios, Tools: []string{}}
+		guide := a.vault.Scrub(strings.TrimSpace(p.Guide))
+		ep := exportPack{Name: p.Name, Description: p.Description, Enabled: p.Enabled, Scenarios: p.Scenarios, Guide: &guide, Tools: []string{}}
 		for _, id := range p.ToolIDs {
 			if n, ok := names[id]; ok {
 				ep.Tools = append(ep.Tools, n)
@@ -248,8 +250,16 @@ func (a *App) Import(b []byte) (*ImportResult, error) {
 			if p.Scenarios == "" {
 				p.Scenarios = old.Scenarios
 			}
+			if ep.Guide == nil {
+				p.Guide = old.Guide
+			} else {
+				p.Guide = *ep.Guide
+			}
 			res.PacksUpdated++
 		} else {
+			if ep.Guide != nil {
+				p.Guide = *ep.Guide
+			}
 			res.PacksAdded++
 		}
 		for _, n := range ep.Tools {

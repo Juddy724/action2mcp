@@ -271,6 +271,7 @@ func (a *App) Handler() http.Handler {
 		p.ID = id
 		p.Name = strings.TrimSpace(p.Name)
 		p.Scenarios = strings.TrimSpace(p.Scenarios)
+		p.Guide = strings.TrimSpace(p.Guide)
 		if err := a.store.SavePack(&p); err != nil {
 			writeErr(w, 400, err)
 			return

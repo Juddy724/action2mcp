@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -107,9 +108,35 @@ type activeRecording struct {
 type pendingReq struct {
 	rec      *ReqRecord
 	hasPost  bool
+	ws       bool
 	session  string
 	reqID    string
 	extraHdr map[string]string
+
+	wsSent     []wsStoredFrame
+	wsRecv     []wsStoredFrame
+	wsState    string
+	wsErr      string
+	wsSentCut  bool
+	wsRecvCut  bool
+	wsFlush    time.Time
+	wsNoise    bool
+	wsInserted bool
+}
+
+type wsStoredFrame struct {
+	TS    string `json:"ts"`
+	Op    int    `json:"op"`
+	Text  string `json:"text,omitempty"`
+	Bytes int    `json:"bytes,omitempty"`
+}
+
+type wsEnvelope struct {
+	V         int             `json:"v"`
+	State     string          `json:"state,omitempty"`
+	Error     string          `json:"error,omitempty"`
+	Truncated bool            `json:"truncated,omitempty"`
+	Frames    []wsStoredFrame `json:"frames"`
 }
 
 func (a *App) profileDir() string { return filepath.Join(a.dataDir, "browser-profile") }
@@ -367,9 +394,24 @@ func (bs *BrowserSession) handle(ev cdp.Event) {
 		bs.onFinished(ev, false)
 	case "Network.loadingFailed":
 		bs.onFinished(ev, true)
+	case "Network.webSocketCreated":
+		bs.onWSCreated(ev)
+	case "Network.webSocketWillSendHandshakeRequest":
+		bs.onWSHandshake(ev)
+	case "Network.webSocketHandshakeResponseReceived":
+		bs.onWSHandshakeResponse(ev)
+	case "Network.webSocketFrameSent":
+		bs.onWSFrame(ev, true)
+	case "Network.webSocketFrameReceived":
+		bs.onWSFrame(ev, false)
+	case "Network.webSocketClosed":
+		bs.onWSClosed(ev)
+	case "Network.webSocketFrameError":
+		bs.onWSError(ev)
 	}
 }
 
+// WebSocket is recorded from Network.webSocket* events, not as this HTTP upgrade request.
 var recordTypes = map[string]bool{"XHR": true, "Fetch": true, "Document": true, "Ping": true, "Other": true, "EventSource": true, "Script": true, "Stylesheet": true, "Image": true, "Font": true}
 var bodyTypes = map[string]bool{"XHR": true, "Fetch": true, "Document": true, "Other": true, "EventSource": true}
 
@@ -574,6 +616,341 @@ func truncate(s string, n int) string {
 	return s
 }
 
+// A WebSocket connection is one recording row. Frames stay in memory as JSON
+// envelopes and are flushed on a short interval. The recording page renders them;
+// saving a middleware copies the URL only, never these frames.
+func (bs *BrowserSession) onWSCreated(ev cdp.Event) {
+	var p struct {
+		RequestID string `json:"requestId"`
+		URL       string `json:"url"`
+	}
+	json.Unmarshal(ev.Params, &p)
+	bs.mu.Lock()
+	defer bs.mu.Unlock()
+	bs.wsPending(ev.SessionID, p.RequestID, p.URL, true)
+}
+
+func (bs *BrowserSession) onWSHandshake(ev cdp.Event) {
+	var p struct {
+		RequestID string `json:"requestId"`
+		Request   struct {
+			Headers map[string]any `json:"headers"`
+		} `json:"request"`
+	}
+	json.Unmarshal(ev.Params, &p)
+	bs.mu.Lock()
+	defer bs.mu.Unlock()
+	rec := bs.rec
+	pr := bs.wsPending(ev.SessionID, p.RequestID, "", false)
+	if pr == nil || rec == nil {
+		return
+	}
+	for k, v := range p.Request.Headers {
+		if strings.HasPrefix(k, ":") {
+			continue
+		}
+		pr.rec.ReqHeaders[k] = fmt.Sprint(v)
+	}
+	if err := bs.persistWSLocked(rec, pr, true); err != nil {
+		log.Printf("保存 WebSocket 握手失败: %v", err)
+	}
+}
+
+func (bs *BrowserSession) onWSHandshakeResponse(ev cdp.Event) {
+	var p struct {
+		RequestID string `json:"requestId"`
+		Response  struct {
+			Status  int            `json:"status"`
+			Headers map[string]any `json:"headers"`
+		} `json:"response"`
+	}
+	json.Unmarshal(ev.Params, &p)
+	bs.mu.Lock()
+	defer bs.mu.Unlock()
+	rec := bs.rec
+	pr := bs.wsPending(ev.SessionID, p.RequestID, "", false)
+	if pr == nil || rec == nil {
+		return
+	}
+	// Status is 101 only when the handshake succeeded. A missing or failed
+	// handshake stays 0 so it is classified as 未完成. The HTTP code is kept
+	// on the receive envelope.
+	for k, v := range p.Response.Headers {
+		pr.rec.RespHeaders[k] = fmt.Sprint(v)
+	}
+	if p.Response.Status == 101 {
+		pr.rec.Status = 101
+		pr.wsState = "open"
+	} else if p.Response.Status != 0 {
+		pr.wsState = "error"
+		if pr.wsErr == "" {
+			pr.wsErr = fmt.Sprintf("HTTP %d", p.Response.Status)
+		}
+	}
+	if err := bs.persistWSLocked(rec, pr, true); err != nil {
+		log.Printf("保存 WebSocket 握手失败: %v", err)
+	}
+}
+
+func (bs *BrowserSession) onWSFrame(ev cdp.Event, sent bool) {
+	var p struct {
+		RequestID string `json:"requestId"`
+		Response  struct {
+			Opcode      int    `json:"opcode"`
+			PayloadData string `json:"payloadData"`
+		} `json:"response"`
+	}
+	json.Unmarshal(ev.Params, &p)
+	frame, ok := wsCaptureFrame(p.Response.Opcode, p.Response.PayloadData)
+	if !ok {
+		return
+	}
+	bs.mu.Lock()
+	defer bs.mu.Unlock()
+	rec := bs.rec
+	pr := bs.wsPending(ev.SessionID, p.RequestID, "", false)
+	if pr == nil || rec == nil {
+		return
+	}
+	pr.addWSFrame(sent, frame)
+	if err := bs.persistWSLocked(rec, pr, false); err != nil {
+		log.Printf("保存 WebSocket 帧失败: %v", err)
+	}
+}
+
+func (bs *BrowserSession) onWSClosed(ev cdp.Event) {
+	var p struct {
+		RequestID string `json:"requestId"`
+	}
+	json.Unmarshal(ev.Params, &p)
+	bs.mu.Lock()
+	defer bs.mu.Unlock()
+	rec := bs.rec
+	if rec == nil {
+		return
+	}
+	k := key(ev.SessionID, p.RequestID)
+	pr := rec.pending[k]
+	if pr == nil || !pr.ws {
+		return
+	}
+	pr.wsState = "closed"
+	if err := bs.persistWSLocked(rec, pr, true); err != nil {
+		log.Printf("保存 WebSocket 关闭失败: %v", err)
+		return
+	}
+	delete(rec.pending, k)
+}
+
+func (bs *BrowserSession) onWSError(ev cdp.Event) {
+	var p struct {
+		RequestID    string `json:"requestId"`
+		ErrorMessage string `json:"errorMessage"`
+	}
+	json.Unmarshal(ev.Params, &p)
+	bs.mu.Lock()
+	defer bs.mu.Unlock()
+	rec := bs.rec
+	pr := bs.wsPending(ev.SessionID, p.RequestID, "", false)
+	if pr == nil || rec == nil {
+		return
+	}
+	pr.wsState = "error"
+	pr.wsErr = clipWSErr(p.ErrorMessage)
+	if err := bs.persistWSLocked(rec, pr, true); err != nil {
+		log.Printf("保存 WebSocket 错误失败: %v", err)
+	}
+}
+
+// wsPending returns the in-progress WebSocket row. A row is created only for
+// webSocketCreated with a real ws:// or wss:// URL. Caller holds bs.mu.
+func (bs *BrowserSession) wsPending(session, requestID, rawURL string, create bool) *pendingReq {
+	rec := bs.rec
+	if rec == nil || rec.stopped || requestID == "" {
+		return nil
+	}
+	if bs.ignore[bs.pages[session]] {
+		return nil
+	}
+	k := key(session, requestID)
+	if pr, ok := rec.pending[k]; ok {
+		return pr
+	}
+	if !create || !validWSURL(rawURL) {
+		return nil
+	}
+	rec.seq++
+	pr := &pendingReq{ws: true, session: session, reqID: requestID, rec: &ReqRecord{
+		RecordingID: rec.id, Seq: rec.seq, Method: "WS", URL: rawURL, ResourceType: "WebSocket",
+		ReqHeaders: map[string]string{}, RespHeaders: map[string]string{},
+		TS: time.Now().Format("15:04:05.000"),
+	}}
+	rec.pending[k] = pr
+	return pr
+}
+
+func validWSURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return u.Scheme == "ws" || u.Scheme == "wss"
+}
+
+// persistWSLocked writes the JSON envelopes. force is set for handshake, close,
+// error, and stop. Other frames flush at most once per 500ms. Caller holds bs.mu.
+// On failure the pending row is left in place.
+func (bs *BrowserSession) persistWSLocked(rec *activeRecording, pr *pendingReq, force bool) error {
+	if rec == nil || pr == nil || pr.rec == nil {
+		return nil
+	}
+	if !force && !pr.wsFlush.IsZero() && time.Since(pr.wsFlush) < 500*time.Millisecond {
+		return nil
+	}
+	sent, sentCut := fitWSFrames(pr.wsSent, pr.wsSentCut, "", "")
+	recv, recvCut := fitWSFrames(pr.wsRecv, pr.wsRecvCut, pr.wsState, pr.wsErr)
+	pr.wsSent, pr.wsSentCut = sent, sentCut
+	pr.wsRecv, pr.wsRecvCut = recv, recvCut
+	sb, err := json.Marshal(wsEnv(pr.wsSent, pr.wsSentCut, "", ""))
+	if err != nil {
+		return err
+	}
+	rb, err := json.Marshal(wsEnv(pr.wsRecv, pr.wsRecvCut, pr.wsState, pr.wsErr))
+	if err != nil {
+		return err
+	}
+	pr.rec.ReqBody = string(sb)
+	pr.rec.RespBody = string(rb)
+	noise, why := ClassifyNoise(pr.rec)
+	pr.rec.Noise, pr.rec.NoiseReason = noise, why
+	if pr.rec.ID == 0 {
+		if err := bs.app.store.InsertRequest(pr.rec); err != nil {
+			return err
+		}
+		pr.wsInserted = true
+		pr.wsNoise = noise
+		rec.count++
+		if !noise {
+			rec.useful++
+		}
+	} else {
+		if err := bs.app.store.UpdateRequest(pr.rec); err != nil {
+			return err
+		}
+		if pr.wsNoise != noise {
+			if pr.wsNoise && !noise {
+				rec.useful++
+			} else if !pr.wsNoise && noise && rec.useful > 0 {
+				rec.useful--
+			}
+			pr.wsNoise = noise
+		}
+	}
+	pr.wsFlush = time.Now()
+	return nil
+}
+
+func wsEnv(frames []wsStoredFrame, cut bool, state, errMsg string) wsEnvelope {
+	if frames == nil {
+		frames = []wsStoredFrame{}
+	}
+	return wsEnvelope{V: 1, State: state, Error: errMsg, Truncated: cut, Frames: frames}
+}
+
+// fitWSFrames drops whole frames from the end until the marshalled envelope fits.
+func fitWSFrames(frames []wsStoredFrame, cut bool, state, errMsg string) ([]wsStoredFrame, bool) {
+	if frames == nil {
+		frames = []wsStoredFrame{}
+	} else {
+		frames = append([]wsStoredFrame{}, frames...)
+	}
+	for {
+		b, err := json.Marshal(wsEnv(frames, cut, state, errMsg))
+		if err == nil && len(b) <= maxBody {
+			return frames, cut
+		}
+		if len(frames) == 0 {
+			return frames, true
+		}
+		frames = frames[:len(frames)-1]
+		cut = true
+	}
+}
+
+// wsMetaReserve is the largest close/error metadata a later flush can add.
+// Frames are accepted only when they still fit with this reserve and with
+// truncated:true, so a later flush does not have to drop an earlier frame.
+func wsMetaReserve(sent bool) (state, errMsg string) {
+	if sent {
+		return "", ""
+	}
+	return "closed", strings.Repeat("\x01", 512)
+}
+
+func wsFramesFit(frames []wsStoredFrame, sent bool) bool {
+	state, errMsg := wsMetaReserve(sent)
+	b, err := json.Marshal(wsEnv(frames, true, state, errMsg))
+	return err == nil && len(b) <= maxBody
+}
+
+func (pr *pendingReq) addWSFrame(sent bool, f wsStoredFrame) {
+	if (sent && pr.wsSentCut) || (!sent && pr.wsRecvCut) {
+		return
+	}
+	cur := pr.wsRecv
+	if sent {
+		cur = pr.wsSent
+	}
+	next := append(append([]wsStoredFrame{}, cur...), f)
+	if !wsFramesFit(next, sent) {
+		if sent {
+			pr.wsSentCut = true
+		} else {
+			pr.wsRecvCut = true
+		}
+		return
+	}
+	if sent {
+		pr.wsSent = next
+	} else {
+		pr.wsRecv = next
+	}
+}
+
+func wsCaptureFrame(opcode int, data string) (wsStoredFrame, bool) {
+	f := wsStoredFrame{TS: time.Now().Format("15:04:05.000"), Op: opcode}
+	switch opcode {
+	case 1:
+		f.Text = data
+		return f, true
+	case 2:
+		f.Bytes = wsBinaryLen(data)
+		return f, true
+	default:
+		return wsStoredFrame{}, false
+	}
+}
+
+func wsBinaryLen(data string) int {
+	if data == "" {
+		return 0
+	}
+	if b, err := base64.StdEncoding.DecodeString(data); err == nil {
+		return len(b)
+	}
+	if b, err := base64.RawStdEncoding.DecodeString(data); err == nil {
+		return len(b)
+	}
+	return 0
+}
+
+func clipWSErr(s string) string {
+	if len(s) <= 512 {
+		return s
+	}
+	return s[:512]
+}
+
 // StartRecordingOn marks this session as recording and opens the start URL.
 func (bs *BrowserSession) StartRecordingOn(id int64, name, startURL string, fresh bool) error {
 	bs.mu.Lock()
@@ -623,7 +1000,13 @@ func (bs *BrowserSession) FinishRecording() *activeRecording {
 	}
 	bs.mu.Lock()
 	for k, pr := range rec.pending {
-		if pr.rec.Status != 0 {
+		if pr.ws {
+			if err := bs.persistWSLocked(rec, pr, true); err != nil {
+				if err2 := bs.persistWSLocked(rec, pr, true); err2 != nil {
+					log.Printf("结束录制时保存 WebSocket 失败: %v", err2)
+				}
+			}
+		} else if pr.rec.Status != 0 {
 			bs.storeLocked(rec, pr)
 		}
 		delete(rec.pending, k)

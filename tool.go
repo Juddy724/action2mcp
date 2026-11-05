@@ -624,7 +624,8 @@ func CookieHeader(cs []Cookie, rawURL string) (string, []Cookie) {
 		if !(p == cp || strings.HasPrefix(p, strings.TrimSuffix(cp, "/")+"/") || cp == "/") {
 			continue
 		}
-		if c.Secure && u.Scheme != "https" && host != "localhost" && host != "127.0.0.1" {
+		secureURL := u.Scheme == "https" || u.Scheme == "wss"
+		if c.Secure && !secureURL && host != "localhost" && host != "127.0.0.1" {
 			continue
 		}
 		if !c.Session && c.Expires > 0 && c.Expires < nowS {

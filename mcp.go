@@ -146,7 +146,7 @@ func textResult(text string, isErr bool) map[string]any {
 
 const instrCommon = "这些工具来自用户在浏览器中录制的真实业务操作（Action2MCP）。调用时会自动带上用户在专用浏览器里的登录态；登录过期时会按「登录中心」的配置自动重新登录（企业微信单点登录或配置管理里保存的账号）。流程包里如果加入了中间件（数据库 / Redis / 消息队列），会提供 db_query、redis_command、mq_send 等通用工具，参数 middleware 指定要操作哪一个；每个中间件的权限（增删改查等）由用户在控制台配置，未开启的权限会返回「无权限」错误，请不要尝试绕过。连接信息和密码不会提供给你。"
 
-const instrTiered = "工具按「流程包」分组、按需加载（阶梯式）：1) 先调用 list_packs 查看有哪些流程包及适用场景；2) 按当前任务选一个包，调用 load_pack 加载，结果里会返回该包工具的名称、说明和参数，同时这些工具会出现在你的工具列表里；3) 直接调用这些工具；如果你的工具列表没有刷新出来，用 call_pack_tool(tool, arguments) 调用；4) 用完可调用 unload_pack 卸载。Tools are grouped into packs and loaded on demand: call list_packs first, pick a pack for your task, load_pack it, then call its tools (or use call_pack_tool if your tool list does not refresh). "
+const instrTiered = "工具按「流程包」分组、按需加载（阶梯式）：1) 先调用 list_packs 查看有哪些流程包及适用场景；2) 按当前任务选一个包，调用 load_pack 加载。返回里的 guide 是这个包的使用说明，有内容时先按它确定工具顺序和参数来源，再调用工具；工具的名称、说明和参数也在这次返回里，并会出现在工具列表里；3) 如果你的工具列表没有刷新出来，用 call_pack_tool(tool, arguments) 调用；4) 用完可调用 unload_pack 卸载。Tools are grouped into packs and loaded on demand: call list_packs first, pick a pack, load_pack it, read its guide when present, then call its tools (or use call_pack_tool if your tool list does not refresh). "
 
 func (a *App) dispatchMCP(ctx context.Context, q rpcReq, mc *mcpCtx) (any, *rpcErr) {
 	switch q.Method {
@@ -164,6 +164,8 @@ func (a *App) dispatchMCP(ctx context.Context, q rpcReq, mc *mcpCtx) (any, *rpcE
 		instr := "只暴露当前在控制台中开启的流程包里的工具。" + instrCommon
 		if a.mcpMode() == ModeTiered {
 			instr = instrTiered + instrCommon
+		} else {
+			instr += a.flatPackGuides()
 		}
 		return map[string]any{
 			"protocolVersion": ver,
@@ -324,7 +326,7 @@ func entryToolDefs() []map[string]any {
 			"inputSchema": obj(map[string]any{}),
 			"annotations": map[string]any{"readOnlyHint": true}},
 		{"name": "load_pack", "title": "加载流程包",
-			"description": "【第二步 Step 2】加载一个流程包：返回该包所有工具的名称、说明和参数 schema（inputSchema），同时把这些工具加入你的工具列表（服务器会发送 notifications/tools/list_changed）。之后直接调用这些工具即可；如果你的工具列表没有出现它们，用 call_pack_tool 调用。\nLoad a pack by name or id. The result contains its tools (name, description, inputSchema) and they are added to tools/list. If your client does not refresh, use call_pack_tool.",
+			"description": "【第二步 Step 2】加载一个流程包：返回 guide（使用说明）、该包所有工具的名称、说明和参数 schema（inputSchema），同时把这些工具加入你的工具列表（服务器会发送 notifications/tools/list_changed）。guide 不是空的时候，先按它确定调用顺序和参数从哪来，再调用工具。如果工具列表没有出现它们，用 call_pack_tool 调用。\nLoad a pack by name or id. The result contains guide plus tools (name, description, inputSchema). When guide is not empty, follow it before calling tools. Tools are added to tools/list; if your client does not refresh, use call_pack_tool.",
 			"inputSchema": obj(map[string]any{"pack": map[string]any{"type": "string", "description": "流程包名称或 id（来自 list_packs）/ pack name or id"}}, "pack")},
 		{"name": "unload_pack", "title": "卸载流程包",
 			"description": "任务完成或换任务时卸载流程包，把它的工具从工具列表中移除，保持上下文干净。不填 pack 表示卸载全部。\nUnload a pack (or all packs when pack is empty) to keep your context small.",
@@ -567,17 +569,52 @@ func (a *App) mcpLoadPack(mc *mcpCtx, args map[string]any) any {
 		briefs = append(briefs, toolBrief{Name: d["name"].(string), Description: d["description"].(string), InputSchema: d["inputSchema"]})
 	}
 	loadedNames := a.loadedPackNames(mc.sess)
+	guide := a.packGuideText(p)
+	next := "这些工具已加入你的工具列表，可直接按名称调用；如果你的工具列表里没有它们，用 call_pack_tool(tool=工具名, arguments={...}) 调用。用完可 unload_pack。These tools are now in tools/list; if your client does not show them, use call_pack_tool."
+	if guide != "" {
+		next = "先按 guide 里的顺序和参数来源调用工具，不要只凭工具名猜测。这些工具已加入你的工具列表；如果列表里没有它们，用 call_pack_tool(tool=工具名, arguments={...}) 调用。用完可 unload_pack。Read guide before calling tools. If your client does not show them, use call_pack_tool."
+	}
+	if len(briefs) == 0 {
+		next = "这个流程包里还没有工具。请让用户在控制台把工具加入该流程包。"
+	}
 	res := map[string]any{
 		"loaded":       p.Name,
 		"pack_id":      p.ID,
+		"guide":        guide,
 		"tools":        briefs,
 		"loaded_packs": loadedNames,
-		"next":         "这些工具已加入你的工具列表，可直接按名称调用；如果你的工具列表里没有它们，用 call_pack_tool(tool=工具名, arguments={...}) 调用。用完可 unload_pack。These tools are now in tools/list; if your client does not show them, use call_pack_tool.",
-	}
-	if len(briefs) == 0 {
-		res["next"] = "这个流程包里还没有工具。请让用户在控制台把工具加入该流程包。"
+		"next":         next,
 	}
 	return textResult(string(compactJSON(res)), false)
+}
+
+// packGuideText is the pack guide as the model should see it. Secret values are masked.
+// {{secret.name}} references are left as written and are not resolved.
+func (a *App) packGuideText(p *Pack) string {
+	if p == nil {
+		return ""
+	}
+	return strings.TrimSpace(a.vault.Scrub(p.Guide))
+}
+
+// flatPackGuides appends each enabled pack's guide to the flat-mode connection instructions.
+func (a *App) flatPackGuides() string {
+	packs, _ := a.store.ListPacks()
+	var b strings.Builder
+	for _, p := range packs {
+		if p == nil || !p.Enabled {
+			continue
+		}
+		g := a.packGuideText(p)
+		if g == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "\n\n## 流程包「%s」(id=%d) 使用说明\n%s", p.Name, p.ID, g)
+	}
+	if b.Len() == 0 {
+		return ""
+	}
+	return "\n\n以下是已开启流程包的使用说明。调用其中的工具前，先按对应说明确定顺序和参数来源。" + b.String()
 }
 
 func (a *App) loadedPackNames(s *mcpSession) []string {

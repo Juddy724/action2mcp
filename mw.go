@@ -37,6 +37,9 @@ type MWConfig struct {
 	AllowedTables []string        `json:"allowed_tables"`
 	KeyPrefixes   []string        `json:"key_prefixes"`
 	Topics        []string        `json:"topics"`
+	URL           string          `json:"url,omitempty"`         // WebSocket address template, wss://…
+	WSMessages    []string        `json:"ws_messages,omitempty"` // text frames; {{command}} is the command
+	CommandAllow  []string        `json:"command_allow"`         // pod_exec allowlist, applied to each pipeline stage; empty = unrestricted. No omitempty: [] must survive a save.
 	MaxRows       int             `json:"max_rows"`
 	MaxResultKB   int             `json:"max_result_kb"`
 	TimeoutSec    int             `json:"timeout_sec"`
@@ -81,9 +84,13 @@ var mwPermDefs = map[string][]permDef{
 		{"send", "发送", false, "向 Topic / 队列发送消息"},
 		{"admin", "管理", false, "创建 Topic / 队列"},
 	},
+	"websocket": {
+		{"log", "查日志", true, "pod_read_log：只执行 tail 查看文件末尾"},
+		{"exec", "执行命令", false, "pod_exec：在远端 shell 执行命令。开启后还受「允许的命令」约束，管道的每一段也要在列表里；留空则不限制"},
+	},
 }
 
-var mwTypeLabel = map[string]string{"mysql": "MySQL / OceanBase", "redis": "Redis", "mq": "消息队列"}
+var mwTypeLabel = map[string]string{"mysql": "MySQL / OceanBase", "redis": "Redis", "mq": "消息队列", "websocket": "WebSocket"}
 var mqKindLabel = map[string]string{"rocketmq": "RocketMQ", "kafka": "Kafka", "rabbitmq": "RabbitMQ"}
 
 func permLabel(typ, key string) string {
@@ -161,7 +168,7 @@ func (m *Middleware) normalize() error {
 		return errors.New("中间件名称只能包含中文、字母、数字、下划线、短横线和点（最长 40 个字），例如「订单库」")
 	}
 	if _, ok := mwPermDefs[m.Type]; !ok {
-		return errors.New("中间件类型必须是 mysql、redis 或 mq")
+		return errors.New("中间件类型必须是 mysql、redis、mq 或 websocket")
 	}
 	c := &m.Config
 	c.Host = strings.TrimSpace(c.Host)
@@ -247,8 +254,46 @@ func (m *Middleware) normalize() error {
 				return errors.New(map[string]string{"rocketmq": "请填写 NameServer 地址", "kafka": "请填写 Broker 地址"}[c.MQKind])
 			}
 		}
+	case "websocket":
+		c.URL = strings.TrimSpace(c.URL)
+		if c.URL == "" {
+			return errors.New("请填写 WebSocket 地址")
+		}
+		if !strings.HasPrefix(c.URL, "ws://") && !strings.HasPrefix(c.URL, "wss://") {
+			return errors.New("WebSocket 地址必须以 ws:// 或 wss:// 开头")
+		}
+		c.WSMessages = cleanLines(c.WSMessages)
+		if len(c.WSMessages) == 0 {
+			c.WSMessages = defaultWSMessages()
+		}
+		if !strings.Contains(strings.Join(c.WSMessages, "\n"), "{{command}}") {
+			return errors.New("发送的文本帧里要有 {{command}}，调用时会替换成要执行的命令")
+		}
+		if c.CommandAllow == nil {
+			c.CommandAllow = []string{"tail", "head", "ls", "cat", "grep", "pwd"}
+		} else {
+			c.CommandAllow = cleanList(c.CommandAllow)
+		}
+		if c.TimeoutSec <= 0 {
+			c.TimeoutSec = 30
+		}
 	}
 	return nil
+}
+
+// cleanLines keeps non-empty lines. Unlike cleanList it does not split on commas or spaces,
+// so a JSON frame stays intact.
+func cleanLines(in []string) []string {
+	out := []string{}
+	for _, s := range in {
+		for _, line := range strings.Split(s, "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" {
+				out = append(out, line)
+			}
+		}
+	}
+	return out
 }
 
 // ---------- store ----------
@@ -489,6 +534,8 @@ func (a *App) TestMiddleware(ctx context.Context, m *Middleware) (string, error)
 		msg, err = a.testRedis(ctx, m)
 	case "mq":
 		msg, err = a.testMQ(ctx, m)
+	case "websocket":
+		msg, err = a.testWS(ctx, m)
 	default:
 		err = errors.New("未知类型")
 	}
@@ -545,6 +592,12 @@ func (a *App) mwSummary(m *Middleware) string {
 		if len(c.Topics) > 0 {
 			s += "；只允许：" + strings.Join(c.Topics, "、")
 		}
+	case "websocket":
+		if len(c.CommandAllow) > 0 {
+			s += "；pod_exec 只允许：" + strings.Join(c.CommandAllow, "、")
+		} else {
+			s += "；pod_exec 不限制命令"
+		}
 	}
 	if c.Description != "" {
 		s += "；说明：" + c.Description
@@ -587,6 +640,10 @@ func mwToolDefs() []mwToolDef {
 		{"mq_list_topics", "mq", "列出消息队列里的 Topic（需要「查看消息」权限；RabbitMQ 不支持列出队列）。", map[string]any{}, nil},
 		{"mq_create_topic", "mq", "创建 Topic / 队列（需要「管理」权限）。",
 			map[string]any{"topic": str("Topic / 队列名"), "partitions": map[string]any{"type": "integer", "description": "Kafka 分区数 / RocketMQ 队列数（可选）"}}, []string{"topic"}},
+		{"pod_read_log", "websocket", "在 WebSocket 终端里查看日志文件末尾（需要「查日志」权限）。服务端固定执行 tail，不会运行其他命令。lines 不填默认 100，最大 2000。连接参数（如 app_code、pod_name）填这个中间件地址里要求的那些。",
+			map[string]any{"file": str("日志文件路径，例如 BusinessException.log 或 /var/log/app.log"), "lines": map[string]any{"type": "integer", "description": "末尾行数，默认 100，最大 2000"}}, []string{"file"}},
+		{"pod_exec", "websocket", "在 WebSocket 终端里执行一条命令（需要「执行命令」权限，默认关闭）。配置了允许的命令时，管道可以用 | 连接，但每一段的命令都要在允许列表中，不能使用重定向或命令替换。允许列表为空时，命令会原样发到远端 shell。列表里缺的命令请在中间件配置里追加。find 只允许 -name、-mmin、-mtime、-type、-size、-maxdepth；cut 只允许 -c；rg 不能使用 --pre。",
+			map[string]any{"command": str("要执行的命令，例如 ls /app/logs"), "timeout": map[string]any{"type": "integer", "description": "超时秒数（可选，不能超过中间件里配置的超时）"}}, []string{"command"}},
 	}
 }
 
@@ -617,6 +674,15 @@ func (a *App) mwToolListFor(ms []*Middleware, packs map[int64][]string) []map[st
 			props[k] = v
 		}
 		req := append([]string{"middleware"}, d.Required...)
+		if d.Type == "websocket" {
+			for _, n := range wsPlaceholders(list) {
+				if _, ok := props[n]; ok {
+					continue
+				}
+				props[n] = map[string]any{"type": "string", "description": wsPlaceholderDesc(n)}
+				req = append(req, n)
+			}
+		}
 		out = append(out, map[string]any{
 			"name":        d.Name,
 			"title":       d.Name,
@@ -719,6 +785,10 @@ func argInt(args map[string]any, k string, def int) int {
 	switch v := args[k].(type) {
 	case float64:
 		return int(v)
+	case int:
+		return v
+	case int64:
+		return int(v)
 	case string:
 		var n int
 		if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
@@ -759,6 +829,8 @@ func (a *App) callMWTool(ctx context.Context, client, tool string, args map[stri
 		return a.callRedis(ctx, c, args)
 	case "mq":
 		return a.callMQ(ctx, c, args)
+	case "websocket":
+		return a.callWS(ctx, c, args)
 	}
 	return "未知工具", true
 }

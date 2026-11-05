@@ -287,7 +287,7 @@ func TestMigrateFrom030(t *testing.T) {
 		t.Fatal(err)
 	}
 	packs, _ := st.ListPacks()
-	if len(packs) != 1 || packs[0].Name != "老包" || packs[0].Scenarios != "" || len(packs[0].ToolIDs) != 1 {
+	if len(packs) != 1 || packs[0].Name != "老包" || packs[0].Scenarios != "" || packs[0].Guide != "" || len(packs[0].ToolIDs) != 1 {
 		t.Fatalf("packs after migration: %+v", packs)
 	}
 	packs[0].Scenarios = "查订单"
