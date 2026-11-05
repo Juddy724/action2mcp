@@ -19,7 +19,7 @@ func wecomRecordingExample() (Recording, []ReqRecord) {
 		"https://login.work.weixin.qq.com/wwlogin/sso/login?redirect_uri=example-secret",
 		"https://bridge.example.net/api/weworkcore/connect/oauth2/loginAndAuthorize?code=example-secret",
 		"https://auth.corp.example.com/oauth2/wecom?token=example-secret",
-		"https://auth.corp.example.com/17workweb/ssologin/oauthCallback?code=example-secret&state=example-secret",
+		"https://auth.corp.example.com/sso/oauth/callback?code=example-secret&state=example-secret",
 		"https://crm.corp.example.com/v2/?code=example-secret",
 	}
 	requests := make([]ReqRecord, 0, len(urls))
