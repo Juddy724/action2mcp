@@ -6,12 +6,12 @@
 
 最新版本：[Releases 页面](https://github.com/Juddy724/action2mcp/releases/latest)
 
-| 平台 | 安装包 (v0.4.3) |
+| 平台 | 安装包 (v0.4.4) |
 |---|---|
-| macOS (Apple 芯片) | [Action2MCP-0.4.3-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.4.3/Action2MCP-0.4.3-macOS-AppleSilicon.zip) |
-| macOS (Intel) | [Action2MCP-0.4.3-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.4.3/Action2MCP-0.4.3-macOS-Intel.zip) |
-| Windows x64 | [Action2MCP-0.4.3-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.4.3/Action2MCP-0.4.3-Windows-x64.zip) |
-| Linux x64 | [Action2MCP-0.4.3-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.4.3/Action2MCP-0.4.3-Linux-x64.zip) |
+| macOS (Apple 芯片) | [Action2MCP-0.4.4-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.4.4/Action2MCP-0.4.4-macOS-AppleSilicon.zip) |
+| macOS (Intel) | [Action2MCP-0.4.4-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.4.4/Action2MCP-0.4.4-macOS-Intel.zip) |
+| Windows x64 | [Action2MCP-0.4.4-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.4.4/Action2MCP-0.4.4-Windows-x64.zip) |
+| Linux x64 | [Action2MCP-0.4.4-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.4.4/Action2MCP-0.4.4-Linux-x64.zip) |
 
 解压后运行 `start.command`（macOS）、`start.bat`（Windows）或 `start.sh`（Linux），然后打开 http://localhost:7788 。详细说明见安装包里的 README.md。
 
