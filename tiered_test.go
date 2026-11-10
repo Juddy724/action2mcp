@@ -145,12 +145,13 @@ func TestTieredDiscovery(t *testing.T) {
 	txt, _ := c.tool("list_packs", map[string]any{})
 	var lp struct {
 		Packs []struct {
-			ID         int64    `json:"id"`
-			Name       string   `json:"name"`
-			Scenarios  string   `json:"scenarios"`
-			ToolCount  int      `json:"tool_count"`
-			Middleware []string `json:"middleware"`
-			Loaded     bool     `json:"loaded"`
+			ID              int64    `json:"id"`
+			Name            string   `json:"name"`
+			Scenarios       string   `json:"scenarios"`
+			ToolCount       int      `json:"tool_count"`
+			Middleware      []string `json:"middleware"`
+			MiddlewareCount int      `json:"middleware_count"`
+			Loaded          bool     `json:"loaded"`
 		} `json:"packs"`
 	}
 	if err := json.Unmarshal([]byte(txt), &lp); err != nil {
@@ -158,7 +159,7 @@ func TestTieredDiscovery(t *testing.T) {
 	}
 	var echoOK, recOK bool
 	for _, p := range lp.Packs {
-		if p.Name == "回显包" && p.Scenarios == "需要回显时" && p.ToolCount == 4 && !p.Loaded {
+		if p.Name == "回显包" && p.Scenarios == "需要回显时" && p.ToolCount == 1 && p.MiddlewareCount == 1 && !p.Loaded {
 			echoOK = true
 		}
 		if p.Name == "录制分析" && p.ToolCount >= 6 && !p.Loaded {
