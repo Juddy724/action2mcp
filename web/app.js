@@ -129,36 +129,93 @@ async function pageRecordings(app) {
 }
 async function delRec(id) { if (!confirm('删除这条录制？（已保存的工具不受影响）')) return; await api('DELETE', '/api/recordings/' + id); render(); }
 
-let REC_STATE = { showNoise: false, sel: 0, loginResults: {} };
+let REC_STATE = { showNoise: false, sel: 0, loginResults: {}, requests: {} };
+const NOTE_CATEGORIES = { query: '查询', write: '写操作', auth: '登录认证', config: '配置枚举', page: '页面', noise: '无关' };
+function requestOverrideHint(q) {
+  const override = q.note?.noise_override;
+  if (override == null || override === q.noise_heuristic) return '';
+  return (q.note.source === 'agent' ? 'AI 判定为' : '手动判定为') + (override ? '无关' : '业务请求');
+}
+function requestNoteHTML(q, detail = false) {
+  const n = q.note, hint = requestOverrideHint(q);
+  return `<div class="request-note" data-note-id="${q.id}" data-note-detail="${detail}">
+    <button class="note-purpose" onclick="event.stopPropagation();editRequestNote(this,${q.id})" title="点击编辑作用说明" aria-label="编辑作用说明">${n?.purpose ? esc(n.purpose) : '<span class="muted">未标注</span>'}</button>
+    <div class="note-meta">${n?.category ? `<span class="badge note-cat-${esc(n.category)}">${esc(NOTE_CATEGORIES[n.category] || n.category)}</span>` : ''}${n?.useful === true ? '<span class="note-useful" title="完成流程所需的请求" aria-label="流程需要">★</span>' : ''}</div>
+    ${hint ? `<div class="note-override small">${esc(hint)}</div>` : ''}
+    ${detail && n ? `<div class="muted small">${n.source === 'agent' ? 'AI 标注' : '手动标注'} · ${esc(n.updated_at)}${n.useful === false ? ' · 流程不需要' : ''}</div>` : ''}
+  </div>`;
+}
+function editRequestNote(btn, id) {
+  const q = REC_STATE.requests[id] || CUR_REQ?.request;
+  if (!q || q.id !== id) return;
+  const n = q.note || { purpose: '', category: q.is_login ? 'auth' : q.resource_type === 'Document' ? 'page' : ['GET', 'HEAD', 'WS'].includes(q.method) ? 'query' : 'write' };
+  const box = btn.closest('[data-note-id]');
+  const triOptions = (value, labels) => [['', labels[0]], ['true', labels[1]], ['false', labels[2]]].map(([v, label]) => `<option value="${v}" ${String(value ?? '') === v ? 'selected' : ''}>${label}</option>`).join('');
+  box.innerHTML = `<form class="note-editor" onclick="event.stopPropagation()" onsubmit="event.preventDefault();saveRequestNote(event,${id})" onkeydown="if(event.key==='Escape'){event.stopPropagation();cancelRequestNote(this,${id})}">
+    <label>作用说明<textarea name="purpose" placeholder="用一句话说明这个请求做什么，例如：按订单号查询处理进度">${esc(n.purpose)}</textarea></label>
+    <label>类别<select name="category">${Object.entries(NOTE_CATEGORIES).map(([k, label]) => `<option value="${k}" ${n.category === k ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+    <label>流程是否需要<select name="useful">${triOptions(n.useful, ['未判断', '★ 流程需要', '流程不需要'])}</select></label>
+    <label>放在哪个列表<select name="noise_override">${triOptions(n.noise_override, ['自动判断', '无关请求', '业务请求'])}</select></label>
+    <div class="row"><button type="submit" class="pri sm">保存</button><button type="button" class="sm" onclick="cancelRequestNote(this,${id})">取消</button>${q.note ? `<button type="button" class="sm danger" onclick="deleteRequestNote(this,${id})" title="清除说明和判定，恢复自动分类">清除标注</button>` : ''}</div>
+  </form>`;
+  $('textarea', box).focus();
+}
+function cancelRequestNote(el, id) {
+  const box = el.closest('[data-note-id]');
+  const q = REC_STATE.requests[id] || CUR_REQ?.request;
+  if (q) box.outerHTML = requestNoteHTML(q, box.dataset.noteDetail === 'true');
+}
+async function saveRequestNote(event, id) {
+  const form = event.currentTarget, fields = new FormData(form);
+  const tri = name => fields.get(name) === '' ? null : fields.get(name) === 'true';
+  const btn = $('button[type="submit"]', form);
+  btn.disabled = true;
+  try {
+    const n = await api('PUT', `/api/requests/${id}/note`, { purpose: fields.get('purpose').trim(), category: fields.get('category'), useful: tri('useful'), noise_override: tri('noise_override') });
+    REC_STATE.sel = id;
+    if (n.noise_override === true) REC_STATE.showNoise = true;
+    await render();
+    toast('作用说明已保存');
+  } catch (e) { toast('保存失败：' + e.message, 5000); btn.disabled = false; }
+}
+async function deleteRequestNote(btn, id) {
+  btn.disabled = true;
+  try { await api('DELETE', `/api/requests/${id}/note`); await render(); toast('已清除标注，恢复自动分类'); }
+  catch (e) { toast('清除失败：' + e.message, 5000); btn.disabled = false; }
+}
 async function pageRecording(app, id) {
   const d = await api('GET', '/api/recordings/' + id);
   const reqs = d.requests;
+  REC_STATE.requests = Object.fromEntries(reqs.map(q => [q.id, q]));
   const stoppedLogin = STATUS.last_stop?.recording_id === id ? STATUS.last_stop.login_detection : null;
   const login = REC_STATE.loginResults[id] || (stoppedLogin?.action !== 'none' ? stoppedLogin : null);
   const useful = reqs.filter(r => !r.noise), noise = reqs.filter(r => r.noise);
-  const reasons = {}; noise.forEach(r => reasons[r.noise_reason] = (reasons[r.noise_reason] || 0) + 1);
+  const reasons = {}; noise.forEach(r => { const reason = requestOverrideHint(r) || r.noise_reason || '无关请求'; reasons[reason] = (reasons[reason] || 0) + 1; });
   const row = r => `<tr class="click ${REC_STATE.sel === r.id ? 'sel' : ''}" data-id="${r.id}" onclick="selectReq(${r.id})">
       <td>${methodBadge(r.method)}</td>
-      <td><div class="url mono" title="${esc(r.url)}">${esc(shortURL(r.url))}</div><div class="muted small">${esc(hostOf(r.url))} · ${esc(r.resource_type)}${r.noise ? ' · ' + esc(r.noise_reason) : ''}${r.is_login ? ' · <span class="badge login-badge">登录请求</span>' : ''}</div></td>
+      <td>${requestNoteHTML(r)}</td>
+      <td class="request-path"><div class="url mono" title="${esc(r.url)}">${esc(shortURL(r.url))}</div><div class="muted small">${esc(hostOf(r.url))} · ${esc(r.resource_type)}${r.noise && !requestOverrideHint(r) ? ' · ' + esc(r.noise_reason) : ''}${r.is_login ? ' · <span class="badge login-badge">登录请求</span>' : ''}</div></td>
       <td class="${r.status >= 200 && r.status < 400 ? 'st-ok' : 'st-bad'}">${r.status || '-'}</td>
       <td class="small muted">${fmtSize(r.resp_size)}</td></tr>`;
+  const table = rows => `<table class="request-table"><colgroup><col class="request-method-col"><col class="request-purpose-col"><col><col class="request-status-col"><col class="request-size-col"></colgroup><thead><tr><th>方法</th><th>作用</th><th>接口地址</th><th>状态</th><th>响应大小</th></tr></thead><tbody>${rows.map(row).join('')}</tbody></table>`;
   app.innerHTML = `
   <div class="row" style="margin-bottom:12px"><a class="btn" href="#/recordings">← 返回</a><h2 style="margin:0">${esc(d.recording.name)}</h2>
     <span class="muted small">${esc(d.recording.created_at)} · ${d.recording.status === 'recording' ? '录制中…' : '已完成'}</span>
     <div class="row" style="margin-left:auto"><button onclick="detectRecLogin(this,${id})" ${d.recording.status === 'recording' ? 'disabled' : ''} title="从录制中的企业微信登录流程识别并补充登录配置">加入登录中心</button><button onclick="render()">刷新</button></div></div>
   ${login ? `<div class="${login.detected && login.action !== 'suggestion' ? 'ok-notice' : 'notice'}" id="recording-login-notice" role="status">${esc(login.message)}${login.site_id ? '。<a href="#/sites">查看登录中心 →</a>' : ''}</div>` : ''}
-  <div class="split">
-    <div class="card" style="padding:8px 8px">
-      <div style="padding:8px 10px" class="row"><b>可能的业务请求（${useful.length}）</b><span class="muted small">点一条查看详情，再「保存为工具」</span></div>
-      ${useful.length ? `<table><tbody>${useful.map(row).join('')}</tbody></table>` : '<div class="empty">没有识别出业务请求，可以展开下面的噪音请求看看。</div>'}
-      <div class="collapse-h" onclick="REC_STATE.showNoise=!REC_STATE.showNoise;render()">${REC_STATE.showNoise ? '▾' : '▸'} 已自动折叠 ${noise.length} 个噪音请求
-        <span class="small">${Object.entries(reasons).map(([k, v]) => esc(k) + ' ' + v).join(' · ')}</span></div>
-      ${REC_STATE.showNoise && noise.length ? `<table style="opacity:.8"><tbody>${noise.map(row).join('')}</tbody></table>` : ''}
+  ${d.recording.summary ? `<div class="card recording-summary"><h3>这次操作的作用</h3><p>${esc(d.recording.summary)}</p></div>` : ''}
+  <div class="split recording-split">
+    <div class="card request-lists">
+      <div style="padding:8px 10px" class="row"><b>可能的业务请求（${useful.length}）</b><span class="muted small">点击作用可编辑说明；点击接口查看详情，再「保存为工具」</span></div>
+      ${useful.length ? table(useful) : '<div class="empty">没有识别出业务请求，可以展开下面的无关请求看看。</div>'}
+      <button class="collapse-h" onclick="REC_STATE.showNoise=!REC_STATE.showNoise;render()" aria-expanded="${REC_STATE.showNoise}">${REC_STATE.showNoise ? '▾' : '▸'} 无关请求（${noise.length}）
+        <span class="small">${Object.entries(reasons).map(([k, v]) => esc(k) + ' ' + v).join(' · ')}</span></button>
+      ${REC_STATE.showNoise && noise.length ? table(noise) : ''}
     </div>
     <div class="card detail" id="req-detail"><div class="empty">← 选择左侧的请求查看详情</div></div>
   </div>`;
-  if (REC_STATE.sel && reqs.some(r => r.id === REC_STATE.sel)) selectReq(REC_STATE.sel);
-  else if (useful.length) selectReq(useful[0].id);
+  if (REC_STATE.sel && reqs.some(r => r.id === REC_STATE.sel)) await selectReq(REC_STATE.sel);
+  else if (useful.length) await selectReq(useful[0].id);
 }
 async function detectRecLogin(btn, id) {
   btn.disabled = true; btn.textContent = '正在识别…';
@@ -191,10 +248,11 @@ async function selectReq(id) {
     <div class="row">${methodBadge(q.method)}<b class="${q.status < 400 ? 'st-ok' : 'st-bad'}">${q.status || '-'}</b><span class="muted small">${esc(q.resource_type)} · ${esc(q.ts)}</span>
       ${ws ? `<button class="pri" style="margin-left:auto" onclick="saveRecordedWS()">保存为 WebSocket 连接</button>` : `<button class="pri" style="margin-left:auto" onclick="openToolEditorFromReq()">保存为工具</button>`}</div>
     <div class="mono small" style="margin:8px 0;word-break:break-all">${esc(q.url)}</div>
+    <section class="request-note-panel" aria-label="接口作用说明"><h3>作用说明</h3>${requestNoteHTML(q, true)}</section>
     ${ws ? `<div class="notice">这是一条 WebSocket 连接。发出的消息在「发出的消息」里，收到的在「收到的消息」里。保存为连接时只带上地址，录到的帧只作对照，需要自己写一条带 <code>{{command}}</code> 的模板。登录仍用「登录中心」的 Cookie。</div>` : ''}
     ${q.is_login ? `<div class="ok-notice login-box">🔑 这看起来是一个<b>登录请求</b>（密码已在页面上隐藏）。保存后，账号密码会加密存进「配置管理」，以后这个网站登录过期时会自动用它重新登录，AI 看不到账号密码。
       <div class="row" style="margin-top:8px"><button class="pri" onclick="saveLoginReq(${q.id})">保存为登录配置</button></div></div>` : ''}
-    ${q.noise && !q.is_login ? `<div class="notice">已被识别为噪音：${esc(q.noise_reason)}${ws ? '' : '（如果它其实有用，也可以保存为工具）'}</div>` : ''}
+    ${q.noise ? `<div class="notice">${esc(requestOverrideHint(q) || ('已被识别为无关请求：' + q.noise_reason))}${ws ? '' : '（如果它其实有用，也可以保存为工具）'}</div>` : ''}
     <div class="tabs"><button class="on" data-t="body" onclick="reqTab(this)">${ws ? '发出的消息' : '请求体'}</button><button data-t="resp" onclick="reqTab(this)">${ws ? '收到的消息' : '响应'}</button><button data-t="hdr" onclick="reqTab(this)">请求头</button><button data-t="rhdr" onclick="reqTab(this)">响应头</button></div>
     <div data-p="body">${q.req_body ? `<pre>${ws ? wsRender(q.req_body, '→') : esc(pretty(q.req_body))}</pre>` : '<div class="muted small">无请求体</div>'}</div>
     <div data-p="resp" hidden><pre>${ws ? wsRender(q.resp_body, '←') : (esc(pretty(q.resp_body)) || '(空)')}</pre></div>
@@ -444,6 +502,13 @@ async function createPack() {
   const name = $('#p-name').value.trim(); if (!name) { toast('请输入流程包名称'); return; }
   try { await api('POST', '/api/packs', { name, description: $('#p-desc').value.trim(), scenarios: $('#p-scen').value.trim(), enabled: true, tool_ids: [] }); render(); } catch (e) { toast(e.message); }
 }
+async function setRecAnalysis(on) {
+  try {
+    await api('PUT', '/api/settings', { rec_analysis: on });
+    toast(on ? '已开启录制分析：AI 可以识别录制并保存成工具' : '已关闭录制分析：AI 不再看到这些工具');
+    render();
+  } catch (e) { toast(e.message); render(); }
+}
 async function setMode(m) {
   await api('PUT', '/api/settings', { mcp_mode: m });
   toast(m === 'flat' ? '已切换为平铺模式：AI 直接看到所有已开启流程包的工具' : '已切换为阶梯模式：AI 先列出流程包，再按需加载', 5000);
@@ -499,6 +564,8 @@ async function delPack(id) { if (!confirm('删除这个流程包？（工具本�
 async function pageSettings(app) {
   await refreshStatus();
   const creds = await api('GET', '/api/credentials');
+  const settings = await api('GET', '/api/settings');
+  const recOn = !!settings.rec_analysis;
   const s = STATUS;
   const exe = s.exe_path || 'a2m';
   const mcpURL = s.mcp_url;
@@ -514,6 +581,14 @@ async function pageSettings(app) {
     <h3 style="margin-top:14px">Claude Code</h3><pre>claude mcp add --transport http action2mcp ${esc(mcpURL)}</pre>
     <p class="muted small">AI 调用工具时，Action2MCP 必须在运行（stdio 方式会自动在后台启动它）。</p>
     <p class="small">当前 MCP 暴露模式：<b>${s.mcp_mode === 'flat' ? '平铺模式' : '阶梯模式'}</b>（在「流程包」页切换）。${s.mcp_mode === 'flat' ? '' : 'AI 会先调用 <code>list_packs</code> 查看流程包，再 <code>load_pack</code> 加载需要的那个；客户端不刷新工具列表时用 <code>call_pack_tool</code> 调用。'}</p></div>
+  <div class="card"><h2>录制分析</h2>
+    <div class="row">
+      <label class="switch"><input type="checkbox" ${recOn ? 'checked' : ''} onchange="setRecAnalysis(this.checked)"><span></span></label>
+      <div class="grow"><b>让 AI 分析录制</b>
+        <div class="muted small">默认开启。AI 可以通过内置流程包「录制分析」列出录制、查看请求、给接口写作用，并把完成流程所需的最少请求保存成工具。对 AI 说「帮我把录制记录里的某某流程识别一下并保存成工具」即可。如果没说保存到哪个流程包，AI 会先问你。关闭后这些 rec_* 工具不再出现，也无法调用。返回给 AI 的内容会去掉 Cookie、Token 和密码。</div>
+      </div>
+    </div>
+  </div>
   <div class="card"><h2>导出 / 导入</h2>
     <p class="muted">导出的 .a2m 文件只有工具定义、流程包、登录配置和配置项的<b>名称</b>，<b>不包含任何 Cookie、Token、登录态，也不包含密码等配置值</b>，可以放心发给同事。对方导入后，在「配置管理」里填上自己的账号密码（或用企业微信登录一次）就能用。</p>
     <div class="row"><a class="btn pri" style="background:var(--pri);color:#fff" href="/api/export">⬇ 导出 .a2m</a>

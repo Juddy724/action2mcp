@@ -156,7 +156,16 @@ func TestTieredDiscovery(t *testing.T) {
 	if err := json.Unmarshal([]byte(txt), &lp); err != nil {
 		t.Fatalf("list_packs not JSON: %s", txt)
 	}
-	if len(lp.Packs) != 1 || lp.Packs[0].Name != "回显包" || lp.Packs[0].Scenarios != "需要回显时" || lp.Packs[0].ToolCount != 4 || lp.Packs[0].Loaded {
+	var echoOK, recOK bool
+	for _, p := range lp.Packs {
+		if p.Name == "回显包" && p.Scenarios == "需要回显时" && p.ToolCount == 4 && !p.Loaded {
+			echoOK = true
+		}
+		if p.Name == "录制分析" && p.ToolCount >= 6 && !p.Loaded {
+			recOK = true
+		}
+	}
+	if len(lp.Packs) != 2 || !echoOK || !recOK {
 		t.Fatalf("list_packs: %s", txt)
 	}
 
