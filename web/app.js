@@ -709,11 +709,11 @@ async function pageMiddleware(app) {
     <table><thead><tr><th>名称</th><th>类型 / 地址</th><th>权限</th><th>范围 / 限制</th><th>流程包</th><th></th></tr></thead><tbody>
     ${MW.items.map(m => `<tr>
       <td><b>${esc(m.name)}</b><div class="muted small">${esc(m.config.description || '')}</div></td>
-      <td><span class="mw-type t-${esc(m.type)}">${esc(m.kind_label)}</span><div class="mono small">${esc(mwAddr(m))}${m.config.database ? ' / ' + esc(m.config.database) : ''}</div>
+      <td class="mw-addr"><span class="mw-type t-${esc(m.type)}">${esc(m.kind_label)}</span><div class="mono small">${esc(mwAddr(m))}${m.config.database ? ' / ' + esc(m.config.database) : ''}</div>
         <div class="small">${m.type === 'websocket' ? '<span class="muted">使用登录中心的 Cookie</span>' : (m.config.password_ref ? (m.password_set ? '🔒 密码已保存' : '<span class="st-bad">密码待填写</span>') : '<span class="muted">无密码</span>')}</div></td>
       <td>${(MW.perm_defs[m.type] || []).map(d => `<span class="perm ${m.config.perms[d.key] ? 'on' : ''}">${esc(d.label)}</span>`).join('')}</td>
       <td class="small">${esc(mwScope(m))}</td>
-      <td class="small">${m.packs.length ? m.packs.map(esc).join('、') : '<span class="muted">未加入</span>'}</td>
+      <td class="small mw-packs">${m.packs.length ? m.packs.map(esc).join('、') : '<span class="muted">未加入</span>'}</td>
       <td style="text-align:right;white-space:nowrap"><button onclick="testMWSaved(${m.id},this)">测试连接</button> <button onclick="editMW(${m.id})">编辑</button> <button class="danger" onclick="delMW(${m.id})">删除</button></td></tr>`).join('')}
     </tbody></table>`}
     <div class="row" style="margin-top:12px"><button class="pri" onclick="editMW(0,'mysql')">＋ 数据库</button><button class="pri" onclick="editMW(0,'redis')">＋ Redis</button><button class="pri" onclick="editMW(0,'mq')">＋ 消息队列</button><button class="pri" onclick="editMW(0,'websocket')">＋ WebSocket</button></div>

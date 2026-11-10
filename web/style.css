@@ -10,7 +10,7 @@ nav{display:flex;gap:4px}
 nav a{padding:6px 14px;border-radius:8px;color:var(--text);text-decoration:none}
 nav a.active,nav a:hover{background:var(--pri2);color:var(--pri)}
 #statusbar{margin-left:auto;display:flex;align-items:center;gap:10px;font-size:13px}
-main{max-width:1180px;margin:24px auto;padding:0 24px}
+main{max-width:1600px;margin:24px auto;padding:0 24px}
 h2{font-size:20px;margin:0 0 16px}
 h3{font-size:15px;margin:0 0 10px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px;margin-bottom:16px}
@@ -32,6 +32,9 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px}
 table{width:100%;border-collapse:collapse}
 th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
+th{white-space:nowrap}
+td.mw-packs{min-width:140px}
+td.mw-addr .mono{word-break:break-all}
 th{font-weight:600;color:var(--muted);font-size:12px}
 tr.click{cursor:pointer}
 tr.click:hover td{background:#fafbff}
