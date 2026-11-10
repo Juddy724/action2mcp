@@ -164,6 +164,9 @@ func (a *App) dispatchMCP(ctx context.Context, q rpcReq, mc *mcpCtx) (any, *rpcE
 		instr := "只暴露当前在控制台中开启的流程包里的工具。" + instrCommon
 		if a.mcpMode() == ModeTiered {
 			instr = instrTiered + instrCommon
+			if a.recAnalysisEnabled() {
+				instr += "\n\n" + recTieredHint
+			}
 		} else {
 			instr += a.flatPackGuides()
 		}
@@ -262,6 +265,9 @@ func (a *App) invokeTool(ctx context.Context, mc *mcpCtx, name string, args map[
 	if mc.sess != nil {
 		client = mc.sess.clientName()
 	}
+	if isRecTool(name) {
+		return a.callRecTool(mc, name, args), nil
+	}
 	if _, ok := isMWTool(name); ok {
 		text, isErr := a.callMWTool(ctx, client, name, args)
 		return textResult(text, isErr), nil
@@ -347,6 +353,9 @@ func (a *App) recordedToolDefs(tools []*Tool, packNames map[int64][]string, skip
 		if _, ok := isMWTool(t.Name); ok {
 			continue // built-in middleware tool names take precedence
 		}
+		if isRecTool(t.Name) {
+			continue // native 录制分析 handlers own these names
+		}
 		if skipReserved && isEntryTool(t.Name) {
 			continue
 		}
@@ -373,14 +382,21 @@ func (a *App) toolList(sess *mcpSession) []map[string]any {
 	if a.mcpMode() == ModeFlat {
 		tools, _ := a.store.ExposedTools()
 		list := a.recordedToolDefs(tools, a.packNamesByTool(), false)
-		return append(list, a.mwToolList()...)
+		list = append(list, a.mwToolList()...)
+		if a.recAnalysisEnabled() {
+			list = append(list, recToolDefs()...)
+		}
+		return list
 	}
 	list := entryToolDefs()
 	if sess == nil {
 		return list
 	}
 	loaded := sess.loadedIDs()
-	if len(loaded) == 0 {
+	if a.recAnalysisEnabled() && loaded[recPackID] {
+		list = append(list, recToolDefs()...)
+	}
+	if len(loaded) == 0 || (len(loaded) == 1 && loaded[recPackID]) {
 		return list
 	}
 	packs, _ := a.store.ListPacks()
@@ -389,6 +405,9 @@ func (a *App) toolList(sess *mcpSession) []map[string]any {
 		if p.Enabled && loaded[p.ID] {
 			sel = append(sel, p)
 		}
+	}
+	if len(sel) == 0 {
+		return list
 	}
 	return append(list, a.packToolDefs(sel)...)
 }
@@ -455,16 +474,24 @@ func (a *App) findEnabledPack(ref string) (*Pack, []*Pack) {
 				return p, en
 			}
 		}
+		return nil, en
 	}
-	for _, p := range en {
+	for _, p := range packs {
 		if p.Name == ref {
+			if !p.Enabled {
+				return nil, en
+			}
 			return p, en
 		}
 	}
+	var matches []*Pack
 	for _, p := range en {
 		if strings.EqualFold(p.Name, ref) {
-			return p, en
+			matches = append(matches, p)
 		}
+	}
+	if len(matches) == 1 {
+		return matches[0], en
 	}
 	return nil, en
 }
@@ -502,6 +529,7 @@ func (a *App) mcpListPacks(mc *mcpCtx) any {
 		ToolNames   []string `json:"tool_names,omitempty"`
 		Middleware  []string `json:"middleware,omitempty"`
 		Loaded      bool     `json:"loaded"`
+		Builtin     bool     `json:"builtin,omitempty"`
 	}
 	out := []packOut{}
 	for _, p := range packs {
@@ -531,6 +559,13 @@ func (a *App) mcpListPacks(mc *mcpCtx) any {
 		}
 		out = append(out, po)
 	}
+	if a.recAnalysisEnabled() {
+		names := recToolNames()
+		out = append(out, packOut{
+			ID: recPackID, Name: recPackName, Description: recPackBlurb, Scenarios: recPackScenarios,
+			ToolCount: len(names), ToolNames: names, Loaded: loaded[recPackID], Builtin: true,
+		})
+	}
 	next := "根据当前任务选择相关的流程包，调用 load_pack(pack=名称或id) 加载后再使用其中的工具。Pick the pack(s) relevant to your task and call load_pack."
 	if len(out) == 0 {
 		next = "当前没有开启的流程包。请让用户在 Action2MCP 控制台「流程包」页开启需要的流程包。No pack is enabled; ask the user to enable one in the Action2MCP console."
@@ -551,6 +586,9 @@ func (a *App) mcpLoadPack(mc *mcpCtx, args map[string]any) any {
 	}
 	if strings.TrimSpace(ref) == "" {
 		ref = argStr(args, "id")
+	}
+	if a.isRecPackRef(ref) {
+		return a.mcpLoadRecPack(mc)
 	}
 	p, en := a.findEnabledPack(ref)
 	if p == nil {
@@ -611,6 +649,9 @@ func (a *App) flatPackGuides() string {
 		}
 		fmt.Fprintf(&b, "\n\n## 流程包「%s」(id=%d) 使用说明\n%s", p.Name, p.ID, g)
 	}
+	if a.recAnalysisEnabled() {
+		fmt.Fprintf(&b, "\n\n## 内置流程包「%s」\n%s", recPackName, recPackGuide)
+	}
 	if b.Len() == 0 {
 		return ""
 	}
@@ -625,6 +666,9 @@ func (a *App) loadedPackNames(s *mcpSession) []string {
 		if p.Enabled && loaded[p.ID] {
 			out = append(out, p.Name)
 		}
+	}
+	if a.recAnalysisEnabled() && loaded[recPackID] {
+		out = append(out, recPackName)
 	}
 	sort.Strings(out)
 	return out
@@ -646,14 +690,31 @@ func (a *App) mcpUnloadPack(mc *mcpCtx, args map[string]any) any {
 		}
 		return textResult(`{"unloaded":"全部 / all","loaded_packs":[]}`, false)
 	}
+	if a.isRecPackRef(ref) {
+		return a.mcpUnloadRecPack(mc)
+	}
 	// resolve among all packs (a pack disabled after loading can still be unloaded)
 	packs, _ := a.store.ListPacks()
 	var p *Pack
 	id, idErr := strconv.ParseInt(ref, 10, 64)
 	for _, x := range packs {
-		if (idErr == nil && x.ID == id) || x.Name == ref || strings.EqualFold(x.Name, ref) {
+		if (idErr == nil && x.ID == id) || (idErr != nil && x.Name == ref) {
 			p = x
 			break
+		}
+	}
+	if p == nil && idErr != nil {
+		var matches []*Pack
+		for _, x := range packs {
+			if strings.EqualFold(x.Name, ref) {
+				matches = append(matches, x)
+			}
+		}
+		if len(matches) == 1 {
+			p = matches[0]
+		}
+		if len(matches) > 1 {
+			return textResult("流程包名称匹配不唯一，请使用精确名称或 id。选项："+packNameList(matches), true)
 		}
 	}
 	if p == nil {

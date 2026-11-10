@@ -106,6 +106,31 @@ table.audit .act{max-width:420px;overflow:hidden;text-overflow:ellipsis;white-sp
 .pack-meta input{width:100%}
 .pack-guide{margin-top:10px}
 .pack-guide textarea{width:100%;min-height:88px;margin-top:4px}
+.recording-summary p{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
+.recording-split{grid-template-columns:minmax(0,1.4fr) minmax(320px,1fr)}
+.request-lists{min-width:0;padding:8px;overflow-x:auto}
+.request-table{table-layout:fixed;min-width:620px}
+.request-method-col{width:88px}.request-purpose-col{width:34%}.request-status-col{width:56px}.request-size-col{width:78px}
+.request-path .url{max-width:none}
+.request-path .small{overflow-wrap:anywhere}
+.request-note{overflow-wrap:anywhere}
+.note-purpose{display:block;text-align:left;border:none;background:transparent;padding:2px 0;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;width:100%}
+.note-purpose:hover{color:var(--pri);text-decoration:underline}
+.note-purpose:focus-visible{outline:2px solid var(--pri);outline-offset:3px}
+.note-meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.note-useful{color:#b45309;font-size:16px}
+.note-override{color:var(--pri);margin-top:3px}
+.note-cat-query{background:#e0f2fe;color:#0369a1}.note-cat-write{background:#fef3c7;color:#92400e}.note-cat-auth{background:#ede9fe;color:#6d28d9}
+.note-cat-config{background:#dcfce7;color:#15803d}
+.request-note-panel{padding:12px;margin:12px 0;border:1px solid var(--line);border-radius:8px;background:#fafbff}
+.request-note-panel h3{margin-bottom:4px}
+.note-editor{display:flex;flex-direction:column;gap:8px;cursor:default}
+.note-editor label{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--muted)}
+.note-editor textarea{font:inherit;min-height:80px;resize:vertical}
+.note-editor select{width:100%;min-width:0;font-size:12px;padding:6px}
+.note-editor .row{gap:6px}.note-editor button.sm{padding:4px 8px}
+.request-lists .collapse-h{display:block;width:100%;border:0;background:transparent;text-align:left}
+@media (max-width:1100px){.recording-split{grid-template-columns:minmax(0,1fr)}.recording-split .detail{position:static;max-height:none}}
 @media (max-width:800px){.mode-opts{grid-template-columns:1fr}}
 .sec-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:12px}
 button.sm{padding:4px 10px;font-size:13px}

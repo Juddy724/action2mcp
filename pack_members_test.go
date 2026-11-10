@@ -137,9 +137,9 @@ func TestPackMembershipEndpoints(t *testing.T) {
 		t.Fatalf("mw tools after remove %v", n)
 	}
 
-	// flat mode reflects membership too
+	// flat mode reflects membership too. Builtin rec_* tools are listed alongside pack tools.
 	app.store.SetSetting("mcp_mode", ModeFlat)
-	if n := c.toolNames(); strings.Join(n, ",") != "t_a,t_c" {
+	if n := c.toolNames(); !has(n, "t_a") || !has(n, "t_c") || has(n, "t_b") || !has(n, "rec_list_recordings") {
 		t.Fatalf("flat %v", n)
 	}
 	// unknown pack

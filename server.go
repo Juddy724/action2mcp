@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
@@ -46,6 +47,22 @@ func readJSON(r *http.Request, v any) error {
 		return fmt.Errorf("请求格式错误: %v", err)
 	}
 	return nil
+}
+
+// Keep the recorded classification available when a note changes which list a
+// request belongs to. A nil override always leaves the heuristic in effect.
+func applyRequestNote(q *ReqRecord, notes map[int64]RequestNote) {
+	q.NoiseHeuristic = q.Noise
+	if n, ok := notes[q.ID]; ok {
+		q.Note = &n
+		if n.NoiseOverride != nil {
+			q.Noise = *n.NoiseOverride
+			return
+		}
+	}
+	if q.IsLogin {
+		q.Noise, q.NoiseReason = false, "" // always offer 「保存为登录配置」 unless a note overrides it
+	}
 }
 
 // localOnly blocks cross-site requests from web pages (DNS rebinding / CSRF protection).
@@ -117,17 +134,24 @@ func (a *App) Handler() http.Handler {
 			writeErr(w, 404, errors.New("录制不存在"))
 			return
 		}
-		reqs, _ := a.store.ListRequests(rec.ID)
+		reqs, err := a.store.ListRequests(rec.ID)
+		if err != nil {
+			writeErr(w, 500, err)
+			return
+		}
+		notes, err := a.store.RequestNotes(rec.ID)
+		if err != nil {
+			writeErr(w, 500, err)
+			return
+		}
 		for i := range reqs {
 			reqs[i].URL = a.vault.Scrub(maskURL(reqs[i].URL))
 			if reqs[i].Method != "GET" && reqs[i].Method != "HEAD" {
 				if full, err := a.store.GetRequest(reqs[i].ID); err == nil {
 					reqs[i].IsLogin = isLoginRequest(full)
-					if reqs[i].IsLogin {
-						reqs[i].Noise, reqs[i].NoiseReason = false, "" // always offer 「保存为登录配置」
-					}
 				}
 			}
+			applyRequestNote(&reqs[i], notes)
 		}
 		writeJSON(w, 200, map[string]any{"recording": rec, "requests": reqs})
 	})
@@ -142,7 +166,56 @@ func (a *App) Handler() http.Handler {
 			return
 		}
 		cands := a.annotateCandidates(q, SuggestParams(q))
-		writeJSON(w, 200, map[string]any{"request": a.scrubRequest(q), "candidates": cands})
+		notes, err := a.store.RequestNotes(q.RecordingID)
+		if err != nil {
+			writeErr(w, 500, err)
+			return
+		}
+		q = a.scrubRequest(q)
+		applyRequestNote(q, notes)
+		writeJSON(w, 200, map[string]any{"request": q, "candidates": cands})
+	})
+	mux.HandleFunc("PUT /api/requests/{id}/note", func(w http.ResponseWriter, r *http.Request) {
+		q, err := a.store.GetRequest(pathID(r))
+		if err != nil {
+			writeErr(w, 404, errors.New("请求不存在"))
+			return
+		}
+		var n RequestNote
+		if err := readJSON(r, &n); err != nil {
+			writeErr(w, 400, err)
+			return
+		}
+		// Identity and authorship always come from this console operation.
+		n.RequestID, n.RecordingID, n.Source = q.ID, q.RecordingID, "user"
+		if err := a.store.SetRequestNote(n); err != nil {
+			switch {
+			case errors.Is(err, sql.ErrNoRows):
+				writeErr(w, 404, errors.New("请求不存在"))
+			case errors.Is(err, errInvalidNote):
+				writeErr(w, 400, err)
+			default:
+				writeErr(w, 500, err)
+			}
+			return
+		}
+		notes, err := a.store.RequestNotes(q.RecordingID)
+		if err != nil {
+			writeErr(w, 500, err)
+			return
+		}
+		writeJSON(w, 200, notes[q.ID])
+	})
+	mux.HandleFunc("DELETE /api/requests/{id}/note", func(w http.ResponseWriter, r *http.Request) {
+		if _, err := a.store.GetRequest(pathID(r)); err != nil {
+			writeErr(w, 404, errors.New("请求不存在"))
+			return
+		}
+		if err := a.store.DeleteRequestNote(pathID(r)); err != nil {
+			writeErr(w, 500, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true})
 	})
 	mux.HandleFunc("POST /api/requests/{id}/draft", func(w http.ResponseWriter, r *http.Request) {
 		q, err := a.store.GetRequest(pathID(r))
@@ -157,17 +230,11 @@ func (a *App) Handler() http.Handler {
 			writeErr(w, 400, err)
 			return
 		}
-		t, err := BuildDraft(q, a.prepareDraft(q, in.Params))
+		t, err := a.buildRequestDraft(q, in.Params)
 		if err != nil {
 			writeErr(w, 400, err)
 			return
 		}
-		t.Name = suggestToolName(q)
-		rec, _ := a.store.GetRecording(q.RecordingID)
-		if rec != nil {
-			t.Title = rec.Name
-		}
-		t.SourceReqID = q.ID
 		writeJSON(w, 200, t)
 	})
 
@@ -195,34 +262,10 @@ func (a *App) Handler() http.Handler {
 			return
 		}
 		t.ID = id
-		// values that live in 配置管理 are stored as {{secret.X}} / {{cfg.X}}, never as plain text
-		t.URL = a.vault.ToRefs(t.URL)
-		t.Body = a.vault.ToRefs(t.Body)
-		for k, v := range t.Headers {
-			t.Headers[k] = a.vault.ToRefs(v)
-		}
-		if err := t.Normalize(); err != nil {
+		if err := a.persistTool(&t); err != nil {
 			writeErr(w, 400, err)
 			return
 		}
-		if isEntryTool(t.Name) {
-			writeErr(w, 400, errors.New("工具名 "+t.Name+" 是阶梯模式的入口工具名，已被保留，请换一个名字"))
-			return
-		}
-		for _, ref := range t.RenderRefs() {
-			kind, n, _ := strings.Cut(ref, ".")
-			if _, ok := a.vault.Lookup(n); !ok {
-				writeErr(w, 400, errors.New("模板引用了不存在的配置项 "+n+"，请先在「配置管理」中添加"))
-				return
-			}
-			_ = kind
-		}
-		if err := a.store.SaveTool(&t); err != nil {
-			writeErr(w, 400, err)
-			return
-		}
-		a.store.EnsureSite(t.URL)
-		a.broadcastToolsChanged()
 		writeJSON(w, 200, t)
 	}
 	mux.HandleFunc("POST /api/tools", func(w http.ResponseWriter, r *http.Request) { saveTool(w, r, 0) })
@@ -393,33 +436,107 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /mcp", a.handleMCPStream)
 	mux.HandleFunc("DELETE /mcp", a.handleMCPDelete)
 
-	// settings (MCP exposure mode)
+	// settings (MCP exposure mode + built-in 录制分析 pack)
 	mux.HandleFunc("GET /api/settings", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"mcp_mode": a.mcpMode()})
+		writeJSON(w, 200, a.settingsView())
 	})
 	mux.HandleFunc("PUT /api/settings", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
-			MCPMode string `json:"mcp_mode"`
+			MCPMode     *string `json:"mcp_mode"`
+			RecAnalysis *bool   `json:"rec_analysis"`
 		}
 		if err := readJSON(r, &in); err != nil {
 			writeErr(w, 400, err)
 			return
 		}
-		if in.MCPMode != ModeTiered && in.MCPMode != ModeFlat {
-			writeErr(w, 400, errors.New("mcp_mode 只能是 tiered 或 flat"))
+		if in.MCPMode == nil && in.RecAnalysis == nil {
+			writeErr(w, 400, errors.New("没有要更新的设置"))
 			return
 		}
-		if err := a.store.SetSetting("mcp_mode", in.MCPMode); err != nil {
+		updates := map[string]string{}
+		if in.MCPMode != nil {
+			if *in.MCPMode != ModeTiered && *in.MCPMode != ModeFlat {
+				writeErr(w, 400, errors.New("mcp_mode 只能是 tiered 或 flat"))
+				return
+			}
+			updates["mcp_mode"] = *in.MCPMode
+		}
+		if in.RecAnalysis != nil {
+			v := "off"
+			if *in.RecAnalysis {
+				v = "on"
+			}
+			updates[settingRecAnalysis] = v
+		}
+		if err := a.store.SetSettings(updates); err != nil {
 			writeErr(w, 500, err)
 			return
 		}
 		a.broadcastToolsChanged()
-		writeJSON(w, 200, map[string]any{"mcp_mode": a.mcpMode()})
+		writeJSON(w, 200, a.settingsView())
 	})
 	return localOnly(mux)
 }
 
 var exitServer = func() {}
+
+// buildRequestDraft is the POST /api/requests/{id}/draft path: chosen fields become
+// template params, secrets become {{secret.X}}, and the tool is not saved yet.
+func (a *App) buildRequestDraft(q *ReqRecord, params []Candidate) (*Tool, error) {
+	t, err := BuildDraft(q, a.prepareDraft(q, params))
+	if err != nil {
+		return nil, err
+	}
+	t.Name = suggestToolName(q)
+	if rec, err := a.store.GetRecording(q.RecordingID); err == nil && rec != nil {
+		t.Title = rec.Name
+	}
+	t.SourceReqID = q.ID
+	return t, nil
+}
+
+// persistTool stores a tool the same way POST/PUT /api/tools does: vault refs,
+// normalization, reserved names, and a site row. It broadcasts tools/list_changed.
+func (a *App) persistTool(t *Tool) error {
+	// values that live in 配置管理 are stored as {{secret.X}} / {{cfg.X}}, never as plain text
+	t.URL = a.vault.ToRefs(t.URL)
+	t.Body = a.vault.ToRefs(t.Body)
+	for k, v := range t.Headers {
+		t.Headers[k] = a.vault.ToRefs(v)
+	}
+	if err := a.validateTool(t); err != nil {
+		return err
+	}
+	if err := a.store.SaveTool(t); err != nil {
+		return err
+	}
+	a.store.EnsureSite(t.URL)
+	a.broadcastToolsChanged()
+	return nil
+}
+
+func (a *App) validateTool(t *Tool) error {
+	if err := t.Normalize(); err != nil {
+		return err
+	}
+	if isEntryTool(t.Name) {
+		return errors.New("工具名 " + t.Name + " 是阶梯模式的入口工具名，已被保留，请换一个名字")
+	}
+	if isRecTool(t.Name) {
+		return errors.New("工具名 " + t.Name + " 是内置录制分析工具名，已被保留，请换一个名字")
+	}
+	for _, ref := range t.RenderRefs() {
+		_, n, _ := strings.Cut(ref, ".")
+		if _, ok := a.vault.Lookup(n); !ok {
+			return errors.New("模板引用了不存在的配置项 " + n + "，请先在「配置管理」中添加")
+		}
+	}
+	return nil
+}
+
+func (a *App) settingsView() map[string]any {
+	return map[string]any{"mcp_mode": a.mcpMode(), "rec_analysis": a.recAnalysisEnabled()}
+}
 
 func suggestToolName(q *ReqRecord) string {
 	u, err := url.Parse(q.URL)

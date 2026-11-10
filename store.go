@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	_ "modernc.org/sqlite"
 )
@@ -20,6 +21,7 @@ type Store struct {
 type Recording struct {
 	ID           int64  `json:"id"`
 	Name         string `json:"name"`
+	Summary      string `json:"summary"`
 	StartURL     string `json:"start_url"`
 	Status       string `json:"status"`
 	CreatedAt    string `json:"created_at"`
@@ -29,24 +31,37 @@ type Recording struct {
 }
 
 type ReqRecord struct {
-	ID           int64             `json:"id"`
-	RecordingID  int64             `json:"recording_id"`
-	Seq          int               `json:"seq"`
-	Method       string            `json:"method"`
-	URL          string            `json:"url"`
-	ResourceType string            `json:"resource_type"`
-	ReqHeaders   map[string]string `json:"req_headers,omitempty"`
-	ReqBody      string            `json:"req_body,omitempty"`
-	Status       int               `json:"status"`
-	RespHeaders  map[string]string `json:"resp_headers,omitempty"`
-	RespBody     string            `json:"resp_body,omitempty"`
-	RespMime     string            `json:"resp_mime"`
-	Noise        bool              `json:"noise"`
-	NoiseReason  string            `json:"noise_reason"`
-	TS           string            `json:"ts"`
-	ReqSize      int               `json:"req_size"`
-	RespSize     int               `json:"resp_size"`
-	IsLogin      bool              `json:"is_login,omitempty"`
+	ID             int64             `json:"id"`
+	RecordingID    int64             `json:"recording_id"`
+	Seq            int               `json:"seq"`
+	Method         string            `json:"method"`
+	URL            string            `json:"url"`
+	ResourceType   string            `json:"resource_type"`
+	ReqHeaders     map[string]string `json:"req_headers,omitempty"`
+	ReqBody        string            `json:"req_body,omitempty"`
+	Status         int               `json:"status"`
+	RespHeaders    map[string]string `json:"resp_headers,omitempty"`
+	RespBody       string            `json:"resp_body,omitempty"`
+	RespMime       string            `json:"resp_mime"`
+	Noise          bool              `json:"noise"`
+	NoiseHeuristic bool              `json:"noise_heuristic"`
+	Note           *RequestNote      `json:"note"`
+	NoiseReason    string            `json:"noise_reason"`
+	TS             string            `json:"ts"`
+	ReqSize        int               `json:"req_size"`
+	RespSize       int               `json:"resp_size"`
+	IsLogin        bool              `json:"is_login,omitempty"`
+}
+
+type RequestNote struct {
+	RequestID     int64  `json:"request_id"`
+	RecordingID   int64  `json:"recording_id"`
+	Purpose       string `json:"purpose"`
+	Category      string `json:"category"`
+	Useful        *bool  `json:"useful"`
+	NoiseOverride *bool  `json:"noise_override"`
+	Source        string `json:"source"`
+	UpdatedAt     string `json:"updated_at"`
 }
 
 type Param struct {
@@ -114,6 +129,16 @@ CREATE TABLE IF NOT EXISTS recordings(id INTEGER PRIMARY KEY AUTOINCREMENT, name
 CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY AUTOINCREMENT, recording_id INTEGER REFERENCES recordings(id) ON DELETE CASCADE, seq INTEGER, method TEXT, url TEXT, resource_type TEXT,
   req_headers TEXT, req_body TEXT, status INTEGER, resp_headers TEXT, resp_body TEXT, resp_mime TEXT, noise INTEGER, noise_reason TEXT, ts TEXT);
 CREATE INDEX IF NOT EXISTS idx_req_rec ON requests(recording_id);
+CREATE TABLE IF NOT EXISTS request_notes(
+  request_id INTEGER PRIMARY KEY REFERENCES requests(id) ON DELETE CASCADE,
+  recording_id INTEGER NOT NULL REFERENCES recordings(id) ON DELETE CASCADE,
+  purpose TEXT NOT NULL,
+  category TEXT NOT NULL CHECK(category IN ('query','write','auth','config','page','noise')),
+  useful INTEGER CHECK(useful IN (0,1)),
+  noise_override INTEGER CHECK(noise_override IN (0,1)),
+  source TEXT NOT NULL CHECK(source IN ('agent','user')),
+  updated_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_request_notes_rec ON request_notes(recording_id);
 CREATE TABLE IF NOT EXISTS tools(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, title TEXT, description TEXT, method TEXT, url TEXT, headers TEXT, body TEXT, params TEXT, cred_headers TEXT, source_request_id INTEGER, created_at TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS packs(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, description TEXT, enabled INTEGER, created_at TEXT);
 CREATE TABLE IF NOT EXISTS pack_tools(pack_id INTEGER REFERENCES packs(id) ON DELETE CASCADE, tool_id INTEGER REFERENCES tools(id) ON DELETE CASCADE, PRIMARY KEY(pack_id, tool_id));
@@ -141,7 +166,15 @@ CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 			return nil, err
 		}
 	}
-	db.Exec(`PRAGMA user_version=4`)
+	// Recording analysis: annotations and an overall workflow summary.
+	if !s.hasColumn("recordings", "summary") {
+		if _, err := db.Exec(`ALTER TABLE recordings ADD COLUMN summary TEXT NOT NULL DEFAULT ''`); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := db.Exec(`PRAGMA user_version=5`); err != nil {
+		return nil, err
+	}
 	// recordings left in "recording" state by a crash are finished now
 	db.Exec(`UPDATE recordings SET status='done', ended_at=? WHERE status='recording'`, now())
 	return s, nil
@@ -185,6 +218,20 @@ func (s *Store) SetSetting(key, value string) error {
 	return err
 }
 
+func (s *Store) SetSettings(values map[string]string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for key, value := range values {
+		if _, err := tx.Exec(`INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) Checkpoint() { s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`) }
 
 func js(v any) string { b, _ := json.Marshal(v); return string(b) }
@@ -204,9 +251,10 @@ func (s *Store) FinishRecording(id int64) {
 }
 
 func (s *Store) ListRecordings() ([]Recording, error) {
-	rows, err := s.db.Query(`SELECT r.id,r.name,r.start_url,r.status,r.created_at,r.ended_at,
+	rows, err := s.db.Query(`SELECT r.id,r.name,r.summary,r.start_url,r.status,r.created_at,r.ended_at,
 	 (SELECT COUNT(*) FROM requests q WHERE q.recording_id=r.id),
-	 (SELECT COUNT(*) FROM requests q WHERE q.recording_id=r.id AND q.noise=0)
+	 (SELECT COUNT(*) FROM requests q LEFT JOIN request_notes n ON n.request_id=q.id
+	  WHERE q.recording_id=r.id AND COALESCE(n.noise_override,q.noise)=0)
 	 FROM recordings r ORDER BY r.id DESC`)
 	if err != nil {
 		return nil, err
@@ -215,21 +263,41 @@ func (s *Store) ListRecordings() ([]Recording, error) {
 	out := []Recording{}
 	for rows.Next() {
 		var r Recording
-		rows.Scan(&r.ID, &r.Name, &r.StartURL, &r.Status, &r.CreatedAt, &r.EndedAt, &r.RequestCount, &r.UsefulCount)
+		if err := rows.Scan(&r.ID, &r.Name, &r.Summary, &r.StartURL, &r.Status, &r.CreatedAt, &r.EndedAt, &r.RequestCount, &r.UsefulCount); err != nil {
+			return nil, err
+		}
 		out = append(out, r)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func (s *Store) GetRecording(id int64) (*Recording, error) {
 	var r Recording
-	err := s.db.QueryRow(`SELECT id,name,start_url,status,created_at,ended_at,(SELECT COUNT(*) FROM requests q WHERE q.recording_id=recordings.id),
-	 (SELECT COUNT(*) FROM requests q WHERE q.recording_id=recordings.id AND q.noise=0) FROM recordings WHERE id=?`, id).
-		Scan(&r.ID, &r.Name, &r.StartURL, &r.Status, &r.CreatedAt, &r.EndedAt, &r.RequestCount, &r.UsefulCount)
+	err := s.db.QueryRow(`SELECT id,name,summary,start_url,status,created_at,ended_at,(SELECT COUNT(*) FROM requests q WHERE q.recording_id=recordings.id),
+	 (SELECT COUNT(*) FROM requests q LEFT JOIN request_notes n ON n.request_id=q.id
+	  WHERE q.recording_id=recordings.id AND COALESCE(n.noise_override,q.noise)=0) FROM recordings WHERE id=?`, id).
+		Scan(&r.ID, &r.Name, &r.Summary, &r.StartURL, &r.Status, &r.CreatedAt, &r.EndedAt, &r.RequestCount, &r.UsefulCount)
 	if err != nil {
 		return nil, err
 	}
 	return &r, nil
+}
+
+func (s *Store) SetRecordingSummary(recordingID int64, summary string) error {
+	summary = strings.TrimSpace(summary)
+	if utf8.RuneCountInString(summary) > maxRecordingSummaryRunes {
+		return fmt.Errorf("%w: 录制说明最长 %d 字", errInvalidNote, maxRecordingSummaryRunes)
+	}
+	r, err := s.db.Exec(`UPDATE recordings SET summary=? WHERE id=?`, summary, recordingID)
+	if err != nil {
+		return err
+	}
+	if n, err := r.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func (s *Store) DeleteRecording(id int64) error {
@@ -263,11 +331,14 @@ func (s *Store) ListRequests(recID int64) ([]ReqRecord, error) {
 	for rows.Next() {
 		var q ReqRecord
 		var n int
-		rows.Scan(&q.ID, &q.RecordingID, &q.Seq, &q.Method, &q.URL, &q.ResourceType, &q.Status, &q.RespMime, &n, &q.NoiseReason, &q.TS, &q.ReqSize, &q.RespSize)
+		if err := rows.Scan(&q.ID, &q.RecordingID, &q.Seq, &q.Method, &q.URL, &q.ResourceType, &q.Status, &q.RespMime, &n, &q.NoiseReason, &q.TS, &q.ReqSize, &q.RespSize); err != nil {
+			return nil, err
+		}
 		q.Noise = n != 0
+		q.NoiseHeuristic = q.Noise
 		out = append(out, q)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func (s *Store) GetRequest(id int64) (*ReqRecord, error) {
@@ -279,10 +350,77 @@ func (s *Store) GetRequest(id int64) (*ReqRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	json.Unmarshal([]byte(rh), &q.ReqHeaders)
-	json.Unmarshal([]byte(sh), &q.RespHeaders)
+	if err := json.Unmarshal([]byte(rh), &q.ReqHeaders); err != nil {
+		return nil, fmt.Errorf("无法解析请求头：%w", err)
+	}
+	if err := json.Unmarshal([]byte(sh), &q.RespHeaders); err != nil {
+		return nil, fmt.Errorf("无法解析响应头：%w", err)
+	}
 	q.Noise = n != 0
+	q.NoiseHeuristic = q.Noise
 	return &q, nil
+}
+
+// SetRequestNote replaces a note, including nullable judgements. The request must
+// belong to RecordingID; annotations never change the recorded noise heuristic.
+// errInvalidNote marks validation failures of notes and summaries (HTTP 400).
+var errInvalidNote = errors.New("标注无效")
+
+const (
+	maxRequestPurposeRunes   = 500
+	maxRecordingSummaryRunes = 2000
+)
+
+func (s *Store) SetRequestNote(n RequestNote) error {
+	switch n.Category {
+	case "query", "write", "auth", "config", "page", "noise":
+	default:
+		return fmt.Errorf("%w: 分类必须是 query、write、auth、config、page 或 noise", errInvalidNote)
+	}
+	if n.Source != "agent" && n.Source != "user" {
+		return fmt.Errorf("%w: 标注来源必须是 agent 或 user", errInvalidNote)
+	}
+	n.Purpose = strings.TrimSpace(n.Purpose)
+	if utf8.RuneCountInString(n.Purpose) > maxRequestPurposeRunes {
+		return fmt.Errorf("%w: 作用说明最长 %d 字", errInvalidNote, maxRequestPurposeRunes)
+	}
+	r, err := s.db.Exec(`INSERT INTO request_notes(request_id,recording_id,purpose,category,useful,noise_override,source,updated_at)
+	 SELECT id,recording_id,?,?,?,?,?,? FROM requests WHERE id=? AND recording_id=?
+	 ON CONFLICT(request_id) DO UPDATE SET purpose=excluded.purpose,category=excluded.category,
+	 useful=excluded.useful,noise_override=excluded.noise_override,source=excluded.source,updated_at=excluded.updated_at`,
+		n.Purpose, n.Category, n.Useful, n.NoiseOverride, n.Source, now(), n.RequestID, n.RecordingID)
+	if err != nil {
+		return err
+	}
+	if count, err := r.RowsAffected(); err != nil {
+		return err
+	} else if count == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) RequestNotes(recordingID int64) (map[int64]RequestNote, error) {
+	rows, err := s.db.Query(`SELECT request_id,recording_id,purpose,category,useful,noise_override,source,updated_at
+	 FROM request_notes WHERE recording_id=?`, recordingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]RequestNote{}
+	for rows.Next() {
+		var n RequestNote
+		if err := rows.Scan(&n.RequestID, &n.RecordingID, &n.Purpose, &n.Category, &n.Useful, &n.NoiseOverride, &n.Source, &n.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out[n.RequestID] = n
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeleteRequestNote(requestID int64) error {
+	_, err := s.db.Exec(`DELETE FROM request_notes WHERE request_id=?`, requestID)
+	return err
 }
 
 func b2i(b bool) int {
@@ -360,6 +498,14 @@ func (s *Store) GetToolByName(name string) (*Tool, error) {
 }
 
 func (s *Store) SaveTool(t *Tool) error {
+	return saveTool(s.db, t)
+}
+
+type toolWriter interface {
+	Exec(string, ...any) (sql.Result, error)
+}
+
+func saveTool(w toolWriter, t *Tool) error {
 	if t.Headers == nil {
 		t.Headers = map[string]string{}
 	}
@@ -372,7 +518,7 @@ func (s *Store) SaveTool(t *Tool) error {
 	t.UpdatedAt = now()
 	if t.ID == 0 {
 		t.CreatedAt = t.UpdatedAt
-		r, err := s.db.Exec(`INSERT INTO tools(name,title,description,method,url,headers,body,params,cred_headers,source_request_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		r, err := w.Exec(`INSERT INTO tools(name,title,description,method,url,headers,body,params,cred_headers,source_request_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
 			t.Name, t.Title, t.Description, t.Method, t.URL, js(t.Headers), t.Body, js(t.Params), js(t.CredHeaders), t.SourceReqID, t.CreatedAt, t.UpdatedAt)
 		if err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
@@ -380,15 +526,61 @@ func (s *Store) SaveTool(t *Tool) error {
 			}
 			return err
 		}
-		t.ID, _ = r.LastInsertId()
-		return nil
+		t.ID, err = r.LastInsertId()
+		return err
 	}
-	_, err := s.db.Exec(`UPDATE tools SET name=?,title=?,description=?,method=?,url=?,headers=?,body=?,params=?,cred_headers=?,updated_at=? WHERE id=?`,
+	r, err := w.Exec(`UPDATE tools SET name=?,title=?,description=?,method=?,url=?,headers=?,body=?,params=?,cred_headers=?,updated_at=? WHERE id=?`,
 		t.Name, t.Title, t.Description, t.Method, t.URL, js(t.Headers), t.Body, js(t.Params), js(t.CredHeaders), t.UpdatedAt, t.ID)
 	if err != nil && strings.Contains(err.Error(), "UNIQUE") {
 		return fmt.Errorf("工具标识 %q 已存在，请换一个", t.Name)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := r.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return errors.New("工具不存在，无法更新")
+	}
+	return nil
+}
+
+// Save and attach atomically. Failure rolls back both new tools and overwrites.
+func (s *Store) SaveToolInPack(t *Tool, packID int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var id int64
+	if err := tx.QueryRow(`SELECT id FROM packs WHERE id=?`, packID).Scan(&id); err != nil {
+		return fmt.Errorf("流程包不存在或无法读取：%w", err)
+	}
+	originalID := t.ID
+	if err := saveTool(tx, t); err != nil {
+		t.ID = originalID
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO pack_tools(pack_id,tool_id) VALUES(?,?) ON CONFLICT(pack_id,tool_id) DO NOTHING`, packID, t.ID); err != nil {
+		t.ID = originalID
+		return err
+	}
+	var membership int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM pack_tools pt JOIN tools t ON t.id=pt.tool_id JOIN packs p ON p.id=pt.pack_id WHERE pt.pack_id=? AND pt.tool_id=?`, packID, t.ID).Scan(&membership); err != nil {
+		t.ID = originalID
+		return err
+	}
+	if membership != 1 {
+		t.ID = originalID
+		return errors.New("工具或流程包不存在，未能加入流程包")
+	}
+	if err := tx.Commit(); err != nil {
+		t.ID = originalID
+		return err
+	}
+	return nil
 }
 
 func (s *Store) DeleteTool(id int64) error {
@@ -423,11 +615,18 @@ func (s *Store) ListPacks() ([]*Pack, error) {
 	for rows.Next() {
 		var p Pack
 		var e int
-		rows.Scan(&p.ID, &p.Name, &p.Description, &e, &p.Scenarios, &p.Guide, &p.CreatedAt)
+		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &e, &p.Scenarios, &p.Guide, &p.CreatedAt); err != nil {
+			rows.Close()
+			return nil, err
+		}
 		p.Enabled = e != 0
 		p.ToolIDs = []int64{}
 		p.MiddlewareIDs = []int64{}
 		out = append(out, &p)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
 	}
 	rows.Close()
 	m := map[int64]*Pack{}
@@ -435,33 +634,54 @@ func (s *Store) ListPacks() ([]*Pack, error) {
 		m[p.ID] = p
 	}
 	r2, err := s.db.Query(`SELECT pack_id,tool_id FROM pack_tools ORDER BY tool_id`)
-	if err == nil {
-		for r2.Next() {
-			var pid, tid int64
-			r2.Scan(&pid, &tid)
-			if p := m[pid]; p != nil {
-				p.ToolIDs = append(p.ToolIDs, tid)
-			}
+	if err != nil {
+		return nil, err
+	}
+	for r2.Next() {
+		var pid, tid int64
+		if err := r2.Scan(&pid, &tid); err != nil {
+			r2.Close()
+			return nil, err
 		}
+		if p := m[pid]; p != nil {
+			p.ToolIDs = append(p.ToolIDs, tid)
+		}
+	}
+	if err := r2.Err(); err != nil {
 		r2.Close()
+		return nil, err
 	}
+	r2.Close()
+
 	r3, err := s.db.Query(`SELECT pack_id,mw_id FROM pack_middleware ORDER BY mw_id`)
-	if err == nil {
-		for r3.Next() {
-			var pid, mid int64
-			r3.Scan(&pid, &mid)
-			if p := m[pid]; p != nil {
-				p.MiddlewareIDs = append(p.MiddlewareIDs, mid)
-			}
-		}
-		r3.Close()
+	if err != nil {
+		return nil, err
 	}
+	for r3.Next() {
+		var pid, mid int64
+		if err := r3.Scan(&pid, &mid); err != nil {
+			r3.Close()
+			return nil, err
+		}
+		if p := m[pid]; p != nil {
+			p.MiddlewareIDs = append(p.MiddlewareIDs, mid)
+		}
+	}
+	if err := r3.Err(); err != nil {
+		r3.Close()
+		return nil, err
+	}
+	r3.Close()
+
 	return out, nil
 }
 
 func (s *Store) SavePack(p *Pack) error {
 	if strings.TrimSpace(p.Name) == "" {
 		return errors.New("流程包名称不能为空")
+	}
+	if p.ID == 0 && strings.EqualFold(strings.TrimSpace(p.Name), recPackName) {
+		return errors.New("流程包名称「录制分析」是内置包，请换一个名字")
 	}
 	p.Guide = strings.TrimSpace(p.Guide)
 	if len(p.Guide) > maxPackGuideBytes {
@@ -480,25 +700,44 @@ func (s *Store) SavePack(p *Pack) error {
 			}
 			return err
 		}
-		p.ID, _ = r.LastInsertId()
+		p.ID, err = r.LastInsertId()
+		if err != nil {
+			return err
+		}
 	} else {
-		if _, err := tx.Exec(`UPDATE packs SET name=?,description=?,enabled=?,scenarios=?,guide=? WHERE id=?`, p.Name, p.Description, b2i(p.Enabled), p.Scenarios, p.Guide, p.ID); err != nil {
+		r, err := tx.Exec(`UPDATE packs SET name=?,description=?,enabled=?,scenarios=?,guide=? WHERE id=?`, p.Name, p.Description, b2i(p.Enabled), p.Scenarios, p.Guide, p.ID)
+		if err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
 				return fmt.Errorf("流程包 %q 已存在", p.Name)
 			}
 			return err
 		}
+		n, err := r.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			return errors.New("流程包不存在，无法更新")
+		}
 	}
 	if p.ToolIDs != nil {
-		tx.Exec(`DELETE FROM pack_tools WHERE pack_id=?`, p.ID)
+		if _, err := tx.Exec(`DELETE FROM pack_tools WHERE pack_id=?`, p.ID); err != nil {
+			return err
+		}
 		for _, tid := range p.ToolIDs {
-			tx.Exec(`INSERT OR IGNORE INTO pack_tools(pack_id,tool_id) VALUES(?,?)`, p.ID, tid)
+			if _, err := tx.Exec(`INSERT OR IGNORE INTO pack_tools(pack_id,tool_id) VALUES(?,?)`, p.ID, tid); err != nil {
+				return err
+			}
 		}
 	}
 	if p.MiddlewareIDs != nil {
-		tx.Exec(`DELETE FROM pack_middleware WHERE pack_id=?`, p.ID)
+		if _, err := tx.Exec(`DELETE FROM pack_middleware WHERE pack_id=?`, p.ID); err != nil {
+			return err
+		}
 		for _, mid := range p.MiddlewareIDs {
-			tx.Exec(`INSERT OR IGNORE INTO pack_middleware(pack_id,mw_id) VALUES(?,?)`, p.ID, mid)
+			if _, err := tx.Exec(`INSERT OR IGNORE INTO pack_middleware(pack_id,mw_id) VALUES(?,?)`, p.ID, mid); err != nil {
+				return err
+			}
 		}
 	}
 	return tx.Commit()
