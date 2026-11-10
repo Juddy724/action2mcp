@@ -598,7 +598,7 @@ func isText(m string) bool {
 }
 
 func (bs *BrowserSession) storeLocked(rec *activeRecording, pr *pendingReq) {
-	pr.rec.Noise, pr.rec.NoiseReason = ClassifyNoise(pr.rec)
+	pr.rec.Noise, pr.rec.NoiseReason = bs.app.classifyRecorded(pr.rec)
 	if err := bs.app.store.InsertRequest(pr.rec); err != nil {
 		log.Printf("保存请求失败: %v", err)
 		return
@@ -821,7 +821,7 @@ func (bs *BrowserSession) persistWSLocked(rec *activeRecording, pr *pendingReq, 
 	}
 	pr.rec.ReqBody = string(sb)
 	pr.rec.RespBody = string(rb)
-	noise, why := ClassifyNoise(pr.rec)
+	noise, why := bs.app.classifyRecorded(pr.rec)
 	pr.rec.Noise, pr.rec.NoiseReason = noise, why
 	if pr.rec.ID == 0 {
 		if err := bs.app.store.InsertRequest(pr.rec); err != nil {

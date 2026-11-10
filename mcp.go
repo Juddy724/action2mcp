@@ -521,15 +521,16 @@ func (a *App) mcpListPacks(mc *mcpCtx) any {
 	}
 	loaded := mc.sess.loadedIDs()
 	type packOut struct {
-		ID          int64    `json:"id"`
-		Name        string   `json:"name"`
-		Description string   `json:"description,omitempty"`
-		Scenarios   string   `json:"scenarios,omitempty"`
-		ToolCount   int      `json:"tool_count"`
-		ToolNames   []string `json:"tool_names,omitempty"`
-		Middleware  []string `json:"middleware,omitempty"`
-		Loaded      bool     `json:"loaded"`
-		Builtin     bool     `json:"builtin,omitempty"`
+		ID              int64    `json:"id"`
+		Name            string   `json:"name"`
+		Description     string   `json:"description,omitempty"`
+		Scenarios       string   `json:"scenarios,omitempty"`
+		ToolCount       int      `json:"tool_count"`
+		ToolNames       []string `json:"tool_names,omitempty"`
+		Middleware      []string `json:"middleware,omitempty"`
+		MiddlewareCount int      `json:"middleware_count"`
+		Loaded          bool     `json:"loaded"`
+		Builtin         bool     `json:"builtin,omitempty"`
 	}
 	out := []packOut{}
 	for _, p := range packs {
@@ -542,18 +543,13 @@ func (a *App) mcpListPacks(mc *mcpCtx) any {
 				po.ToolNames = append(po.ToolNames, n)
 			}
 		}
-		mwTools := map[string]bool{}
 		for _, id := range p.MiddlewareIDs {
 			if m := mwByID[id]; m != nil {
 				po.Middleware = append(po.Middleware, m.Name+"("+m.kindLabel()+")")
-				for _, d := range mwToolDefs() {
-					if d.Type == m.Type {
-						mwTools[d.Name] = true
-					}
-				}
 			}
 		}
-		po.ToolCount = len(po.ToolNames) + len(mwTools)
+		po.ToolCount = len(po.ToolNames)
+		po.MiddlewareCount = len(po.Middleware)
 		if len(po.ToolNames) > 12 {
 			po.ToolNames = append(po.ToolNames[:12], fmt.Sprintf("…等 %d 个", len(po.ToolNames)))
 		}
@@ -563,7 +559,7 @@ func (a *App) mcpListPacks(mc *mcpCtx) any {
 		names := recToolNames()
 		out = append(out, packOut{
 			ID: recPackID, Name: recPackName, Description: recPackBlurb, Scenarios: recPackScenarios,
-			ToolCount: len(names), ToolNames: names, Loaded: loaded[recPackID], Builtin: true,
+			ToolCount: len(names), MiddlewareCount: 0, ToolNames: names, Loaded: loaded[recPackID], Builtin: true,
 		})
 	}
 	next := "根据当前任务选择相关的流程包，调用 load_pack(pack=名称或id) 加载后再使用其中的工具。Pick the pack(s) relevant to your task and call load_pack."

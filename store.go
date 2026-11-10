@@ -13,9 +13,19 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+type groupOverride struct {
+	seq int
+	id  int64
+	on  bool
+}
+
 type Store struct {
 	db     *sql.DB
 	siteMu sync.Mutex
+	ovMu   sync.Mutex
+	ovGen  map[int64]uint64
+	// recording → group key → overrides, sorted by seq, id
+	ovCache map[int64]map[string][]groupOverride
 }
 
 type Recording struct {
@@ -137,7 +147,8 @@ CREATE TABLE IF NOT EXISTS request_notes(
   useful INTEGER CHECK(useful IN (0,1)),
   noise_override INTEGER CHECK(noise_override IN (0,1)),
   source TEXT NOT NULL CHECK(source IN ('agent','user')),
-  updated_at TEXT NOT NULL);
+  updated_at TEXT NOT NULL,
+  group_key TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS idx_request_notes_rec ON request_notes(recording_id);
 CREATE TABLE IF NOT EXISTS tools(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, title TEXT, description TEXT, method TEXT, url TEXT, headers TEXT, body TEXT, params TEXT, cred_headers TEXT, source_request_id INTEGER, created_at TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS packs(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, description TEXT, enabled INTEGER, created_at TEXT);
@@ -169,6 +180,21 @@ CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 	// Recording analysis: annotations and an overall workflow summary.
 	if !s.hasColumn("recordings", "summary") {
 		if _, err := db.Exec(`ALTER TABLE recordings ADD COLUMN summary TEXT NOT NULL DEFAULT ''`); err != nil {
+			return nil, err
+		}
+	}
+	groupKeyAdded := false
+	if !s.hasColumn("request_notes", "group_key") {
+		if _, err := db.Exec(`ALTER TABLE request_notes ADD COLUMN group_key TEXT NOT NULL DEFAULT ''`); err != nil {
+			return nil, err
+		}
+		groupKeyAdded = true
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_request_notes_group ON request_notes(recording_id, group_key)`); err != nil {
+		return nil, err
+	}
+	if groupKeyAdded {
+		if err := s.backfillNoteGroupKeys(); err != nil {
 			return nil, err
 		}
 	}
@@ -384,11 +410,16 @@ func (s *Store) SetRequestNote(n RequestNote) error {
 	if utf8.RuneCountInString(n.Purpose) > maxRequestPurposeRunes {
 		return fmt.Errorf("%w: 作用说明最长 %d 字", errInvalidNote, maxRequestPurposeRunes)
 	}
-	r, err := s.db.Exec(`INSERT INTO request_notes(request_id,recording_id,purpose,category,useful,noise_override,source,updated_at)
-	 SELECT id,recording_id,?,?,?,?,?,? FROM requests WHERE id=? AND recording_id=?
+	var method, rawURL string
+	if err := s.db.QueryRow(`SELECT method, url FROM requests WHERE id=? AND recording_id=?`, n.RequestID, n.RecordingID).Scan(&method, &rawURL); err != nil {
+		return err
+	}
+	_, _, _, gkey := requestGroupKey(method, rawURL)
+	r, err := s.db.Exec(`INSERT INTO request_notes(request_id,recording_id,purpose,category,useful,noise_override,source,updated_at,group_key)
+	 SELECT id,recording_id,?,?,?,?,?,?,? FROM requests WHERE id=? AND recording_id=?
 	 ON CONFLICT(request_id) DO UPDATE SET purpose=excluded.purpose,category=excluded.category,
-	 useful=excluded.useful,noise_override=excluded.noise_override,source=excluded.source,updated_at=excluded.updated_at`,
-		n.Purpose, n.Category, n.Useful, n.NoiseOverride, n.Source, now(), n.RequestID, n.RecordingID)
+	 useful=excluded.useful,noise_override=excluded.noise_override,source=excluded.source,updated_at=excluded.updated_at,group_key=excluded.group_key`,
+		n.Purpose, n.Category, n.Useful, n.NoiseOverride, n.Source, now(), gkey, n.RequestID, n.RecordingID)
 	if err != nil {
 		return err
 	}
@@ -397,6 +428,7 @@ func (s *Store) SetRequestNote(n RequestNote) error {
 	} else if count == 0 {
 		return sql.ErrNoRows
 	}
+	s.invalidateOverrides(n.RecordingID)
 	return nil
 }
 
@@ -419,8 +451,167 @@ func (s *Store) RequestNotes(recordingID int64) (map[int64]RequestNote, error) {
 }
 
 func (s *Store) DeleteRequestNote(requestID int64) error {
+	var recordingID int64
+	_ = s.db.QueryRow(`SELECT recording_id FROM request_notes WHERE request_id=?`, requestID).Scan(&recordingID)
 	_, err := s.db.Exec(`DELETE FROM request_notes WHERE request_id=?`, requestID)
+	if err == nil && recordingID != 0 {
+		s.invalidateOverrides(recordingID)
+	}
 	return err
+}
+
+func (s *Store) invalidateOverrides(recordingID int64) {
+	s.ovMu.Lock()
+	defer s.ovMu.Unlock()
+	if s.ovGen == nil {
+		s.ovGen = map[int64]uint64{}
+	}
+	s.ovGen[recordingID]++
+	if s.ovCache != nil {
+		delete(s.ovCache, recordingID)
+	}
+}
+
+func (s *Store) backfillNoteGroupKeys() error {
+	rows, err := s.db.Query(`SELECT n.request_id, r.method, r.url FROM request_notes n JOIN requests r ON r.id = n.request_id WHERE n.group_key = ''`)
+	if err != nil {
+		return err
+	}
+	type pair struct {
+		id             int64
+		method, rawURL string
+	}
+	var pending []pair
+	for rows.Next() {
+		var p pair
+		if err := rows.Scan(&p.id, &p.method, &p.rawURL); err != nil {
+			rows.Close()
+			return err
+		}
+		pending = append(pending, p)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if len(pending) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	for _, p := range pending {
+		_, _, _, key := requestGroupKey(p.method, p.rawURL)
+		if _, err := tx.Exec(`UPDATE request_notes SET group_key=? WHERE request_id=?`, key, p.id); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func overrideIsEarlier(seq int, id int64, curSeq int, curID int64) bool {
+	if curID != 0 && id == curID {
+		return false
+	}
+	// A request that has not been inserted yet is after every stored note.
+	if curSeq <= 0 && curID == 0 {
+		return true
+	}
+	if seq < curSeq {
+		return true
+	}
+	if seq == curSeq && curID != 0 && id < curID {
+		return true
+	}
+	return false
+}
+
+func (s *Store) loadGroupOverrides(recordingID int64) (map[string][]groupOverride, error) {
+	rows, err := s.db.Query(`SELECT r.seq, r.id, n.group_key, n.noise_override FROM request_notes n
+		JOIN requests r ON r.id = n.request_id
+		WHERE n.recording_id = ? AND n.noise_override IS NOT NULL AND n.group_key != ''`, recordingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string][]groupOverride{}
+	for rows.Next() {
+		var h groupOverride
+		var key string
+		var ov int
+		if err := rows.Scan(&h.seq, &h.id, &key, &ov); err != nil {
+			return nil, err
+		}
+		h.on = ov != 0
+		out[key] = append(out[key], h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for key, hits := range out {
+		sortGroupOverrides(hits)
+		out[key] = hits
+	}
+	return out, nil
+}
+
+func sortGroupOverrides(hits []groupOverride) {
+	for i := 1; i < len(hits); i++ {
+		j := i
+		for j > 0 && (hits[j].seq < hits[j-1].seq || (hits[j].seq == hits[j-1].seq && hits[j].id < hits[j-1].id)) {
+			hits[j], hits[j-1] = hits[j-1], hits[j]
+			j--
+		}
+	}
+}
+
+// NoiseOverrideForGroup returns a genuinely earlier note's noise_override for
+// the same templated method+host+path. The current request is never a source,
+// so a later flush cannot copy its own annotation into the stored heuristic.
+// Results are cached per recording and dropped when notes change. The load
+// uses idx_request_notes_group and does not sort in SQLite.
+func (s *Store) NoiseOverrideForGroup(recordingID int64, method, rawURL string, seq int, id int64) (override bool, ok bool, err error) {
+	_, _, _, want := requestGroupKey(method, rawURL)
+	s.ovMu.Lock()
+	gen := uint64(0)
+	if s.ovGen != nil {
+		gen = s.ovGen[recordingID]
+	}
+	if s.ovCache != nil {
+		if groups, hit := s.ovCache[recordingID]; hit {
+			s.ovMu.Unlock()
+			return earlierOverride(groups[want], seq, id)
+		}
+	}
+	s.ovMu.Unlock()
+	groups, err := s.loadGroupOverrides(recordingID)
+	if err != nil {
+		return false, false, err
+	}
+	s.ovMu.Lock()
+	if s.ovGen == nil {
+		s.ovGen = map[int64]uint64{}
+	}
+	if s.ovGen[recordingID] == gen {
+		if s.ovCache == nil {
+			s.ovCache = map[int64]map[string][]groupOverride{}
+		}
+		s.ovCache[recordingID] = groups
+	}
+	s.ovMu.Unlock()
+	return earlierOverride(groups[want], seq, id)
+}
+
+func earlierOverride(hits []groupOverride, seq int, id int64) (bool, bool, error) {
+	for _, h := range hits {
+		if overrideIsEarlier(h.seq, h.id, seq, id) {
+			return h.on, true, nil
+		}
+	}
+	return false, false, nil
 }
 
 func b2i(b bool) int {

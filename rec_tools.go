@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -32,7 +31,7 @@ const (
 	recTieredHint            = "内置流程包「录制分析」用于识别录制并保存成工具（控制台「接入 AI / 设置」可关闭）。用户提出分析录制时，先 list_packs，再 load_pack(pack=-1) 加载内置「录制分析」，按返回说明里的顺序调用 rec_* 工具。用户没明确说保存到哪个流程包时，必须先问用户。"
 	recPackGuide             = `按这个顺序做，不要跳步：
 1. rec_list_recordings 列出录制，确认是哪一条。起始网址只给源（scheme://host）。
-2. rec_get_recording 看全貌（默认隐藏噪音）。相同 method+host+path 已合并，query 只给参数名。
+2. rec_get_recording 看全貌（默认隐藏噪音）。相同 method+host+模板路径已合并，query 只给参数名。
 3. 看不清作用时再 rec_get_request 看单条脱敏详情和可参数化字段 candidates。Cookie、Authorization、Token、密码和配置管理里的密钥都已遮盖。
 4. rec_annotate 给所有业务相关请求写作用（purpose）、分类（category）和是否属于本流程（useful）。noise_override 可纠正误判：true 强制当噪音，false 强制当业务请求。会修改数据的请求 category 必须是 write，并在回复用户时说明。
 5. 只保留完成用户目标所需的最少请求。
@@ -40,10 +39,6 @@ const (
 7. rec_save_tool 保存。pack 必填，没有默认值。新建包只有在用户明确给出名字时才把 create_pack 设为 true。同名工具要用户同意后才 overwrite=true。
 这些工具只读录制、写本机的标注和工具定义，不会重放请求。`
 )
-
-// sensitiveKeyRe matches header / query / body key names whose values must never
-// be shown to the model or stored as a tool literal.
-var sensitiveKeyRe = regexp.MustCompile(`(?i)(passw|passwd|pwd|password|secret|token|cookie|authorization|api[_-]?key|apikey|session|csrf|xsrf|bearer|credential|jwt|private[_-]?key|access[_-]?key|(?:^|[._-])pin(?:$|[._-]))`)
 
 func (a *App) recAnalysisEnabled() bool {
 	switch strings.ToLower(strings.TrimSpace(a.store.GetSetting(settingRecAnalysis, "on"))) {
@@ -82,14 +77,6 @@ func isRecTool(name string) bool {
 	default:
 		return false
 	}
-}
-
-func isSensitiveKey(k string) bool {
-	k = strings.TrimSpace(k)
-	if k == "" {
-		return false
-	}
-	return isPassKey(k) || sensitiveKeyRe.MatchString(k) || sensitiveKeyRe.MatchString(lastKey(k))
 }
 
 func isSensitiveHeader(name string) bool {
@@ -141,45 +128,49 @@ func recToolNames() []string {
 func recToolDefs() []map[string]any {
 	return []map[string]any{
 		{"name": "rec_list_recordings", "title": "列出录制",
-			"description": "【录制分析】列出本机全部录制：id、名称、创建时间、请求总数、业务请求数、起始网址的源（只有 scheme://host，不含路径和查询）。确定要分析哪一条之后调用 rec_get_recording。\n" + recWorkflow,
+			"description": "【录制分析】列出本机录制：id、名称、时间、请求数、业务请求数、origin（起始网址的源；起始网址为空时用第一条业务请求的源）。按包说明 guide 的顺序使用。",
 			"inputSchema": recSchema(map[string]any{}),
 			"annotations": recAnn(true)},
 		{"name": "rec_get_recording", "title": "查看录制全貌",
-			"description": "【录制分析】查看一条录制的 summary 和压缩后的请求行。相同 method+host+path 合并成一行，给出 count 和最早的 id。query 只返回参数名，不返回值。include_noise 默认 false，不返回判定为噪音的请求（标注里的 noise_override 优先于自动判断）。看不清时再对某一行的 id 调用 rec_get_request。\n" + recWorkflow,
+			"description": "【录制分析】查看压缩请求行：相同 method+host+模板路径合并，长数字/hex/UUID 写成 {id}，h 是 hosts 下标，note 短键 c/p/u 为分类、作用、是否属于本流程。默认不含噪音，suspect_noise 列出疑似误判接口；按包说明 guide 的顺序使用。",
 			"inputSchema": recSchema(map[string]any{
-				"recording_id":  map[string]any{"type": "integer", "description": "录制 id，来自 rec_list_recordings"},
-				"include_noise": map[string]any{"type": "boolean", "description": "true 时连噪音请求一起返回。默认 false"},
-				"offset":        map[string]any{"type": "integer", "description": "合并后的行偏移，默认 0"},
-				"limit":         map[string]any{"type": "integer", "description": "最多返回多少行，默认 50，最大 200"},
+				"recording_id":          map[string]any{"type": "integer", "description": "录制 id，来自 rec_list_recordings"},
+				"include_noise":         map[string]any{"type": "boolean", "description": "true 时连噪音请求一起返回。默认 false"},
+				"exclude_reasons":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "排除这些噪音原因。不会自动排除「静态资源」，要排除就写明"},
+				"include_noise_reasons": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "只额外包含这些噪音原因，业务请求始终包含"},
+				"offset":                map[string]any{"type": "integer", "description": "合并后的行偏移，默认 0"},
+				"limit":                 map[string]any{"type": "integer", "description": "最多返回多少行，默认 50，最大 200"},
 			}, "recording_id"),
 			"annotations": recAnn(true)},
 		{"name": "rec_get_request", "title": "查看单条请求",
-			"description": "【录制分析】查看单条请求的脱敏详情：请求头、响应头、截断后的请求体和响应体（附总长度）、可参数化的 candidates，以及已有标注。Cookie、Authorization、Token、密码、Set-Cookie 和配置管理里的密钥都会遮盖，不要在回复里复述任何疑似密钥的内容。POST/PUT/PATCH/DELETE 可能修改数据，须结合接口语义判断；实际修改数据的请求要标 category=write 并告诉用户。\n" + recWorkflow,
+			"description": "【录制分析】查看单条脱敏详情（请求头、响应头、正文、candidates、标注）；Cookie、Token、密码和配置管理密钥会遮盖，POST/PUT/PATCH/DELETE 可能改数据，须标 category=write 并告诉用户。按包说明 guide 的顺序使用。",
 			"inputSchema": recSchema(map[string]any{
 				"request_id": map[string]any{"type": "integer", "description": "请求 id，来自 rec_get_recording"},
 				"max_body":   map[string]any{"type": "integer", "description": "请求体和响应体各自最多返回的字节数，默认 4000"},
 			}, "request_id"),
 			"annotations": recAnn(true)},
 		{"name": "rec_annotate", "title": "标注录制",
-			"description": "【录制分析·写入标注】给一条录制写整体 summary，并批量给请求写作用。每条 note：request_id、purpose（中文一句话）、category（query 查询 / write 写操作 / auth 登录认证 / config 配置枚举 / page 页面 / noise 无关）、useful（是否属于要完成的流程）、noise_override（true 强制噪音，false 强制业务，省略则沿用自动判断）。source 固定为 agent。请求必须属于这条录制。会改数据的请求必须是 write，并在回复用户时说明。标完后选出最少请求；用户没说流程包就先问，不要调用 rec_save_tool。\n" + recWorkflow,
+			"description": "【录制分析·写入标注】写 summary，并用 request_id 或 request_ids 批量标注；apply_to_group=true 套用到同一模板路径组，会改数据的请求 category 必须是 write 并告诉用户。按包说明 guide 的顺序使用。",
 			"inputSchema": recSchema(map[string]any{
 				"recording_id": map[string]any{"type": "integer", "description": "录制 id"},
 				"summary":      map[string]any{"type": "string", "description": "这次录制对应的业务流程，一两句话"},
-				"notes": map[string]any{"type": "array", "description": "要写入的标注。同一 request_id 不要重复", "items": recSchema(map[string]any{
-					"request_id":     map[string]any{"type": "integer"},
+				"notes": map[string]any{"type": "array", "description": "要写入的标注。覆盖到的 request_id 不要重复", "items": recSchema(map[string]any{
+					"request_id":     map[string]any{"type": "integer", "description": "单个请求 id。与 request_ids 至少给一个"},
+					"request_ids":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "多个请求 id，可代替 request_id"},
+					"apply_to_group": map[string]any{"type": "boolean", "description": "true 时把本条标注套用到 request_id 所在的 method+host+模板路径组"},
 					"purpose":        map[string]any{"type": "string", "description": "中文一句话说明这个接口的作用"},
 					"category":       map[string]any{"type": "string", "enum": []string{"query", "write", "auth", "config", "page", "noise"}, "description": "query / write / auth / config / page / noise。会改数据的用 write"},
 					"useful":         map[string]any{"type": "boolean", "description": "是否属于要保存的业务流程"},
 					"noise_override": map[string]any{"type": "boolean", "description": "true 强制当噪音，false 强制当业务请求，省略则沿用自动判断"},
-				}, "request_id", "category")},
+				}, "category")},
 			}, "recording_id"),
 			"annotations": recAnn(false)},
 		{"name": "rec_list_target_packs", "title": "列出可保存的流程包",
-			"description": "【录制分析】列出可以保存工具的业务流程包：id、名称、是否开启、已有工具名。不含内置包「录制分析」。用户没明确说保存到哪个流程包时，先调用本工具，把这些真实选项告诉用户并询问，得到明确答复后再 rec_save_tool。不要自己挑一个，也不要默认新建。\n" + recWorkflow,
+			"description": "【录制分析】列出可保存工具的业务流程包（id、名称、是否开启、已有工具名），不含内置包「录制分析」；用户没明确指定流程包时先询问。按包说明 guide 的顺序使用。",
 			"inputSchema": recSchema(map[string]any{}),
 			"annotations": recAnn(true)},
 		{"name": "rec_save_tool", "title": "保存为工具",
-			"description": "【录制分析·写入工具】把一条录制请求保存成参数化工具并放进指定流程包。这是写操作：调用前告诉用户将要保存什么；若原请求会改数据，说明它是写操作。pack（流程包名称或 id）必填，没有默认值。用户没明确指定时禁止调用，先问用户。流程包不存在且 create_pack=false 时会失败并列出现有流程包，此时继续问，不要擅自创建。只有用户明确给出新名字时才 create_pack=true。同名工具已存在时失败，除非用户同意覆盖并且 overwrite=true。params.from 是 candidates 的路径，例如 query:keyword 或 body:user.id。敏感值不会写入工具。\n" + recWorkflow,
+			"description": "【录制分析·写入工具】把一条录制请求保存成参数化工具；pack 必填，没明确指定时不要调用，dry_run=true 只返回模板不写入，敏感值不会落盘。按包说明 guide 的顺序使用。",
 			"inputSchema": recSchema(map[string]any{
 				"request_id":  map[string]any{"type": "integer", "description": "要保存的请求 id"},
 				"pack":        map[string]any{"type": "string", "description": "流程包名称或 id。必填，没有默认值。用户没明确指定时不要调用"},
@@ -188,7 +179,7 @@ func recToolDefs() []map[string]any {
 				"description": map[string]any{"type": "string", "description": "工具做什么、什么时候调用"},
 				"params": map[string]any{"type": "array", "description": "要变成参数的字段", "items": recSchema(map[string]any{
 					"name":        map[string]any{"type": "string", "description": "参数名"},
-					"from":        map[string]any{"type": "string", "description": "候选路径：query:键、body:字段路径 或 form:字段"},
+					"from":        map[string]any{"type": "string", "description": "候选路径：query:键、body:字段路径、form:字段 或 multipart:字段"},
 					"type":        map[string]any{"type": "string", "description": "string、number、integer 或 boolean"},
 					"description": map[string]any{"type": "string"},
 					"required":    map[string]any{"type": "boolean"},
@@ -196,6 +187,7 @@ func recToolDefs() []map[string]any {
 				}, "from")},
 				"create_pack": map[string]any{"type": "boolean", "description": "仅当用户明确说出一个还不存在的流程包名称时设为 true。默认 false"},
 				"overwrite":   map[string]any{"type": "boolean", "description": "同名工具已存在时，只有用户同意覆盖才设为 true。默认 false"},
+				"dry_run":     map[string]any{"type": "boolean", "description": "true 时校验并返回将保存的模板，不创建流程包、不写入工具。默认 false"},
 			}, "request_id", "pack", "name"),
 			"annotations": recAnn(false)},
 	}
@@ -228,13 +220,37 @@ func (a *App) callRecTool(mc *mcpCtx, name string, args map[string]any) any {
 		}
 	}
 	if isErr {
-		lits, err := a.recErrorLiterals(args)
-		if err != nil {
-			text = "录制分析失败，无法安全读取脱敏上下文。"
+		// Interpolated data is sanitized before this text is composed. Do not
+		// mask the finished sentence: a vault value such as "overwrite" must
+		// not rewrite server text like overwrite=true.
+		if strings.HasPrefix(text, recStructuredPrefix) {
+			return textResult(text[len(recStructuredPrefix):], true)
 		}
-		text = a.finishRec(map[string]any{"error": text}, lits)
+		return textResult(string(compactJSON(map[string]any{"error": text})), true)
 	}
 	return textResult(text, isErr)
+}
+
+// redactEcho sanitizes one interpolated fragment. The surrounding template is
+// composed afterwards and must not be scrubbed again.
+func (a *App) redactEcho(s string, lits []string) string {
+	if strings.TrimSpace(s) == "" || a == nil {
+		return s
+	}
+	return a.sanitizeString(s, false, 0, lits)
+}
+
+const recStructuredPrefix = "\x1e"
+
+func recProblemResult(problems []string) (string, bool) {
+	if len(problems) == 0 {
+		return "", false
+	}
+	msg := problems[0]
+	if len(problems) > 1 {
+		msg = "发现 " + strconv.Itoa(len(problems)) + " 个问题：" + strings.Join(problems, "；")
+	}
+	return recStructuredPrefix + string(compactJSON(map[string]any{"error": msg, "problems": problems})), true
 }
 
 func (a *App) mcpLoadRecPack(mc *mcpCtx) any {
@@ -299,7 +315,7 @@ func (a *App) sanitizeRecValue(v reflect.Value, lits []string) any {
 		}
 		return a.sanitizeRecValue(v.Elem(), lits)
 	case reflect.String:
-		return a.scrubRecText(v.String(), lits)
+		return a.sanitizeString(v.String(), false, 0, lits)
 	case reflect.Map:
 		if v.IsNil() {
 			return nil
@@ -323,17 +339,14 @@ func (a *App) sanitizeRecValue(v reflect.Value, lits []string) any {
 
 func (a *App) scrubRecText(s string, lits []string) string {
 	lits = append([]string(nil), lits...)
-	if a.vault != nil {
-		lits = append(lits, a.vault.secretVariants()...)
-		a.vault.mu.RLock()
-		for _, entry := range a.vault.cache {
-			if entry.typ == "secret" {
-				lits = append(lits, entry.value)
+	if a != nil && a.vault != nil {
+		for _, x := range a.vault.secretVariants() {
+			if crossFieldLiteral(x) {
+				lits = append(lits, x)
 			}
 		}
-		a.vault.mu.RUnlock()
 	}
-	return replaceLiterals(s, lits)
+	return outsideRecRefs(s, func(part string) string { return replaceLiterals(part, lits) })
 }
 
 func (a *App) recordingSecretLiterals(id int64) ([]string, error) {
@@ -381,7 +394,11 @@ func (a *App) recErrorLiterals(args map[string]any) ([]string, error) {
 
 func (a *App) recCandidates(q *ReqRecord) []Candidate {
 	copy := *q
-	kind, _, err := bodyKind(q.ReqBody, headerValue(q.ReqHeaders, "Content-Type"))
+	kind, params, err := bodyKind(q.ReqBody, headerValue(q.ReqHeaders, "Content-Type"))
+	var parts []recPart
+	if err == nil && kind == "multipart" {
+		parts, _ = parseRecMultipart(q.ReqBody, params["boundary"])
+	}
 	if err != nil || kind == "multipart" || kind == "text" {
 		copy.ReqBody = ""
 	}
@@ -394,16 +411,34 @@ func (a *App) recCandidates(q *ReqRecord) []Candidate {
 		copy.ReqBody = tolerantForm(copy.ReqBody).Encode()
 	}
 	cs := SuggestParams(&copy)
+	for _, p := range parts {
+		if p.filename != "" {
+			continue
+		}
+		cs = append(cs, Candidate{Loc: "multipart", Path: p.name, Name: paramName(p.name), Type: "string", Example: p.value, Suggest: !noisyParam.MatchString(p.name)})
+	}
 	lits := sensitiveLiterals(q)
 	for i := range cs {
 		c := &cs[i]
 		c.raw = c.Example
-		if a.vault != nil {
+		// Short vault values ("1", "true") must not mark page numbers or
+		// websocket opcodes as secrets. Exact vault matches still apply to
+		// values that are eligible as cross-field literals.
+		if a.vault != nil && crossFieldLiteral(c.raw) {
 			if ref := a.vault.FindByValue(c.raw); ref != "" && a.vault.TypeOf(ref) == "secret" {
 				c.Secret, c.Ref, c.RefExists = true, ref, true
 			}
 		}
-		c.Secret = c.Secret || isSensitiveKey(c.Path) || containsLiteral(c.raw, lits) || a.scrubRecText(c.raw, nil) != c.raw
+		// Ancestry, not the leaf name: credentials.value stays secret after rename.
+		if pathSensitive(c.Path) {
+			c.Secret = true
+		}
+		if crossFieldLiteral(c.raw) && (containsLiteral(c.raw, lits) || a.scrubRecText(c.raw, nil) != c.raw) {
+			c.Secret = true
+		}
+		if a.revealsSecret(c.raw, lits) {
+			c.Secret = true
+		}
 		if c.Secret {
 			c.Example, c.Suggest = "", true
 		}
@@ -415,31 +450,35 @@ func (a *App) recCandidates(q *ReqRecord) []Candidate {
 // classification applied to all fields, including descendants and unselected fields.
 func (a *App) buildRecDraft(q *ReqRecord, chosen []Candidate) (*Tool, error) {
 	copy := *q
-	kind, _, err := bodyKind(copy.ReqBody, headerValue(copy.ReqHeaders, "Content-Type"))
+	kind, params, err := bodyKind(copy.ReqBody, headerValue(copy.ReqHeaders, "Content-Type"))
 	if err != nil {
 		return nil, fmt.Errorf("请求体无法安全解析")
 	}
-	if kind == "json" && strings.TrimSpace(copy.ReqBody) != "" {
+	var mpBody, mpBoundary string
+	if kind == "multipart" {
+		mpBody = copy.ReqBody
+		mpBoundary = params["boundary"]
+		if _, err := parseRecMultipart(mpBody, mpBoundary); err != nil {
+			return nil, fmt.Errorf("multipart 请求体无法安全解析")
+		}
+		copy.ReqBody = ""
+	} else if kind == "json" && strings.TrimSpace(copy.ReqBody) != "" {
 		if _, err := parseRecJSON(copy.ReqBody); err != nil {
 			return nil, fmt.Errorf("请求体 JSON 不完整，无法安全保存")
 		}
-	}
-	if kind == "multipart" {
-		return nil, fmt.Errorf("multipart 请求体暂不支持保存，请选择可安全参数化的 JSON 或表单请求")
-	}
-	if kind == "form" {
+	} else if kind == "form" {
 		copy.ReqBody = tolerantForm(copy.ReqBody).Encode()
 	}
 	seen := map[string]bool{}
 	prepared := make([]Candidate, 0, len(chosen))
 	for _, c := range chosen {
 		seen[c.Loc+":"+c.Path] = true
-		if !placeholderRe.MatchString(c.raw) {
+		if !isWholePlaceholder(c.raw) {
 			prepared = append(prepared, c)
 		}
 	}
 	for _, c := range a.recCandidates(q) {
-		if c.Secret && !seen[c.Loc+":"+c.Path] && !placeholderRe.MatchString(c.raw) {
+		if c.Secret && !seen[c.Loc+":"+c.Path] && !isWholePlaceholder(c.raw) {
 			prepared = append(prepared, c)
 		}
 	}
@@ -458,24 +497,59 @@ func (a *App) buildRecDraft(q *ReqRecord, chosen []Candidate) (*Tool, error) {
 		c.Example = ""
 		// Vault references resolve to strings. Numeric/boolean fields instead
 		// become required typed parameters so replay preserves their value types.
-		if c.Type != "string" {
+		// Draft construction never writes the vault: reuse an existing entry,
+		// otherwise leave Ref empty so the field becomes a required parameter.
+		if c.Type != "string" || !crossFieldLiteral(c.raw) {
 			c.Ref = ""
-			continue
-		}
-		if c.raw == "" || c.raw == secretMask || placeholderRe.MatchString(c.raw) {
-			continue
-		}
-		if c.Ref == "" && a.vault != nil {
-			hash := sha256.Sum256([]byte(fmt.Sprintf("%d:%s:%s", q.ID, c.Loc, c.Path)))
-			c.Ref = fmt.Sprintf("rec_%x", hash[:16])
-			if err := a.vault.Upsert(c.Ref, "secret", c.raw, originOf(q.URL), "录制分析自动保存"); err != nil {
-				return nil, fmt.Errorf("保存敏感字段到配置管理失败：%w", err)
-			}
 		}
 	}
 	t, err := BuildDraft(&copy, chosen)
 	if err != nil {
 		return nil, err
+	}
+	if kind == "multipart" {
+		repl := map[string]string{}
+		used := map[string]bool{}
+		for _, p := range t.Params {
+			used[p.Name] = true
+		}
+		for _, c := range chosen {
+			if c.Loc != "multipart" {
+				continue
+			}
+			if c.Ref != "" {
+				repl[c.Path] = "{{secret." + c.Ref + "}}"
+				continue
+			}
+			name := c.Name
+			if name == "" {
+				name = paramName(c.Path)
+			}
+			base := name
+			for i := 2; used[name]; i++ {
+				name = fmt.Sprintf("%s_%d", base, i)
+			}
+			used[name] = true
+			desc := "multipart 字段 " + c.Path
+			ex := c.Example
+			reqd := !optionalParam.MatchString(name)
+			if c.Secret {
+				desc = removedSecretDesc
+				ex = ""
+				reqd = true
+			}
+			typ := c.Type
+			if typ == "" {
+				typ = "string"
+			}
+			t.Params = append(t.Params, Param{Name: name, Type: typ, Required: reqd, Default: ex, Description: desc})
+			repl[c.Path] = "{{" + name + "}}"
+		}
+		body, err := rebuildMultipart(mpBody, mpBoundary, repl)
+		if err != nil {
+			return nil, fmt.Errorf("multipart 请求体无法安全保存")
+		}
+		t.Body = body
 	}
 	t.Name, t.SourceReqID = suggestToolName(q), q.ID
 	rec, err := a.store.GetRecording(q.RecordingID)
@@ -500,16 +574,45 @@ func (a *App) recListRecordings() (string, bool) {
 			return "读取脱敏上下文失败：" + err.Error(), true
 		}
 		lits = append(lits, context...)
+		origin := originOf(rec.StartURL)
+		if origin == "" {
+			var oerr error
+			origin, oerr = a.recordingBusinessOrigin(rec.ID)
+			if oerr != nil {
+				return "读取录制失败：" + oerr.Error(), true
+			}
+		}
 		items = append(items, map[string]any{
 			"id":             rec.ID,
 			"name":           rec.Name,
 			"created_at":     rec.CreatedAt,
 			"request_count":  rec.RequestCount,
 			"business_count": rec.UsefulCount,
-			"origin":         originOf(rec.StartURL),
+			"origin":         origin,
 		})
 	}
 	return a.finishRec(map[string]any{"recordings": items}, lits), false
+}
+
+func (a *App) recordingBusinessOrigin(id int64) (string, error) {
+	rows, err := a.store.ListRequests(id)
+	if err != nil {
+		return "", err
+	}
+	notes, err := a.store.RequestNotes(id)
+	if err != nil {
+		return "", err
+	}
+	for i := range rows {
+		applyRequestNote(&rows[i], notes)
+		if rows[i].Noise {
+			continue
+		}
+		if o := originOf(rows[i].URL); o != "" {
+			return o, nil
+		}
+	}
+	return "", nil
 }
 
 func (a *App) recGetRecording(args map[string]any) (string, bool) {
@@ -530,6 +633,14 @@ func (a *App) recGetRecording(args map[string]any) (string, bool) {
 		return "读取标注失败：" + err.Error(), true
 	}
 	includeNoise := argBool(args, "include_noise", false)
+	excludeReasons, err := argStringSlice(args, "exclude_reasons")
+	if err != nil {
+		return err.Error(), true
+	}
+	includeReasons, err := argStringSlice(args, "include_noise_reasons")
+	if err != nil {
+		return err.Error(), true
+	}
 	offset := argNonNeg(args, "offset", 0)
 	limit := argNonNeg(args, "limit", 50)
 	if _, ok := args["limit"]; !ok || args["limit"] == nil || limit == 0 {
@@ -538,15 +649,22 @@ func (a *App) recGetRecording(args map[string]any) (string, bool) {
 	if limit > 200 {
 		limit = 200
 	}
+	type member struct {
+		id                   int64
+		seq                  int
+		status               int
+		noise, heuristic     bool
+		method, host, path   string
+		rawPath, res, reason string
+		note                 *RequestNote
+		keys                 map[string]struct{}
+	}
 	type group struct {
-		id, seq                    int64
-		count                      int
-		method, host, path, reason string
-		status                     int
-		res                        string
-		noise, heuristic           bool
-		note                       *RequestNote
-		keys                       map[string]struct{}
+		key        string
+		host, path string
+		example    string
+		templated  bool
+		members    []member
 	}
 	var order []string
 	groups := map[string]*group{}
@@ -560,53 +678,161 @@ func (a *App) recGetRecording(args map[string]any) (string, bool) {
 	for i := range reqs {
 		applyRequestNote(&reqs[i], notes)
 		lits = append(lits, sensitiveQueryValues(reqs[i].URL)...)
-		if !includeNoise && reqs[i].Noise {
-			continue
-		}
-		u, _ := url.Parse(reqs[i].URL)
-		host, path := "", "/"
-		if u != nil {
-			host = strings.ToLower(u.Host)
-			if u.Path != "" {
-				path = u.Path
-			}
-		}
-		method := strings.ToUpper(reqs[i].Method)
-		key := method + " " + host + " " + path
+		host, templated, rawPath, key := requestGroupKey(reqs[i].Method, reqs[i].URL)
 		g := groups[key]
 		if g == nil {
-			g = &group{
-				id: int64(reqs[i].ID), seq: int64(reqs[i].Seq), method: method, host: host, path: path,
-				status: reqs[i].Status, res: reqs[i].ResourceType, noise: reqs[i].Noise,
-				heuristic: reqs[i].NoiseHeuristic, reason: reqs[i].NoiseReason, note: reqs[i].Note,
-				keys: map[string]struct{}{},
-			}
+			g = &group{key: key, host: host, path: templated, example: rawPath, templated: templated != rawPath}
 			groups[key] = g
 			order = append(order, key)
 		}
-		g.count++
-		if u != nil {
+		keys := map[string]struct{}{}
+		if u, err := url.Parse(reqs[i].URL); err == nil && u != nil {
 			for k := range u.Query() {
 				if k != "" {
-					g.keys[k] = struct{}{}
+					keys[k] = struct{}{}
 				}
 			}
 		}
+		g.members = append(g.members, member{
+			id: int64(reqs[i].ID), seq: reqs[i].Seq, status: reqs[i].Status,
+			noise: reqs[i].Noise, heuristic: reqs[i].NoiseHeuristic,
+			method: strings.ToUpper(reqs[i].Method), host: host, path: templated, rawPath: rawPath,
+			res: reqs[i].ResourceType, reason: reqs[i].NoiseReason, note: reqs[i].Note, keys: keys,
+		})
+	}
+	includeMember := func(m member) bool {
+		if !m.noise {
+			return true
+		}
+		if reasonListed(excludeReasons, m.reason) {
+			return false
+		}
+		if len(includeReasons) > 0 {
+			return reasonListed(includeReasons, m.reason)
+		}
+		return includeNoise
+	}
+	hosts := []string{}
+	hostIndex := map[string]int{}
+	hostOf := func(h string) int {
+		if i, ok := hostIndex[h]; ok {
+			return i
+		}
+		hostIndex[h] = len(hosts)
+		hosts = append(hosts, h)
+		return hostIndex[h]
 	}
 	rows := make([]map[string]any, 0, len(order))
+	var suspect []map[string]any
 	for _, key := range order {
 		g := groups[key]
-		keys := make([]string, 0, len(g.keys))
-		for k := range g.keys {
-			keys = append(keys, k)
+		mixed := false
+		if len(g.members) > 0 {
+			first := g.members[0].noise
+			for _, m := range g.members[1:] {
+				if m.noise != first {
+					mixed = true
+					break
+				}
+			}
 		}
-		sort.Strings(keys)
-		rows = append(rows, map[string]any{
-			"id": g.id, "seq": g.seq, "count": g.count, "method": g.method, "host": g.host, "path": g.path,
-			"query_keys": keys, "status": g.status, "resource_type": g.res,
-			"noise": g.noise, "noise_reason": g.reason, "noise_heuristic": g.heuristic,
-			"note": noteView(g.note),
-		})
+		var included []member
+		for _, m := range g.members {
+			if includeMember(m) {
+				included = append(included, m)
+			}
+		}
+		suspectGroup := false
+		for _, m := range g.members {
+			if isSuspectNoise(m.method, m.res, m.path, m.reason, m.noise) {
+				suspectGroup = true
+				break
+			}
+		}
+		if len(included) == 0 {
+			if !includeNoise && suspectGroup && len(suspect) < 30 {
+				m0 := g.members[0]
+				item := map[string]any{
+					"id": m0.id, "method": m0.method, "h": hostOf(g.host), "path": g.path,
+					"reason": m0.reason, "count": len(g.members),
+				}
+				if len(g.members) > 1 {
+					ids := make([]int64, 0, len(g.members))
+					for _, m := range g.members {
+						ids = append(ids, m.id)
+						if len(ids) == 50 {
+							break
+						}
+					}
+					item["ids"] = ids
+				}
+				suspect = append(suspect, item)
+			}
+			continue
+		}
+		m0 := included[0]
+		keys := map[string]struct{}{}
+		// Identity and member ids come from every member. count is the filtered
+		// size, so a business view still counts only business rows.
+		ids := make([]int64, 0, len(g.members))
+		for _, m := range g.members {
+			ids = append(ids, m.id)
+		}
+		for _, m := range included {
+			for k := range m.keys {
+				keys[k] = struct{}{}
+			}
+		}
+		qkeys := make([]string, 0, len(keys))
+		for k := range keys {
+			qkeys = append(qkeys, k)
+		}
+		sort.Strings(qkeys)
+		row := map[string]any{
+			"id": g.members[0].id, "seq": m0.seq, "count": len(included), "method": m0.method,
+			"h": hostOf(g.host), "path": g.path,
+		}
+		if g.templated {
+			row["example_path"] = g.example
+		}
+		if len(qkeys) > 0 {
+			row["query_keys"] = qkeys
+		}
+		if m0.status != 0 {
+			row["status"] = m0.status
+		}
+		if m0.res != "" {
+			row["resource_type"] = m0.res
+		}
+		if m0.noise {
+			row["noise"] = true
+		}
+		if m0.reason != "" {
+			row["noise_reason"] = m0.reason
+		}
+		if m0.heuristic != m0.noise {
+			row["noise_heuristic"] = m0.heuristic
+		}
+		if note := noteCompact(m0.note); note != nil {
+			row["note"] = note
+		}
+		idList := ids
+		truncIDs := false
+		if len(idList) > 50 {
+			idList = idList[:50]
+			truncIDs = true
+		}
+		row["ids"] = idList
+		if truncIDs {
+			row["ids_truncated"] = true
+		}
+		if mixed {
+			row["mixed_noise"] = true
+		}
+		if suspectGroup && m0.noise {
+			row["suspect"] = true
+		}
+		rows = append(rows, row)
 	}
 	total := len(rows)
 	if offset > total {
@@ -619,12 +845,32 @@ func (a *App) recGetRecording(args map[string]any) (string, bool) {
 	if page == nil {
 		page = []map[string]any{}
 	}
-	return a.finishRec(map[string]any{
-		"recording_id": rec.ID, "name": rec.Name, "summary": rec.Summary,
+	hasMore := offset+len(page) < total
+	var next any
+	if hasMore {
+		next = offset + len(page)
+	}
+	if hosts == nil {
+		hosts = []string{}
+	}
+	out := map[string]any{
+		"recording_id": rec.ID, "name": rec.Name,
 		"request_count": rec.RequestCount, "business_count": rec.UsefulCount,
-		"include_noise": includeNoise, "offset": offset, "limit": limit,
-		"group_count": total, "requests": page,
-	}, lits), false
+		"hosts": hosts, "offset": offset, "limit": limit,
+		"total_groups": total, "group_count": total,
+		"has_more": hasMore, "next_offset": next,
+		"requests": page,
+	}
+	if strings.TrimSpace(rec.Summary) != "" {
+		out["summary"] = rec.Summary
+	}
+	if includeNoise {
+		out["include_noise"] = true
+	}
+	if !includeNoise && len(suspect) > 0 {
+		out["suspect_noise"] = suspect
+	}
+	return a.finishRec(out, lits), false
 }
 
 func (a *App) recGetRequest(args map[string]any) (string, bool) {
@@ -660,18 +906,18 @@ func (a *App) recGetRequest(args map[string]any) (string, bool) {
 			path = u.Path
 		}
 	}
-	reqShown, reqTotal, reqCut, reqHidden := a.recBodyView(q.ReqBody, headerValue(q.ReqHeaders, "Content-Type"), lits, maxBody)
-	respShown, respTotal, respCut, respHidden := a.recBodyView(q.RespBody, responseContentType(q), lits, maxBody)
+	reqShown, reqTotal, reqCut, reqHidden, reqPartial, reqOutline := a.recBodyView(q.ReqBody, headerValue(q.ReqHeaders, "Content-Type"), lits, maxBody)
+	respShown, respTotal, respCut, respHidden, respPartial, respOutline := a.recBodyView(q.RespBody, responseContentType(q), lits, maxBody)
 	cands := a.recCandidates(q)
 	candOut := make([]map[string]any, 0, len(cands))
 	candBytes := 0
 	for _, c := range cands {
 		example := c.Example
-		secret := c.Secret || isSensitiveKey(c.Path)
+		secret := c.Secret || pathSensitive(c.Path)
 		if secret {
 			example = ""
 		} else {
-			example = a.scrubRecText(example, lits)
+			example = a.sanitizeString(example, false, 0, lits)
 		}
 		example, exTotal, exCut := clipText(example, 200)
 		row := map[string]any{
@@ -686,7 +932,7 @@ func (a *App) recGetRequest(args map[string]any) (string, bool) {
 		candBytes += rowBytes
 		candOut = append(candOut, row)
 	}
-	shownURL := a.scrubRecText(maskURLSensitive(q.URL), lits)
+	shownURL := a.maskURLSensitive(q.URL, lits)
 	out := map[string]any{
 		"id": q.ID, "recording_id": q.RecordingID, "seq": q.Seq,
 		"method": q.Method, "url": shownURL, "host": host, "path": path,
@@ -699,8 +945,29 @@ func (a *App) recGetRequest(args map[string]any) (string, bool) {
 		"req_body_hidden": reqHidden, "resp_body_hidden": respHidden,
 		"note": noteView(q.Note), "candidates": candOut, "candidates_truncated": len(candOut) < len(cands),
 	}
+	if reqPartial {
+		out["req_body_partial"] = true
+	}
+	if respPartial {
+		out["resp_body_partial"] = true
+	}
+	if reqOutline != nil {
+		out["req_body_outline"] = reqOutline
+	}
+	if respOutline != nil {
+		out["resp_body_outline"] = respOutline
+	}
+	if q.RespBody == "" && (strings.EqualFold(q.ResourceType, "Document") || strings.EqualFold(q.ResourceType, "Other")) {
+		out["resp_body_note"] = recSafeText("响应体未采集（页面文档/重定向等不记录响应体）")
+	}
+	switch strings.ToUpper(q.Method) {
+	case "GET", "HEAD", "OPTIONS":
+		if q.ReqBody == "" {
+			out["req_body_note"] = recSafeText("请求体未采集（该方法通常没有请求体）")
+		}
+	}
 	if isWriteMethod(q.Method) {
-		out["write_hint"] = "POST/PUT/PATCH/DELETE 可能修改数据，请结合接口语义和标注判断；实际修改数据的请求必须标 category=write，并向用户说明。"
+		out["write_hint"] = recSafeText("POST/PUT/PATCH/DELETE 可能修改数据，请结合接口语义和标注判断；实际修改数据的请求必须标 category=write，并向用户说明。")
 	}
 	return a.finishRec(out, lits), false
 }
@@ -732,52 +999,116 @@ func (a *App) recAnnotate(args map[string]any) (string, bool) {
 	if summary == nil && len(items) == 0 {
 		return "请提供 summary（这次录制在做什么）或 notes（给业务请求写作用）。", true
 	}
+	reqs, err := a.store.ListRequests(rid)
+	if err != nil {
+		return "读取请求失败：" + err.Error(), true
+	}
+	byID := map[int64]*ReqRecord{}
+	groupIDs := map[string][]int64{}
+	for i := range reqs {
+		byID[reqs[i].ID] = &reqs[i]
+		_, _, _, key := requestGroupKey(reqs[i].Method, reqs[i].URL)
+		groupIDs[key] = append(groupIDs[key], reqs[i].ID)
+	}
 	batch := make([]RequestNote, 0, len(items))
 	seen := map[int64]bool{}
+	written := make([]int64, 0)
 	for i, item := range items {
 		m, err := argObject(item)
 		if err != nil {
 			return fmt.Sprintf("notes[%d] 必须是对象。", i), true
 		}
-		reqID, ok := argInt64(m, "request_id")
-		if !ok || reqID <= 0 {
-			return fmt.Sprintf("notes[%d] 缺少 request_id。", i), true
+		var ids []int64
+		if reqID, ok := argInt64(m, "request_id"); ok && reqID > 0 {
+			ids = append(ids, reqID)
+		} else if _, exists := m["request_id"]; exists && m["request_id"] != nil {
+			return fmt.Sprintf("notes[%d] 的 request_id 不合法。", i), true
 		}
-		if seen[reqID] {
-			return fmt.Sprintf("notes 里 request_id %d 重复。", reqID), true
+		if rawIDs, exists := m["request_ids"]; exists && rawIDs != nil {
+			arr, err := argArray(rawIDs)
+			if err != nil {
+				return fmt.Sprintf("notes[%d] 的 request_ids 必须是数组。", i), true
+			}
+			for _, one := range arr {
+				id, ok := scalarInt64(one)
+				if !ok || id <= 0 {
+					return fmt.Sprintf("notes[%d] 的 request_ids 含有不合法的 id。", i), true
+				}
+				ids = append(ids, id)
+			}
 		}
-		seen[reqID] = true
-		q, err := a.store.GetRequest(reqID)
-		if err != nil || q == nil {
-			return fmt.Sprintf("request_id %d 不存在。", reqID), true
+		if len(ids) == 0 {
+			return fmt.Sprintf("notes[%d] 缺少 request_id 或 request_ids。", i), true
 		}
-		if q.RecordingID != rid {
-			return fmt.Sprintf("request_id %d 不属于录制 %d。请只标注这次录制里的请求。", reqID, rid), true
+		anchor := ids[0]
+		if _, ok := argInt64(m, "request_id"); ok {
+			anchor = ids[0]
+		}
+		if argBool(m, "apply_to_group", false) {
+			reqID, ok := argInt64(m, "request_id")
+			if !ok || reqID <= 0 {
+				return fmt.Sprintf("notes[%d] 设置了 apply_to_group 但缺少 request_id。", i), true
+			}
+			q := byID[reqID]
+			if q == nil {
+				return fmt.Sprintf("request_id %d 不存在。", reqID), true
+			}
+			_, _, _, key := requestGroupKey(q.Method, q.URL)
+			ids = append(append([]int64{}, groupIDs[key]...), ids...)
+			anchor = reqID
+		}
+		uniq := make([]int64, 0, len(ids))
+		local := map[int64]bool{}
+		for _, id := range ids {
+			if local[id] {
+				continue
+			}
+			local[id] = true
+			uniq = append(uniq, id)
 		}
 		cat := strings.TrimSpace(argStr(m, "category"))
 		if !validNoteCategory(cat) {
-			return fmt.Sprintf("request_id %d 的 category %q 不合法，只能是 query、write、auth、config、page、noise。", reqID, cat), true
+			shown := secretMask
+			if lits, lerr := a.recordingSecretLiterals(rid); lerr == nil {
+				shown = a.redactEcho(cat, lits)
+			}
+			return fmt.Sprintf("request_id %d 的 category %q 不合法，只能是 query、write、auth、config、page、noise。", anchor, shown), true
 		}
 		purpose := ""
 		if v, exists := m["purpose"]; exists && v != nil {
 			s, ok := v.(string)
 			if !ok {
-				return fmt.Sprintf("request_id %d 的 purpose 必须是字符串。", reqID), true
+				return fmt.Sprintf("request_id %d 的 purpose 必须是字符串。", anchor), true
 			}
 			purpose = strings.TrimSpace(s)
 		}
 		useful, err := argBoolPtr(m, "useful")
 		if err != nil {
-			return fmt.Sprintf("request_id %d 的 useful 必须是布尔值。", reqID), true
+			return fmt.Sprintf("request_id %d 的 useful 必须是布尔值。", anchor), true
 		}
 		override, err := argBoolPtr(m, "noise_override")
 		if err != nil {
-			return fmt.Sprintf("request_id %d 的 noise_override 必须是布尔值。", reqID), true
+			return fmt.Sprintf("request_id %d 的 noise_override 必须是布尔值。", anchor), true
 		}
-		batch = append(batch, RequestNote{
-			RequestID: reqID, RecordingID: rid, Purpose: purpose, Category: cat,
-			Useful: useful, NoiseOverride: override, Source: "agent",
-		})
+		for _, id := range uniq {
+			if seen[id] {
+				return fmt.Sprintf("notes 里 request_id %d 重复。", id), true
+			}
+			seen[id] = true
+			q := byID[id]
+			if q == nil {
+				got, err := a.store.GetRequest(id)
+				if err != nil || got == nil {
+					return fmt.Sprintf("request_id %d 不存在。", id), true
+				}
+				return fmt.Sprintf("request_id %d 不属于录制 %d。请只标注这次录制里的请求。", id, rid), true
+			}
+			batch = append(batch, RequestNote{
+				RequestID: id, RecordingID: rid, Purpose: purpose, Category: cat,
+				Useful: useful, NoiseOverride: override, Source: "agent",
+			})
+			written = append(written, id)
+		}
 	}
 	if summary != nil {
 		if err := a.store.SetRecordingSummary(rid, *summary); err != nil {
@@ -789,31 +1120,15 @@ func (a *App) recAnnotate(args map[string]any) (string, bool) {
 			return fmt.Sprintf("保存 request_id %d 的标注失败：%s", n.RequestID, err.Error()), true
 		}
 	}
-	rec, err = a.store.GetRecording(rid)
-	if err != nil {
-		return "读取录制失败：" + err.Error(), true
-	}
-	stored, err := a.store.RequestNotes(rid)
-	if err != nil {
-		return "读取标注失败：" + err.Error(), true
-	}
 	lits, err := a.recordingSecretLiterals(rid)
 	if err != nil {
 		return "读取脱敏上下文失败：" + err.Error(), true
 	}
-	saved := make([]any, 0, len(batch))
-	for _, n := range batch {
-		if cur, ok := stored[n.RequestID]; ok {
-			cp := cur
-			saved = append(saved, noteView(&cp))
-		}
-	}
-	sum := ""
-	if rec != nil {
-		sum = rec.Summary
+	if written == nil {
+		written = []int64{}
 	}
 	return a.finishRec(map[string]any{
-		"recording_id": rid, "summary": sum, "updated": len(batch), "notes": saved,
+		"recording_id": rid, "updated": len(batch), "request_ids": written, "summary_updated": summary != nil,
 	}, lits), false
 }
 
@@ -842,7 +1157,7 @@ func (a *App) recListTargetPacks() (string, bool) {
 	}
 	return a.finishRec(map[string]any{
 		"packs": out,
-		"hint":  "这些是可以保存工具的业务流程包，不含内置包「录制分析」。用户没明确说用哪个时，把这份列表告诉用户并询问，得到答复后再调用 rec_save_tool。",
+		"hint":  recSafeText("这些是可以保存工具的业务流程包，不含内置包「录制分析」。用户没明确说用哪个时，把这份列表告诉用户并询问，得到答复后再调用 rec_save_tool。"),
 	}, nil), false
 }
 
@@ -853,84 +1168,127 @@ type recParamSpec struct {
 }
 
 func (a *App) recSaveTool(mc *mcpCtx, args map[string]any) (string, bool) {
-	reqID, ok := argInt64(args, "request_id")
-	if !ok || reqID <= 0 {
-		return "请提供 request_id（来自 rec_get_recording 的 id）。", true
+	var problems []string
+	reqID, reqOK := argInt64(args, "request_id")
+	if !reqOK || reqID <= 0 {
+		problems = append(problems, "请提供 request_id（来自 rec_get_recording 的 id）。")
 	}
 	name := strings.TrimSpace(argStr(args, "name"))
 	if name == "" {
-		return "请提供 name（工具英文标识，例如 search_order）。", true
+		problems = append(problems, "请提供 name（工具英文标识，例如 search_order）。")
+	} else if !toolNameRe.MatchString(name) {
+		problems = append(problems, "name 不合法，只能包含字母、数字、下划线和连字符，最长 64。")
 	}
 	packRef := strings.TrimSpace(argStr(args, "pack"))
 	if packRef == "" {
-		return a.askPackText("必须指定 pack（流程包名称或 id），没有默认值。"), true
+		problems = append(problems, a.askPackText("必须指定 pack（流程包名称或 id），没有默认值。"))
 	}
-	q, err := a.store.GetRequest(reqID)
-	if err != nil || q == nil {
-		return fmt.Sprintf("请求 %d 不存在。", reqID), true
+	specs, paramProblems := parseRecParams(args)
+	problems = append(problems, paramProblems...)
+	var q *ReqRecord
+	if reqOK && reqID > 0 {
+		got, err := a.store.GetRequest(reqID)
+		if err != nil || got == nil {
+			problems = append(problems, fmt.Sprintf("请求 %d 不存在。", reqID))
+		} else {
+			q = got
+		}
 	}
-	specs, err := parseRecParams(args)
-	if err != nil {
-		return err.Error(), true
+	chosen := make([]Candidate, 0, len(specs))
+	overrides := map[string]recParamSpec{}
+	var saveLits []string
+	if q != nil {
+		cands := a.recCandidates(q)
+		names, sources := map[string]bool{}, map[string]bool{}
+		saveLits = sensitiveLiterals(q)
+		for _, sp := range specs {
+			c, ok := matchCandidate(cands, sp.From)
+			if !ok {
+				problems = append(problems, fmt.Sprintf("参数 %q 的 from %q 对不上这条请求的候选字段。可用：%s。from 写成 query:关键字、body:字段路径、form:字段 或 multipart:字段。", a.redactEcho(sp.Name, saveLits), a.redactEcho(sp.From, saveLits), a.formatCandList(cands, saveLits)))
+				continue
+			}
+			if sp.Name != "" {
+				c.Name = sp.Name
+			}
+			if sp.Type != "" {
+				c.Type = sp.Type
+			}
+			source := c.Loc + ":" + c.Path
+			hits := 0
+			for _, candidate := range cands {
+				if candidate.Loc == c.Loc && candidate.Path == c.Path {
+					hits++
+				}
+			}
+			if hits > 1 {
+				problems = append(problems, "参数来源在录制中重复，无法安全区分："+a.redactEcho(source, saveLits))
+				continue
+			}
+			if sources[source] {
+				problems = append(problems, "参数来源重复："+a.redactEcho(source, saveLits))
+				continue
+			}
+			if names[c.Name] {
+				problems = append(problems, "参数名称重复："+a.redactEcho(c.Name, saveLits)+"。请为不同来源指定不同名称。")
+				continue
+			}
+			if !vaultNameRe.MatchString(c.Name) || isRefName(c.Name) {
+				problems = append(problems, "参数名称不合法："+a.redactEcho(c.Name, saveLits))
+				continue
+			}
+			if a.revealsSecret(c.Name, saveLits) {
+				problems = append(problems, "参数名称含有密钥或凭证，不能作为标识："+a.redactEcho(c.Name, saveLits))
+				continue
+			}
+			if sp.HasDefault && a.revealsSecret(sp.Default, saveLits) {
+				problems = append(problems, fmt.Sprintf("参数 %s 的 default 含有录制里的敏感值（Cookie、Token、密码等），已拒绝保存。请去掉 default。", a.redactEcho(sp.Name, saveLits)))
+				continue
+			}
+			if sp.Description != "" && a.revealsSecret(sp.Description, saveLits) {
+				sp.Description = a.sanitizeString(sp.Description, false, 0, saveLits)
+			}
+			names[c.Name], sources[source] = true, true
+			chosen = append(chosen, c)
+			overrides[source] = sp
+		}
 	}
-	p, createName, msg := a.lookupTargetPack(packRef, argBool(args, "create_pack", false))
-	if msg != "" {
-		return msg, true
+	var p *Pack
+	var createName string
+	if packRef != "" {
+		var msg string
+		p, createName, msg = a.lookupTargetPack(packRef, argBool(args, "create_pack", false))
+		if msg != "" {
+			problems = append(problems, msg)
+		}
 	}
 	overwrite := argBool(args, "overwrite", false)
 	var existingID int64
-	if exist, err := a.store.GetToolByName(name); err == nil && exist != nil {
-		if !overwrite {
-			return fmt.Sprintf("工具标识 %q 已存在（id=%d）。不要覆盖，除非用户明确同意。用户同意后才再次调用并设置 overwrite=true。", name, exist.ID), true
+	if name != "" && toolNameRe.MatchString(name) {
+		if isEntryTool(name) {
+			problems = append(problems, "工具名 "+name+" 是阶梯模式的入口工具名，已被保留，请换一个名字")
+		} else if isRecTool(name) {
+			problems = append(problems, "工具名 "+name+" 是内置录制分析工具名，已被保留，请换一个名字")
+		} else if a.revealsSecret(name, saveLits) {
+			problems = append(problems, "name 含有密钥或凭证，不能作为工具标识。")
 		}
-		existingID = exist.ID
-	} else if err != nil && err != sql.ErrNoRows {
-		return "读取工具失败：" + err.Error(), true
-	}
-	cands := a.recCandidates(q)
-	chosen := make([]Candidate, 0, len(specs))
-	overrides := map[string]recParamSpec{}
-	names, sources := map[string]bool{}, map[string]bool{}
-	for _, sp := range specs {
-		c, ok := matchCandidate(cands, sp.From)
-		if !ok {
-			return fmt.Sprintf("参数 %q 的 from %q 对不上这条请求的候选字段。可用：%s。from 写成 query:关键字、body:字段路径 或 form:字段。", sp.Name, sp.From, formatCandList(cands)), true
-		}
-		if sp.Name != "" {
-			c.Name = sp.Name
-		}
-		if sp.Type != "" {
-			c.Type = sp.Type
-		}
-		source := c.Loc + ":" + c.Path
-		hits := 0
-		for _, candidate := range cands {
-			if candidate.Loc == c.Loc && candidate.Path == c.Path {
-				hits++
+		if exist, err := a.store.GetToolByName(name); err == nil && exist != nil {
+			if !overwrite {
+				problems = append(problems, fmt.Sprintf("工具标识 %q 已存在（id=%d）。不要覆盖，除非用户明确同意。用户同意后才再次调用并设置 overwrite=true。", a.redactEcho(name, saveLits), exist.ID))
+			} else {
+				existingID = exist.ID
 			}
+		} else if err != nil && err != sql.ErrNoRows {
+			return "读取工具失败：" + a.redactEcho(err.Error(), saveLits), true
 		}
-		if hits > 1 {
-			return "参数来源在录制中重复，无法安全区分：" + source, true
-		}
-		if sources[source] {
-			return "参数来源重复：" + source, true
-		}
-		if names[c.Name] {
-			return "参数名称重复：" + c.Name + "。请为不同来源指定不同名称。", true
-		}
-		if !vaultNameRe.MatchString(c.Name) || isRefName(c.Name) {
-			return "参数名称不合法：" + c.Name, true
-		}
-		names[c.Name], sources[source] = true, true
-		chosen = append(chosen, c)
-		overrides[source] = sp
 	}
+	if createName != "" && a.revealsSecret(createName, saveLits) {
+		problems = append(problems, "流程包名称含有密钥或凭证，不能作为标识。")
+	}
+	if len(problems) > 0 {
+		return recProblemResult(problems)
+	}
+	dry := argBool(args, "dry_run", false)
 	lits := sensitiveLiterals(q)
-	for _, sp := range specs {
-		if sp.HasDefault && a.scrubRecText(sp.Default, lits) != sp.Default {
-			return fmt.Sprintf("参数 %s 的 default 含有录制里的敏感值（Cookie、Token、密码等），已拒绝保存。请去掉 default。", sp.Name), true
-		}
-	}
 	t, err := a.buildRecDraft(q, chosen)
 	if err != nil {
 		return "生成工具失败：" + err.Error(), true
@@ -968,7 +1326,11 @@ func (a *App) recSaveTool(mc *mcpCtx, args map[string]any) (string, bool) {
 				t.Params[i].Default = sp.Default
 			}
 			if c.Secret {
-				t.Params[i].Default, t.Params[i].Required = "", true
+				// §1: a sensitive field is a required parameter with an empty
+				// default. Do not keep the captured value in the description.
+				t.Params[i].Default = ""
+				t.Params[i].Required = true
+				t.Params[i].Description = removedSecretDesc
 			}
 		}
 	}
@@ -977,6 +1339,18 @@ func (a *App) recSaveTool(mc *mcpCtx, args map[string]any) (string, bool) {
 	}
 	if err := a.validateTool(t); err != nil {
 		return "验证工具失败：" + err.Error(), true
+	}
+	if dry {
+		keys := make([]string, 0, len(t.Headers))
+		for k := range t.Headers {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		return a.finishRec(map[string]any{
+			"dry_run": true, "name": t.Name, "title": t.Title, "method": t.Method,
+			"url": recSafeText(t.URL), "header_keys": keys, "body": recSafeText(t.Body),
+			"input_schema": t.InputSchema(),
+		}, lits), false
 	}
 	created := false
 	if p == nil {
@@ -1045,7 +1419,7 @@ func (a *App) lookupTargetPack(ref string, create bool) (p *Pack, createName, ms
 		return nil, "", "流程包名称匹配不唯一，请使用精确名称或 id。选项：" + packNameList(matches)
 	}
 	if !create {
-		return nil, "", fmt.Sprintf("流程包「%s」不存在。请询问用户要把工具保存到哪个流程包，不要自行创建。%s只有用户明确给出一个新的流程包名称时，才再次调用并设置 create_pack=true。", ref, a.targetPackChoices())
+		return nil, "", fmt.Sprintf("流程包「%s」不存在。请询问用户要把工具保存到哪个流程包，不要自行创建。%s只有用户明确给出一个新的流程包名称时，才再次调用并设置 create_pack=true。", a.redactEcho(ref, nil), a.targetPackChoices())
 	}
 	return nil, ref, ""
 }
@@ -1068,54 +1442,64 @@ func (a *App) targetPackChoices() string {
 		if !p.Enabled {
 			state = "已关闭"
 		}
-		parts = append(parts, fmt.Sprintf("%s(id=%d,%s)", p.Name, p.ID, state))
+		name := p.Name
+		if a != nil {
+			name = a.redactEcho(p.Name, nil)
+		}
+		parts = append(parts, fmt.Sprintf("%s(id=%d,%s)", name, p.ID, state))
 	}
 	return "现有流程包：" + strings.Join(parts, "、") + "。"
 }
 
-func parseRecParams(args map[string]any) ([]recParamSpec, error) {
+func parseRecParams(args map[string]any) ([]recParamSpec, []string) {
 	raw, ok := args["params"]
 	if !ok || raw == nil {
 		return nil, nil
 	}
 	arr, err := argArray(raw)
 	if err != nil {
-		return nil, fmt.Errorf("params 必须是数组：%s", err.Error())
+		return nil, []string{"params 必须是数组：" + err.Error()}
 	}
+	var problems []string
 	out := make([]recParamSpec, 0, len(arr))
 	for i, item := range arr {
 		m, err := argObject(item)
 		if err != nil {
-			return nil, fmt.Errorf("params[%d] 必须是对象", i)
+			problems = append(problems, fmt.Sprintf("params[%d] 必须是对象", i))
+			continue
 		}
 		sp := recParamSpec{
 			Name: strings.TrimSpace(argStr(m, "name")), From: strings.TrimSpace(argStr(m, "from")),
 			Type: strings.TrimSpace(argStr(m, "type")), Description: strings.TrimSpace(argStr(m, "description")),
 		}
 		if sp.Type != "" && sp.Type != "string" && sp.Type != "number" && sp.Type != "integer" && sp.Type != "boolean" {
-			return nil, fmt.Errorf("params[%d] 的 type 只能是 string、number、integer 或 boolean", i)
+			problems = append(problems, fmt.Sprintf("params[%d] 的 type 只能是 string、number、integer 或 boolean", i))
 		}
 		if sp.From == "" {
-			return nil, fmt.Errorf("params[%d] 缺少 from（候选字段，例如 query:keyword 或 body:user.id）", i)
+			problems = append(problems, fmt.Sprintf("params[%d] 缺少 from（候选字段，例如 query:keyword 或 body:user.id）", i))
 		}
 		if v, exists := m["required"]; exists && v != nil {
 			b, ok := v.(bool)
 			if !ok {
-				return nil, fmt.Errorf("params[%d] 的 required 必须是布尔值", i)
+				problems = append(problems, fmt.Sprintf("params[%d] 的 required 必须是布尔值", i))
+			} else {
+				sp.Required = &b
 			}
-			sp.Required = &b
 		}
 		if v, exists := m["default"]; exists && v != nil {
 			s, ok := scalarString(v)
 			if !ok {
-				return nil, fmt.Errorf("params[%d] 的 default 必须是字符串或数字", i)
+				problems = append(problems, fmt.Sprintf("params[%d] 的 default 必须是字符串或数字", i))
+			} else {
+				sp.Default = s
+				sp.HasDefault = true
 			}
-			sp.Default = s
-			sp.HasDefault = true
 		}
-		out = append(out, sp)
+		if sp.From != "" {
+			out = append(out, sp)
+		}
 	}
-	return out, nil
+	return out, problems
 }
 
 func matchCandidate(cands []Candidate, from string) (Candidate, bool) {
@@ -1152,7 +1536,7 @@ func matchCandidate(cands []Candidate, from string) (Candidate, bool) {
 
 func splitFrom(from string) (loc, path string, ok bool) {
 	low := strings.ToLower(from)
-	for _, p := range []string{"query:", "body:", "form:", "query.", "body.", "form."} {
+	for _, p := range []string{"query:", "body:", "form:", "multipart:", "query.", "body.", "form.", "multipart."} {
 		if strings.HasPrefix(low, p) {
 			loc = strings.TrimRight(strings.TrimSuffix(p, ":"), ".")
 			path = from[len(p):]
@@ -1165,18 +1549,18 @@ func splitFrom(from string) (loc, path string, ok bool) {
 	return "", "", false
 }
 
-func formatCandList(cs []Candidate) string {
+func (a *App) formatCandList(cs []Candidate, lits []string) string {
 	if len(cs) == 0 {
 		return "（这条请求没有可参数化的 query/body/form 字段）"
 	}
 	parts := make([]string, 0, len(cs))
 	for _, c := range cs {
 		tag := ""
-		if c.Secret || isSensitiveKey(c.Path) {
+		if c.Secret || pathSensitive(c.Path) {
 			tag = "(敏感，会自动处理)"
 		}
-		parts = append(parts, c.Loc+":"+c.Path+tag)
-		if len(parts) >= 40 {
+		parts = append(parts, a.redactEcho(c.Loc+":"+c.Path, lits)+tag)
+		if len(parts) >= 30 {
 			parts = append(parts, "…")
 			break
 		}
@@ -1238,6 +1622,71 @@ func argBool(args map[string]any, key string, def bool) bool {
 	return def
 }
 
+func noteCompact(n *RequestNote) map[string]any {
+	if n == nil {
+		return nil
+	}
+	out := map[string]any{}
+	if c := strings.TrimSpace(n.Category); c != "" {
+		out["c"] = c
+	}
+	if p := strings.TrimSpace(n.Purpose); p != "" {
+		out["p"] = p
+	}
+	if n.Useful != nil {
+		out["u"] = *n.Useful
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func argStringSlice(args map[string]any, key string) ([]string, error) {
+	v, ok := args[key]
+	if !ok || v == nil {
+		return nil, nil
+	}
+	arr, err := argArray(v)
+	if err != nil {
+		return nil, fmt.Errorf("%s 必须是字符串数组", key)
+	}
+	out := make([]string, 0, len(arr))
+	for _, item := range arr {
+		s, ok := item.(string)
+		if !ok {
+			return nil, fmt.Errorf("%s 必须是字符串数组", key)
+		}
+		s = strings.TrimSpace(s)
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out, nil
+}
+
+func scalarInt64(v any) (int64, bool) {
+	switch x := v.(type) {
+	case float64:
+		if x != float64(int64(x)) {
+			return 0, false
+		}
+		return int64(x), true
+	case int:
+		return int64(x), true
+	case int64:
+		return x, true
+	case json.Number:
+		n, err := x.Int64()
+		return n, err == nil
+	case string:
+		n, err := strconv.ParseInt(strings.TrimSpace(x), 10, 64)
+		return n, err == nil
+	default:
+		return 0, false
+	}
+}
+
 func argBoolPtr(m map[string]any, key string) (*bool, error) {
 	v, ok := m[key]
 	if !ok || v == nil {
@@ -1296,45 +1745,52 @@ func scalarString(v any) (string, bool) {
 }
 
 func addSecret(out *[]string, s string) {
-	if s == "" || s == secretMask || placeholderRe.MatchString(s) {
+	if !crossFieldLiteral(s) {
 		return
 	}
 	*out = append(*out, s)
 }
 
+func considerCookieValue(out *[]string, name, val string) {
+	val = strings.Trim(strings.TrimSpace(val), `"`)
+	if cookieNameSensitive(name) || len(val) >= 16 {
+		addSecret(out, val)
+	}
+}
+
 func addHeaderSecret(out *[]string, name, v string) {
-	addSecret(out, v)
-	switch strings.ToLower(name) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "cookie":
 		for _, line := range strings.Split(v, "\n") {
 			r := http.Request{Header: http.Header{"Cookie": []string{line}}}
 			for _, c := range r.Cookies() {
-				addSecret(out, c.Value)
+				considerCookieValue(out, c.Name, c.Value)
 			}
-			// Also retain values from malformed cookies the HTTP parser skips.
 			for _, field := range strings.Split(line, ";") {
-				if _, val, ok := strings.Cut(field, "="); ok {
-					addSecret(out, strings.Trim(strings.TrimSpace(val), `"`))
+				n, val, ok := strings.Cut(field, "=")
+				if !ok {
+					continue
 				}
+				considerCookieValue(out, strings.TrimSpace(n), val)
 			}
 		}
 	case "set-cookie":
-		// Captures may fold Set-Cookie headers onto one line. A comma in
-		// Expires is not a separator; a comma followed by name= is.
 		for _, line := range setCookieLines(v) {
 			resp := http.Response{Header: http.Header{"Set-Cookie": []string{strings.TrimSpace(line)}}}
 			for _, c := range resp.Cookies() {
-				addSecret(out, c.Value)
+				considerCookieValue(out, c.Name, c.Value)
 			}
 			first, _, _ := strings.Cut(line, ";")
-			if _, val, ok := strings.Cut(first, "="); ok {
-				addSecret(out, strings.Trim(strings.TrimSpace(val), `"`))
+			if n, val, ok := strings.Cut(first, "="); ok {
+				considerCookieValue(out, strings.TrimSpace(n), val)
 			}
 		}
-	}
-	fields := strings.Fields(v)
-	if len(fields) == 2 && !strings.Contains(v, "=") {
-		addSecret(out, fields[len(fields)-1])
+	default:
+		addSecret(out, v)
+		fields := strings.Fields(v)
+		if len(fields) == 2 && !strings.Contains(v, "=") {
+			addSecret(out, fields[len(fields)-1])
+		}
 	}
 }
 
@@ -1478,29 +1934,44 @@ func sensitiveQueryValues(raw string) []string {
 		}
 	}
 	for k, vs := range tolerantForm(u.RawQuery) {
-		if !isSensitiveKey(k) {
-			continue
-		}
 		for _, v := range vs {
-			addSecret(&out, v)
+			v = fullyUnescapeQuery(v)
+			if isSensitiveKey(k) {
+				addSecret(&out, v)
+			}
+			// A non-sensitive key can still carry URL-encoded JSON with a token.
+			collectSecretsFromString(v, 0, &out)
 		}
 	}
 	return out
 }
 
+func fullyUnescapeQuery(s string) string {
+	cur := s
+	for i := 0; i < 3; i++ {
+		if !strings.ContainsAny(cur, "%+") {
+			break
+		}
+		dec, err := url.QueryUnescape(cur)
+		if err != nil || dec == cur {
+			break
+		}
+		cur = dec
+	}
+	return cur
+}
+
 func collectJSONSecrets(v any, sensitive bool, out *[]string) {
-	switch x := v.(type) {
-	case map[string]any:
-		for k, val := range x {
-			collectJSONSecrets(val, sensitive || isSensitiveKey(k), out)
-		}
-	case []any:
-		for _, val := range x {
-			collectJSONSecrets(val, sensitive, out)
-		}
-	default:
-		if sensitive && v != nil {
-			addSecret(out, fmt.Sprint(v))
+	collectSecretsFromValue(v, sensitive, 0, out)
+}
+
+func collectRawCredentialShapes(body string, out *[]string) {
+	for _, m := range jwtRe.FindAllString(body, -1) {
+		addSecret(out, m)
+	}
+	for _, sm := range bearerRe.FindAllStringSubmatch(body, -1) {
+		if len(sm) >= 3 {
+			addSecret(out, sm[2])
 		}
 	}
 }
@@ -1553,15 +2024,24 @@ func collectPartialJSONSecrets(body string, out *[]string) {
 }
 
 func collectBodySecrets(body, contentType string, out *[]string) {
+	collectRawCredentialShapes(body, out)
 	kind, params, err := bodyKind(body, contentType)
 	if err != nil {
+		if bodyWasTruncated(body) {
+			if j, ok := decodePartialJSON(body); ok {
+				collectSecretsFromValue(j, false, 0, out)
+			}
+		}
 		return
 	}
 	switch kind {
 	case "json":
 		if j, err := parseRecJSON(body); err == nil {
-			collectJSONSecrets(j, false, out)
+			collectSecretsFromValue(j, false, 0, out)
 		} else {
+			if j, ok := decodePartialJSON(body); ok {
+				collectSecretsFromValue(j, false, 0, out)
+			}
 			collectPartialJSONSecrets(body, out)
 		}
 	case "form":
@@ -1569,19 +2049,28 @@ func collectBodySecrets(body, contentType string, out *[]string) {
 			if isSensitiveKey(k) {
 				for _, v := range vals {
 					addSecret(out, v)
+					collectSecretsFromString(v, 0, out)
+				}
+			} else {
+				for _, v := range vals {
+					collectSecretsFromString(v, 0, out)
 				}
 			}
 		}
 	case "multipart":
 		if parts, err := parseRecMultipart(body, params["boundary"]); err == nil {
 			for _, p := range parts {
+				if p.filename != "" && !textualPart(p.contentType, p.value) {
+					continue
+				}
 				if isSensitiveKey(p.name) {
 					addSecret(out, p.value)
-				} else {
-					collectBodySecrets(p.value, p.contentType, out)
 				}
+				collectBodySecrets(p.value, p.contentType, out)
 			}
 		}
+	default:
+		collectSecretsFromString(body, 0, out)
 	}
 }
 
@@ -1666,7 +2155,7 @@ func replaceLiterals(s string, lits []string) string {
 	sort.Slice(cp, func(i, j int) bool { return len(cp[i]) > len(cp[j]) })
 	seen := map[string]bool{}
 	for _, lit := range cp {
-		if lit == "" || lit == secretMask || seen[lit] || placeholderRe.MatchString(lit) {
+		if lit == "" || lit == secretMask || seen[lit] || isWholePlaceholder(lit) {
 			continue
 		}
 		seen[lit] = true
@@ -1679,7 +2168,7 @@ func replaceLiterals(s string, lits []string) string {
 
 func containsLiteral(s string, lits []string) bool { return replaceLiterals(s, lits) != s }
 
-func maskURLSensitive(raw string) string {
+func (a *App) maskURLSensitive(raw string, lits []string) string {
 	u, err := url.Parse(raw)
 	if err != nil || u == nil {
 		return "[URL hidden: could not be safely sanitized]"
@@ -1694,8 +2183,11 @@ func maskURLSensitive(raw string) string {
 	sort.Strings(keys)
 	for _, k := range keys {
 		for _, v := range q[k] {
+			v = fullyUnescapeQuery(v)
 			if v != "" && isSensitiveKey(k) {
 				v = secretMask
+			} else if v != "" {
+				v = a.sanitizeString(v, false, 0, lits)
 			}
 			ev := v
 			if v != secretMask {
@@ -1714,36 +2206,6 @@ const hiddenRecBody = "[body hidden: could not be safely sanitized]"
 // Do not treat its serialized JSON as another string to search and replace.
 type recSafeText string
 
-func (a *App) sanitizeBodyJSON(v any, sensitive bool, lits []string) any {
-	if sensitive && v != nil {
-		return secretMask
-	}
-	switch x := v.(type) {
-	case map[string]any:
-		out := map[string]any{}
-		for k, val := range x {
-			out[k] = a.sanitizeBodyJSON(val, isSensitiveKey(k), lits)
-		}
-		return out
-	case []any:
-		for i := range x {
-			x[i] = a.sanitizeBodyJSON(x[i], false, lits)
-		}
-		return x
-	case string:
-		return a.scrubRecText(x, lits)
-	case json.Number:
-		if a.scrubRecText(x.String(), lits) != x.String() {
-			return secretMask
-		}
-	case bool:
-		if a.scrubRecText(strconv.FormatBool(x), lits) != strconv.FormatBool(x) {
-			return secretMask
-		}
-	}
-	return v
-}
-
 func (a *App) sanitizeRecBody(body, contentType string, lits []string) (string, bool) {
 	if strings.TrimSpace(body) == "" {
 		return body, false
@@ -1758,15 +2220,15 @@ func (a *App) sanitizeRecBody(body, contentType string, lits []string) (string, 
 		if err != nil {
 			return hiddenRecBody, true
 		}
-		return string(compactJSON(a.sanitizeBodyJSON(j, false, lits))), false
+		return string(compactJSON(a.sanitizeValue(j, false, 0, lits))), false
 	case "form":
 		vals := tolerantForm(body)
 		for k, vs := range vals {
 			for i, v := range vs {
-				if isSensitiveKey(k) {
+				if isSensitiveKey(k) && strings.TrimSpace(v) != "" {
 					vs[i] = secretMask
 				} else {
-					vs[i] = a.scrubRecText(v, lits)
+					vs[i] = a.sanitizeString(v, false, 0, lits)
 				}
 			}
 		}
@@ -1778,25 +2240,184 @@ func (a *App) sanitizeRecBody(body, contentType string, lits []string) (string, 
 		}
 		out := make([]map[string]any, 0, len(parts))
 		for _, p := range parts {
-			value := secretMask
-			if !isSensitiveKey(p.name) {
-				value, _ = a.sanitizeRecBody(p.value, p.contentType, lits)
+			value := p.value
+			if p.filename != "" && !textualPart(p.contentType, p.value) {
+				value = omittedFileValue
+			} else if isSensitiveKey(p.name) && strings.TrimSpace(p.value) != "" {
+				value = secretMask
+			} else {
+				value = a.sanitizeString(p.value, false, 0, lits)
 			}
-			out = append(out, map[string]any{"name": a.scrubRecText(p.name, lits), "filename": a.scrubRecText(p.filename, lits), "value": value})
+			out = append(out, map[string]any{"name": a.sanitizeString(p.name, false, 0, lits), "filename": a.sanitizeString(p.filename, false, 0, lits), "value": value})
 		}
 		return string(compactJSON(out)), false
 	default:
-		return a.scrubRecText(body, lits), false
+		return a.sanitizeString(body, false, 0, lits), false
 	}
 }
 
-func (a *App) recBodyView(body, ct string, lits []string, max int) (recSafeText, int, bool, bool) {
+func (a *App) sanitizedTruncated(body, ct string, lits []string) (string, any) {
+	prefix := cutAtTruncMarker(body)
+	kind, params, err := bodyKind(prefix, ct)
+	if multipartContent(ct) || (err == nil && kind == "multipart") || looksLikeMultipart(prefix) {
+		boundary := ""
+		if params != nil {
+			boundary = params["boundary"]
+		}
+		return "", a.multipartPartialOutline(prefix, boundary, lits)
+	}
+	if structuredKind(prefix) != "" {
+		safe := a.sanitizeString(prefix, false, 0, lits)
+		if safe == structuredOmitted || safe == "" {
+			return "", map[string]any{}
+		}
+		return safe, nil
+	}
+	return a.sanitizeString(prefix, false, 0, lits), nil
+}
+
+func multipartContent(ct string) bool {
+	return strings.Contains(strings.ToLower(ct), "multipart/")
+}
+
+func looksLikeMultipart(body string) bool {
+	line := body
+	if i := strings.IndexAny(body, "\r\n"); i >= 0 {
+		line = body[:i]
+	}
+	line = strings.TrimSpace(line)
+	return strings.HasPrefix(line, "--") && strings.Contains(strings.ToLower(body), "content-disposition:")
+}
+
+func sniffBoundary(body string) string {
+	line := body
+	if i := strings.IndexAny(body, "\r\n"); i >= 0 {
+		line = body[:i]
+	}
+	line = strings.TrimSpace(line)
+	if strings.HasPrefix(line, "--") && len(line) > 2 {
+		return strings.TrimPrefix(line, "--")
+	}
+	return ""
+}
+
+func textualPart(contentType, value string) bool {
+	if strings.Contains(value, "\x00") || !utf8.ValidString(value) {
+		return false
+	}
+	ct := strings.ToLower(contentType)
+	switch {
+	case strings.HasPrefix(ct, "text/"), strings.Contains(ct, "json"), strings.Contains(ct, "xml"),
+		strings.Contains(ct, "javascript"), strings.Contains(ct, "form-urlencoded"), ct == "":
+		return true
+	case strings.HasPrefix(ct, "image/"), strings.HasPrefix(ct, "audio/"), strings.HasPrefix(ct, "video/"):
+		return false
+	}
+	for _, r := range value {
+		if r != '\n' && r != '\r' && r != '\t' && (r < 32 || r == 0x7f) {
+			return false
+		}
+	}
+	return true
+}
+
+func completeMultipartParts(body, boundary string) []recPart {
+	if boundary == "" {
+		boundary = sniffBoundary(body)
+	}
+	if boundary == "" {
+		return nil
+	}
+	chunks := strings.Split(body, "--"+boundary)
+	if len(chunks) < 3 {
+		return nil
+	}
+	var parts []recPart
+	// The last chunk is the epilogue or an incomplete tail. Only chunks with a
+	// following boundary are complete, so the raw cut is never returned.
+	for _, chunk := range chunks[1 : len(chunks)-1] {
+		if p, ok := parsePartChunk(chunk); ok {
+			parts = append(parts, p)
+		}
+	}
+	return parts
+}
+
+func parsePartChunk(chunk string) (recPart, bool) {
+	chunk = strings.TrimLeft(chunk, "\r\n")
+	if chunk == "" || chunk == "--" || strings.HasPrefix(chunk, "--") {
+		return recPart{}, false
+	}
+	head, rest, ok := strings.Cut(chunk, "\r\n\r\n")
+	if !ok {
+		head, rest, ok = strings.Cut(chunk, "\n\n")
+		if !ok {
+			return recPart{}, false
+		}
+	}
+	rest = strings.TrimRight(rest, "\r\n")
+	var name, filename, ct string
+	for _, line := range strings.Split(strings.ReplaceAll(head, "\r\n", "\n"), "\n") {
+		low := strings.ToLower(line)
+		if strings.HasPrefix(low, "content-disposition:") {
+			_, params, err := mime.ParseMediaType(strings.TrimSpace(line[len("content-disposition:"):]))
+			if err != nil {
+				continue
+			}
+			name, filename = params["name"], params["filename"]
+		} else if strings.HasPrefix(low, "content-type:") {
+			ct = strings.TrimSpace(line[len("content-type:"):])
+		}
+	}
+	if name == "" {
+		return recPart{}, false
+	}
+	return recPart{name: name, filename: filename, contentType: ct, value: rest}, true
+}
+
+func (a *App) multipartPartialOutline(body, boundary string, lits []string) any {
+	parts := completeMultipartParts(body, boundary)
+	if boundary == "" && len(parts) == 0 {
+		return map[string]any{"multipart": "partial"}
+	}
+	out := make([]any, 0, len(parts))
+	for _, p := range parts {
+		item := map[string]any{"name": a.sanitizeString(p.name, false, 0, lits)}
+		if p.filename != "" {
+			item["filename"] = a.sanitizeString(p.filename, false, 0, lits)
+		}
+		switch {
+		case p.filename != "" && !textualPart(p.contentType, p.value):
+			item["value"] = omittedFileValue
+		case isSensitiveKey(p.name) && strings.TrimSpace(p.value) != "":
+			item["value"] = secretMask
+		default:
+			item["value"] = a.sanitizeString(p.value, false, 0, lits)
+		}
+		out = append(out, item)
+	}
+	return map[string]any{"multipart": "partial", "parts": out}
+}
+
+func (a *App) recBodyView(body, ct string, lits []string, max int) (recSafeText, int, bool, bool, bool, any) {
+	total := len(body)
+	if strings.TrimSpace(body) == "" {
+		return "", total, false, false, false, nil
+	}
+	if bodyWasTruncated(body) {
+		shown, outline := a.sanitizedTruncated(body, ct, lits)
+		if outline != nil {
+			return "", total, false, false, true, outline
+		}
+		s, _, cut := clipText(shown, max)
+		return recSafeText(s), total, cut, false, true, nil
+	}
 	safe, hidden := a.sanitizeRecBody(body, ct, lits)
 	if hidden {
-		return recSafeText(safe), len(body), false, true
+		return recSafeText(safe), total, false, true, false, nil
 	}
 	shown, _, cut := clipText(safe, max)
-	return recSafeText(shown), len(body), cut, false
+	return recSafeText(shown), total, cut, false, false, nil
 }
 
 func (a *App) maskHeaderMap(h map[string]string, lits []string) map[string]string {
@@ -1813,7 +2434,7 @@ func (a *App) maskHeaderMap(h map[string]string, lits []string) map[string]strin
 			continue
 		}
 		if isURLHeader(k) {
-			v = headerURLs(k, v, maskURLSensitive)
+			v = headerURLs(k, v, func(raw string) string { return a.maskURLSensitive(raw, lits) })
 		}
 		out[k] = a.scrubRecText(v, lits)
 	}
@@ -1837,10 +2458,11 @@ func maskedQuery(raw string, lits []string, a *App) []map[string]any {
 		if decoded, err := url.QueryUnescape(v); err == nil {
 			v = decoded
 		}
+		v = fullyUnescapeQuery(v)
 		if isSensitiveKey(k) && v != "" {
 			v = secretMask
 		} else if a != nil {
-			v = a.scrubRecText(v, lits)
+			v = a.sanitizeString(v, false, 0, lits)
 		} else {
 			v = replaceLiterals(v, lits)
 		}
@@ -1907,6 +2529,9 @@ func (a *App) recTemplateText(s string, lits []string) string {
 		return len(pairs[i].value) > len(pairs[j].value)
 	})
 	for _, p := range pairs {
+		if !crossFieldLiteral(p.value) {
+			continue
+		}
 		for _, form := range literalForms(p.value) {
 			s = outsideRecRefs(s, func(part string) string { return replaceLiteral(part, form, "{{secret."+p.name+"}}", len(p.value) < 4) })
 		}
@@ -1972,7 +2597,7 @@ func newRecSecretParam(t *Tool, path string, v any) string {
 	for i := 2; used[name]; i++ {
 		name = fmt.Sprintf("%s_%d", base, i)
 	}
-	t.Params = append(t.Params, Param{Name: name, Type: recScalarType(v), Required: true, Description: "敏感字段，调用时另填。"})
+	t.Params = append(t.Params, Param{Name: name, Type: recScalarType(v), Required: true, Description: removedSecretDesc})
 	return "{{" + name + "}}"
 }
 
@@ -1981,7 +2606,7 @@ func newRecSecretParam(t *Tool, path string, v any) string {
 func parameterizeRawSecrets(t *Tool, q *ReqRecord) error {
 	var err error
 	t.URL, err = transformRecURL(t.URL, func(key, value string) string {
-		if isSensitiveKey(key) && value != "" && !placeholderRe.MatchString(value) {
+		if isSensitiveKey(key) && value != "" && !isWholePlaceholder(value) {
 			return newRecSecretParam(t, key, value)
 		}
 		return value
@@ -2019,7 +2644,7 @@ func parameterizeRawSecrets(t *Tool, q *ReqRecord) error {
 					x[i] = walk(x[i], fmt.Sprintf("%s[%d]", path, i), sensitive)
 				}
 			default:
-				if sensitive && v != nil && fmt.Sprint(v) != "" && !placeholderRe.MatchString(fmt.Sprint(v)) {
+				if sensitive && v != nil && fmt.Sprint(v) != "" && !isWholePlaceholder(fmt.Sprint(v)) {
 					return newRecSecretParam(t, path, v)
 				}
 			}
@@ -2030,15 +2655,49 @@ func parameterizeRawSecrets(t *Tool, q *ReqRecord) error {
 		vals := tolerantForm(t.Body)
 		for k, vs := range vals {
 			for i, v := range vs {
-				if isSensitiveKey(k) && v != "" && !placeholderRe.MatchString(v) {
+				if isSensitiveKey(k) && v != "" && !isWholePlaceholder(v) {
 					vs[i] = newRecSecretParam(t, k, v)
 				}
 			}
 		}
 		t.Body = encodeRecForm(vals)
 	case "multipart":
+		return parameterizeMultipartBody(t, q)
+	}
+	return nil
+}
+
+func parameterizeMultipartBody(t *Tool, q *ReqRecord) error {
+	_, params, err := bodyKind(t.Body, headerValue(q.ReqHeaders, "Content-Type"))
+	if err != nil || params["boundary"] == "" {
 		return fmt.Errorf("multipart 请求体无法安全保存")
 	}
+	parts, err := parseRecMultipart(t.Body, params["boundary"])
+	if err != nil {
+		return fmt.Errorf("multipart 请求体无法安全保存")
+	}
+	repl := map[string]string{}
+	for _, p := range parts {
+		val := p.value
+		if p.filename != "" && !textualPart(p.contentType, p.value) {
+			repl[p.name] = omittedFileValue
+			continue
+		}
+		if isSensitiveKey(p.name) && strings.TrimSpace(val) != "" && !isWholePlaceholder(val) {
+			val = newRecSecretParam(t, p.name, val)
+		}
+		if val != p.value {
+			repl[p.name] = val
+		}
+	}
+	if len(repl) == 0 {
+		return nil
+	}
+	body, err := rebuildMultipart(t.Body, params["boundary"], repl)
+	if err != nil {
+		return fmt.Errorf("multipart 请求体无法安全保存")
+	}
+	t.Body = body
 	return nil
 }
 
@@ -2048,7 +2707,7 @@ func (a *App) redactToolSecrets(t *Tool, q *ReqRecord) error {
 		return err
 	}
 	var err error
-	t.URL, err = transformRecURL(t.URL, func(_, v string) string { return a.recTemplateText(v, lits) })
+	t.URL, err = transformRecURL(t.URL, func(_, v string) string { return a.parameterizeStringValue(t, v, lits, 0) })
 	if err != nil {
 		return err
 	}
@@ -2075,7 +2734,7 @@ func (a *App) redactToolSecrets(t *Tool, q *ReqRecord) error {
 						x[i] = walk(x[i])
 					}
 				case string:
-					return a.recTemplateText(x, lits)
+					return a.parameterizeStringValue(t, x, lits, 0)
 				default:
 					if v != nil {
 						if safe := a.recTemplateText(fmt.Sprint(v), lits); safe != fmt.Sprint(v) {
@@ -2090,16 +2749,41 @@ func (a *App) redactToolSecrets(t *Tool, q *ReqRecord) error {
 			vals := tolerantForm(t.Body)
 			for _, vs := range vals {
 				for i, v := range vs {
-					vs[i] = a.recTemplateText(v, lits)
+					vs[i] = a.parameterizeStringValue(t, v, lits, 0)
 				}
 			}
 			t.Body = encodeRecForm(vals)
+		case "multipart":
+			_, mp, err := bodyKind(t.Body, headerValue(q.ReqHeaders, "Content-Type"))
+			if err != nil || mp["boundary"] == "" {
+				return fmt.Errorf("multipart 请求体无法安全保存")
+			}
+			parts, err := parseRecMultipart(t.Body, mp["boundary"])
+			if err != nil {
+				return fmt.Errorf("multipart 请求体无法安全保存")
+			}
+			repl := map[string]string{}
+			for _, p := range parts {
+				if p.filename != "" && !textualPart(p.contentType, p.value) {
+					repl[p.name] = omittedFileValue
+					continue
+				}
+				repl[p.name] = a.parameterizeStringValue(t, p.value, lits, 0)
+			}
+			body, err := rebuildMultipart(t.Body, mp["boundary"], repl)
+			if err != nil {
+				return err
+			}
+			t.Body = body
 		default:
-			t.Body = a.recTemplateText(t.Body, lits)
+			t.Body = a.parameterizeStringValue(t, t.Body, lits, 0)
 		}
 	}
-	t.Title = a.scrubRecText(t.Title, lits)
-	t.Description = a.scrubRecText(t.Description, lits)
+	t.Title = a.sanitizeString(t.Title, false, 0, lits)
+	t.Description = a.sanitizeString(t.Description, false, 0, lits)
+	if a.revealsSecret(t.Name, lits) {
+		return fmt.Errorf("工具标识含有密钥或凭证")
+	}
 	for k, v := range t.Headers {
 		if isSensitiveHeader(k) && !placeholderRe.MatchString(v) {
 			delete(t.Headers, k)
@@ -2107,21 +2791,21 @@ func (a *App) redactToolSecrets(t *Tool, q *ReqRecord) error {
 		}
 		if isURLHeader(k) {
 			v = headerURLs(k, v, func(raw string) string {
-				safe, err := transformRecURL(raw, func(_, value string) string { return a.recTemplateText(value, lits) })
+				safe, err := transformRecURL(raw, func(_, value string) string { return a.parameterizeStringValue(t, value, lits, 0) })
 				if err != nil {
 					return secretMask
 				}
 				return safe
 			})
 		}
-		t.Headers[k] = a.recTemplateText(v, lits)
+		t.Headers[k] = a.parameterizeStringValue(t, v, lits, 0)
 	}
 	for i := range t.Params {
 		p := &t.Params[i]
-		if a.scrubRecText(p.Default, lits) != p.Default || p.Default == secretMask || isSensitiveKey(p.Name) {
+		if p.Default == secretMask || isSensitiveKey(p.Name) || a.revealsSecret(p.Default, lits) {
 			p.Default, p.Required = "", true
 		}
-		p.Description = a.scrubRecText(p.Description, lits)
+		p.Description = a.sanitizeString(p.Description, false, 0, lits)
 	}
 	return nil
 }

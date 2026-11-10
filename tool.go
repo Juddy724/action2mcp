@@ -197,7 +197,13 @@ func BuildDraft(q *ReqRecord, chosen []Candidate) (*Tool, error) {
 				}
 				chosen[i].Name = name
 				v = "{{" + name + "}}"
-				t.Params = append(t.Params, Param{Name: name, Type: "string", Required: !optionalParam.MatchString(name), Default: c.Example, Description: "查询参数 " + dk + "，示例: " + c.Example})
+				desc := "查询参数 " + dk + "，示例: " + c.Example
+				reqd := !optionalParam.MatchString(name)
+				if c.Secret {
+					desc = removedSecretDesc
+					reqd = true
+				}
+				t.Params = append(t.Params, Param{Name: name, Type: "string", Required: reqd, Default: c.Example, Description: desc})
 				break
 			}
 		}
@@ -227,7 +233,14 @@ func BuildDraft(q *ReqRecord, chosen []Candidate) (*Tool, error) {
 			name := uniq(c.Name)
 			chosen[i].Name = name
 			if setJSONPath(&j, c.Path, "{{"+name+"}}") {
-				t.Params = append(t.Params, Param{Name: name, Type: c.Type, Required: !optionalParam.MatchString(name), Default: c.Example, Description: "字段 " + c.Path + "，示例: " + c.Example})
+				desc := "字段 " + c.Path + "，示例: " + c.Example
+				reqd := !optionalParam.MatchString(name)
+				if c.Secret {
+					c.Example = ""
+					desc = removedSecretDesc
+					reqd = true
+				}
+				t.Params = append(t.Params, Param{Name: name, Type: c.Type, Required: reqd, Default: c.Example, Description: desc})
 			}
 		}
 		b, _ := json.MarshalIndent(j, "", "  ")
@@ -251,7 +264,13 @@ func BuildDraft(q *ReqRecord, chosen []Candidate) (*Tool, error) {
 					name := uniq(c.Name)
 					vals.Set(c.Path, "{{"+name+"}}")
 					changed = true
-					t.Params = append(t.Params, Param{Name: name, Type: "string", Required: !optionalParam.MatchString(name), Default: c.Example, Description: "表单字段 " + c.Path + "，示例: " + c.Example})
+					desc := "表单字段 " + c.Path + "，示例: " + c.Example
+					reqd := !optionalParam.MatchString(name)
+					if c.Secret {
+						desc = removedSecretDesc
+						reqd = true
+					}
+					t.Params = append(t.Params, Param{Name: name, Type: "string", Required: reqd, Default: c.Example, Description: desc})
 				}
 			}
 		}
@@ -560,17 +579,18 @@ func (t *Tool) RenderWith(args map[string]any, resolve func(string) (string, err
 	isForm := strings.Contains(ct, "x-www-form-urlencoded")
 	b := t.Body
 	if isJSON {
-		// "{{x}}" (quoted, whole value) -> typed JSON value
-		quoted := regexp.MustCompile(`"\{\{\s*([A-Za-z0-9_\.]+)\s*\}\}"`)
-		b = quoted.ReplaceAllStringFunc(b, func(m string) string {
-			n := quoted.FindStringSubmatch(m)[1]
-			jb, _ := json.Marshal(vals[n])
-			return string(jb)
-		})
-		b = placeholderRe.ReplaceAllStringFunc(b, func(m string) string {
-			jb, _ := json.Marshal(argString(vals[placeholderRe.FindStringSubmatch(m)[1]]))
-			return strings.Trim(string(jb), `"`)
-		})
+		if strings.Contains(b, "{{") {
+			dec := json.NewDecoder(strings.NewReader(b))
+			dec.UseNumber()
+			var v any
+			if err := dec.Decode(&v); err == nil && hasNestedPlaceholder(v, 0) {
+				// Walk each decoded layer so a placeholder inside a JSON string
+				// is escaped for that layer, then again for the outer document.
+				b = string(compactJSON(renderJSONPlaceholders(v, vals, 0)))
+			} else {
+				b = legacyRenderJSONPlaceholders(b, vals)
+			}
+		}
 	} else {
 		b = placeholderRe.ReplaceAllStringFunc(b, func(m string) string {
 			s := argString(vals[placeholderRe.FindStringSubmatch(m)[1]])
@@ -581,6 +601,117 @@ func (t *Tool) RenderWith(args map[string]any, resolve func(string) (string, err
 		})
 	}
 	return t.Method, u, headers, b, nil
+}
+
+func wholePlaceholderName(s string) (string, bool) {
+	t := strings.TrimSpace(s)
+	m := placeholderRe.FindStringSubmatch(t)
+	if m == nil || strings.TrimSpace(m[0]) != t {
+		return "", false
+	}
+	return m[1], true
+}
+
+func renderJSONPlaceholders(v any, vals map[string]any, depth int) any {
+	if depth > 8 {
+		return v
+	}
+	switch x := v.(type) {
+	case map[string]any:
+		for k, val := range x {
+			x[k] = renderJSONPlaceholders(val, vals, depth+1)
+		}
+		return x
+	case []any:
+		for i := range x {
+			x[i] = renderJSONPlaceholders(x[i], vals, depth+1)
+		}
+		return x
+	case string:
+		if name, ok := wholePlaceholderName(x); ok {
+			if val, exists := vals[name]; exists {
+				return val
+			}
+			return x
+		}
+		if !strings.Contains(x, "{{") {
+			return x
+		}
+		if pre, tail, ok := splitCommandJSON(x); ok {
+			if inner, err := parseRecJSON(tail); err == nil {
+				rendered := renderJSONPlaceholders(inner, vals, depth+1)
+				return pre + string(compactJSON(rendered))
+			}
+		}
+		trimmed := strings.TrimSpace(x)
+		if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+			if inner, err := parseRecJSON(trimmed); err == nil {
+				rendered := renderJSONPlaceholders(inner, vals, depth+1)
+				return string(compactJSON(rendered))
+			}
+		}
+		return placeholderRe.ReplaceAllStringFunc(x, func(m string) string {
+			return argString(vals[placeholderRe.FindStringSubmatch(m)[1]])
+		})
+	default:
+		return v
+	}
+}
+
+// hasNestedPlaceholder reports whether a placeholder sits inside a string that is
+// itself JSON (or command-prefixed JSON). Only those bodies need layer-aware
+// rendering; everything else keeps the legacy byte-preserving path.
+func hasNestedPlaceholder(v any, depth int) bool {
+	if depth > 8 {
+		return false
+	}
+	switch x := v.(type) {
+	case map[string]any:
+		for _, val := range x {
+			if hasNestedPlaceholder(val, depth+1) {
+				return true
+			}
+		}
+	case []any:
+		for _, val := range x {
+			if hasNestedPlaceholder(val, depth+1) {
+				return true
+			}
+		}
+	case string:
+		if !strings.Contains(x, "{{") {
+			return false
+		}
+		if _, ok := wholePlaceholderName(x); ok {
+			return false
+		}
+		if _, tail, ok := splitCommandJSON(x); ok {
+			if _, err := parseRecJSON(tail); err == nil {
+				return true
+			}
+		}
+		t := strings.TrimSpace(x)
+		if strings.HasPrefix(t, "{") || strings.HasPrefix(t, "[") {
+			if _, err := parseRecJSON(t); err == nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func legacyRenderJSONPlaceholders(b string, vals map[string]any) string {
+	quoted := regexp.MustCompile(`"\{\{\s*([A-Za-z0-9_\.]+)\s*\}\}"`)
+	b = quoted.ReplaceAllStringFunc(b, func(m string) string {
+		n := quoted.FindStringSubmatch(m)[1]
+		jb, _ := json.Marshal(vals[n])
+		return string(jb)
+	})
+	b = placeholderRe.ReplaceAllStringFunc(b, func(m string) string {
+		jb, _ := json.Marshal(argString(vals[placeholderRe.FindStringSubmatch(m)[1]]))
+		return strings.Trim(string(jb), `"`)
+	})
+	return b
 }
 
 func headerGet(h map[string]string, name string) string {

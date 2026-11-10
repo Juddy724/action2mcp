@@ -354,12 +354,13 @@ func TestRecToolsAnnotateSaveScrub(t *testing.T) {
 
 	recTxt := grab("get_recording", mustTool(t, c, "rec_get_recording", map[string]any{"recording_id": recID}))
 	var view struct {
-		Summary  string `json:"summary"`
+		Summary  string   `json:"summary"`
+		Hosts    []string `json:"hosts"`
 		Requests []struct {
 			ID        int64    `json:"id"`
 			Count     int      `json:"count"`
 			Method    string   `json:"method"`
-			Host      string   `json:"host"`
+			H         int      `json:"h"`
 			Path      string   `json:"path"`
 			QueryKeys []string `json:"query_keys"`
 			Noise     bool     `json:"noise"`
@@ -375,8 +376,8 @@ func TestRecToolsAnnotateSaveScrub(t *testing.T) {
 		}
 		if row.Method == "GET" && row.Path == "/v1/orders" {
 			ordersRow = true
-			if row.Count != 3 || row.ID != orders.ID || row.Host != "api.example.com" {
-				t.Fatalf("orders group: %+v want id %d", row, orders.ID)
+			if row.Count != 3 || row.ID != orders.ID || row.H < 0 || row.H >= len(view.Hosts) || view.Hosts[row.H] != "api.example.com" {
+				t.Fatalf("orders group: %+v hosts %v want id %d", row, view.Hosts, orders.ID)
 			}
 			if !has(row.QueryKeys, "id") || !has(row.QueryKeys, "access_token") {
 				t.Fatalf("query keys: %+v", row.QueryKeys)
@@ -472,7 +473,12 @@ func TestRecToolsAnnotateSaveScrub(t *testing.T) {
 			map[string]any{"request_id": noise.ID, "purpose": "业务日志，不是埋点", "category": "query", "useful": useful, "noise_override": override},
 		},
 	}))
-	if !strings.Contains(okTxt, `"source":"agent"`) || !strings.Contains(okTxt, "查询订单并创建一条订单") {
+	var ann struct {
+		Updated        int     `json:"updated"`
+		SummaryUpdated bool    `json:"summary_updated"`
+		RequestIDs     []int64 `json:"request_ids"`
+	}
+	if err := json.Unmarshal([]byte(okTxt), &ann); err != nil || ann.Updated != 3 || !ann.SummaryUpdated || len(ann.RequestIDs) != 3 || strings.Contains(okTxt, `"source"`) || strings.Contains(okTxt, "查询订单并创建一条订单") {
 		t.Fatalf("annotate result: %s", okTxt)
 	}
 	notes, err := app.store.RequestNotes(recID)
@@ -537,8 +543,17 @@ func TestRecToolsAnnotateSaveScrub(t *testing.T) {
 	if strings.Contains(stored.URL, secQuery) || strings.Contains(stored.Body, secPass) || strings.Contains(stored.Body, secVault) {
 		t.Fatalf("tool kept secrets url=%s body=%s", stored.URL, stored.Body)
 	}
-	if !strings.Contains(stored.Body, "{{order_id}}") || !strings.Contains(stored.Body, "{{secret.") {
+	if !strings.Contains(stored.Body, "{{order_id}}") || (!strings.Contains(stored.Body, "{{password}}") && !strings.Contains(stored.Body, "{{secret.")) {
 		t.Fatalf("tool body not parameterised: %s", stored.Body)
+	}
+	var passParam *Param
+	for i := range stored.Params {
+		if stored.Params[i].Name == "password" {
+			passParam = &stored.Params[i]
+		}
+	}
+	if passParam == nil || !passParam.Required || passParam.Default != "" || passParam.Description != removedSecretDesc {
+		t.Fatalf("password param: %+v", stored.Params)
 	}
 	if !strings.Contains(stored.URL, "{{") {
 		t.Fatalf("token left literal in url: %s", stored.URL)
@@ -678,7 +693,7 @@ func TestRecSecurityBodyFormats(t *testing.T) {
 		{"multipart_password", w.FormDataContentType(), multipartBody.String(), `{"echo":"multipart-private-value"}`, "multipart-private-value", false},
 		{"malformed_form", "application/x-www-form-urlencoded", "token=form-private-value&note=x;y", `{"echo":"form-private-value"}`, "form-private-value", false},
 		{"malformed_sensitive_form_pair", "application/x-www-form-urlencoded", "token=malformed;private-value&note=%ZZ", `{"echo":"malformed;private-value"}`, "malformed;private-value", false},
-		{"truncated_json", "application/json", `{"password":"truncated-private-value","note":"` + strings.Repeat("a", 1000) + "\n…[已截断]", `{"echo":"truncated-private-value"}`, "truncated-private-value", true},
+		{"truncated_json", "application/json", `{"password":"truncated-private-value","note":"` + strings.Repeat("a", 1000) + "\n…[已截断]", `{"echo":"truncated-private-value"}`, "truncated-private-value", false},
 		{"invalid_json", "application/problem+json", `{"password":"incomplete-private-value"`, "", "incomplete-private-value", true},
 		{"invalid_multipart", "multipart/form-data; boundary=expected", "--expected\r\nContent-Disposition: form-data; name=\"password\"\r\n\r\nbroken-private-value", "", "broken-private-value", true},
 	}
@@ -698,6 +713,9 @@ func TestRecSecurityBodyFormats(t *testing.T) {
 			}
 			if tt.hidden && out["req_body"] != hiddenRecBody {
 				t.Fatalf("unsafe body fallback: %s", text)
+			}
+			if tt.name == "truncated_json" && (out["req_body_partial"] != true || out["req_body"] == hiddenRecBody) {
+				t.Fatalf("truncated body should be a partial sanitize: %s", text)
 			}
 			if tt.name == "multipart_password" && !strings.Contains(out["req_body"].(string), "keep this field") {
 				t.Fatalf("safe multipart field lost: %s", text)
@@ -730,7 +748,7 @@ func TestRecSecurityHeadersEscapesAndShortValues(t *testing.T) {
 				t.Fatalf("escaped password echo survived: %s", text)
 			}
 		}
-		if body["short_echo"] != secretMask || body["normal"] != "xylophone" {
+		if body["short_echo"] != "xy" || body["normal"] != "xylophone" {
 			t.Fatalf("short literal handling: %s", text)
 		}
 	}
@@ -847,8 +865,14 @@ func TestRecSecuritySaveSchemasAndTemplates(t *testing.T) {
 	if body["known"] != "{{secret.existing_ref}}" || body["amount"] != float64(42) || body["enabled"] != true {
 		t.Fatalf("template structure or reference corrupted: %s", tool.Body)
 	}
-	if !strings.Contains(body["credentials"].(map[string]any)["value"].(string), "{{secret.") || body["metadata"] == "{{meta}}" {
-		t.Fatalf("sensitive value not vault-backed: %s", tool.Body)
+	// New secrets are required parameters. Only an existing vault value is reused.
+	cred := body["credentials"].(map[string]any)["value"].(string)
+	meta := fmt.Sprint(body["metadata"])
+	if !strings.Contains(cred, "{{") || strings.Contains(cred, "ancestor-private") || strings.Contains(meta, "vault-private") || strings.Contains(meta, "ancestor-private") {
+		t.Fatalf("sensitive value not parameterized: %s", tool.Body)
+	}
+	if app.vault.FindByValue("ancestor-private") != "" {
+		t.Fatal("save created a vault entry for a new secret")
 	}
 	for _, p := range tool.Params {
 		if strings.Contains(p.Default, "private") || strings.Contains(p.Description, "private") {

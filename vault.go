@@ -343,6 +343,8 @@ func (v *Vault) secretVariants() []string {
 	defer v.mu.RUnlock()
 	set := map[string]bool{}
 	for _, e := range v.cache {
+		// Generic Scrub keeps the conservative pre-0.5.1 threshold; the recording
+		// analysis path filters these variants with crossFieldLiteral itself.
 		if e.typ != "secret" || len(e.value) < 3 {
 			continue
 		}
