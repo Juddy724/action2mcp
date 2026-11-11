@@ -285,6 +285,16 @@ func (a *App) Handler() http.Handler {
 		a.broadcastToolsChanged()
 		writeJSON(w, 200, map[string]any{"ok": true})
 	})
+	mux.HandleFunc("POST /api/tools/{id}/convert-to-middleware", func(w http.ResponseWriter, r *http.Request) {
+		id := pathID(r)
+		m, err := a.store.ConvertToolToSQLMiddleware(id)
+		if err != nil {
+			writeErr(w, 400, err)
+			return
+		}
+		a.broadcastToolsChanged()
+		writeJSON(w, 200, m)
+	})
 	mux.HandleFunc("POST /api/tools/{id}/run", func(w http.ResponseWriter, r *http.Request) {
 		t, err := a.store.GetTool(pathID(r))
 		if err != nil {

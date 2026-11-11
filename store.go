@@ -105,6 +105,10 @@ type Tool struct {
 	Config            ToolConfig        `json:"config"`
 	AllowDisableGuard bool              `json:"-"`
 	configErr         error
+	mwID              int64  `json:"-"`
+	mwFingerprint     string `json:"-"`
+	mwName            string `json:"-"`
+	mwAlias           string `json:"-"`
 }
 
 type Pack struct {
@@ -257,7 +261,10 @@ WHEN source_approval_floor.approval='always' OR excluded.approval='always' THEN 
 	)`); err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec(`PRAGMA user_version=7`); err != nil {
+	if err := s.migrateV8WSToolsToSQLMiddleware(); err != nil {
+		return nil, err
+	}
+	if _, err := db.Exec(`PRAGMA user_version=8`); err != nil {
 		return nil, err
 	}
 	if runtime.GOOS != "windows" && path != "" && !strings.Contains(path, "mode=memory") && !strings.HasPrefix(path, ":") {

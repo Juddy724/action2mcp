@@ -141,6 +141,15 @@ func (p *PreparedCall) resolve(resolve func(string) (string, error)) (RequestPre
 }
 
 func (a *App) Prepare(t *Tool, args map[string]any) (*PreparedCall, error) {
+	if t != nil && t.mwID != 0 {
+		tool, mw, ds, err := a.refreshSQLConsoleTool(t, args)
+		if err != nil {
+			return nil, err
+		}
+		t = tool
+		_ = mw
+		_ = ds
+	}
 	analysis := analyzeApprovalTemplate(t)
 	secrets := a.approvalSecretValues(t, args)
 	at := time.Now()
@@ -209,6 +218,17 @@ func (a *App) Prepare(t *Tool, args map[string]any) (*PreparedCall, error) {
 	for key, limited := range analysis.limitedHeaders {
 		if limited {
 			p.Preview.Headers[key] = secretMask
+		}
+	}
+	if t.mwID != 0 {
+		if mw, err := a.store.GetMiddleware(t.mwID); err == nil {
+			alias := t.mwAlias
+			if a := argStr(args, "database"); strings.TrimSpace(a) != "" {
+				alias = a
+			}
+			ds, _ := mw.lookupDatasource(alias)
+			redactSQLConsolePreview(p, mw, alias, ds.secretValues(&mw.Config))
+			p.Preview = a.scrubApprovalPreview(p.Preview, p.secretValues)
 		}
 	}
 	return p, nil

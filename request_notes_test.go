@@ -165,7 +165,7 @@ PRAGMA user_version=4;`)
 	}
 	t.Cleanup(func() { s.db.Close() })
 	var version int
-	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 7 {
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 8 {
 		t.Fatalf("schema version = %d, %v", version, err)
 	}
 	rec, err := s.GetRecording(7)
