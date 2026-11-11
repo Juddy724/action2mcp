@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-const Version = "0.5.5"
+const Version = "0.5.6"
 
 type Config struct {
 	Port        int      `json:"port"`
@@ -52,6 +52,9 @@ type App struct {
 	smu     sync.Mutex
 	sstates map[string]*siteState
 	harvest *harvestState
+
+	pendingLoginMax time.Duration // 0 = pendingLoginMax default
+	openLogin       func(target string) (loginBrowser, loginSurface, error)
 
 	mwmu        sync.Mutex
 	mwPool      sync.Map // cache key -> client (*sql.DB, redis client, mq clients)
@@ -132,10 +135,17 @@ func NewApp(dataDir string) (*App, error) {
 	}
 	a := &App{dataDir: dataDir, cfg: cfg, store: st, quit: make(chan struct{}), vault: v,
 		httpClient: &http.Client{Timeout: 60 * time.Second}}
-	// every site used by a tool gets a 登录配置 (default: 企业微信 / 单点登录)
+	// every site used by a tool or WebSocket middleware gets a 登录配置
 	if tools, err := st.ListTools(); err == nil {
 		for _, t := range tools {
 			st.EnsureSite(t.URL)
+		}
+	}
+	if ms, err := st.ListMiddleware(); err == nil {
+		for _, m := range ms {
+			if m.Type == "websocket" && strings.TrimSpace(m.Config.URL) != "" {
+				st.EnsureSite(m.Config.URL)
+			}
 		}
 	}
 	go a.cookieSyncLoop()

@@ -6,12 +6,12 @@
 
 最新版本：[Releases 页面](https://github.com/Juddy724/action2mcp/releases/latest)
 
-| 平台 | 安装包 (v0.5.5) |
+| 平台 | 安装包 (v0.5.6) |
 |---|---|
-| macOS (Apple 芯片) | [Action2MCP-0.5.5-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.5/Action2MCP-0.5.5-macOS-AppleSilicon.zip) |
-| macOS (Intel) | [Action2MCP-0.5.5-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.5/Action2MCP-0.5.5-macOS-Intel.zip) |
-| Windows x64 | [Action2MCP-0.5.5-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.5/Action2MCP-0.5.5-Windows-x64.zip) |
-| Linux x64 | [Action2MCP-0.5.5-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.5/Action2MCP-0.5.5-Linux-x64.zip) |
+| macOS (Apple 芯片) | [Action2MCP-0.5.6-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.6/Action2MCP-0.5.6-macOS-AppleSilicon.zip) |
+| macOS (Intel) | [Action2MCP-0.5.6-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.6/Action2MCP-0.5.6-macOS-Intel.zip) |
+| Windows x64 | [Action2MCP-0.5.6-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.6/Action2MCP-0.5.6-Windows-x64.zip) |
+| Linux x64 | [Action2MCP-0.5.6-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.6/Action2MCP-0.5.6-Linux-x64.zip) |
 
 解压后运行 `start.command`（macOS）、`start.bat`（Windows）或 `start.sh`（Linux），然后打开 http://localhost:7788 。详细说明见安装包里的 README.md。
 
@@ -51,6 +51,12 @@
 
 同一个站点上有多套库时，再点「添加」补一行即可。数据源 ID 可以从另一次查询录制的帧里抄，或从控制台的请求详情里复制。保存后，已连接的 AI 客户端会收到工具列表变更通知，`tools/list` 立即反映当前的别名和说明。
 
+
+### 登录中心（0.5.6）
+
+- 从 WebSocket 中间件（终端或 SQL 控制台）自动创建登录配置时，网站地址使用对应的 http(s) 源（`wss://` → `https://`，`ws://` → `http://`），不再把 `wss://` 填进登录中心。登录入口、登录页和检测地址必须是 `http://` 或 `https://`。
+- 「测试重新登录 / 打开浏览器登录」时，如果浏览器里已经处于登录状态，会马上判定成功并关闭窗口；若还缺 `sso-epctoken` 这类必要请求头，会刷新或再次打开该网站以捕获请求头，全部收获后才算成功。
+- 等待登录最多 5 分钟，超时会结束并显示失败原因；等待过程中可以点「取消」，关闭弹出的窗口也会结束等待，状态不会一直停在「等待登录」。
 
 ## 从源码构建
 

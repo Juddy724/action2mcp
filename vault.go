@@ -448,6 +448,9 @@ func normalizeOrigin(s string) string {
 	if s == "" {
 		return ""
 	}
+	if o := credOrigin(s); o != "" {
+		return o
+	}
 	if !strings.Contains(s, "://") {
 		s = "https://" + s
 	}
@@ -459,11 +462,7 @@ func normalizeOrigin(s string) string {
 }
 
 func originOf(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" {
-		return ""
-	}
-	return strings.ToLower(u.Scheme + "://" + u.Host)
+	return credOrigin(raw)
 }
 
 // sameSite compares origins, ignoring the scheme when only one side gave it.

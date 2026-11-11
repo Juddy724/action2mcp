@@ -92,7 +92,24 @@ func (t *loginTab) info() (pageInfo, error) {
 }
 
 func (t *loginTab) close() {
+	if t == nil || t.bs == nil {
+		return
+	}
 	t.bs.call("", "Target.closeTarget", map[string]any{"targetId": t.targetID}, nil)
+}
+
+func (t *loginTab) navigate(u string) error {
+	if t == nil || t.bs == nil {
+		return errors.New("登录窗口不可用")
+	}
+	return t.bs.call(t.session, "Page.navigate", map[string]any{"url": u}, nil)
+}
+
+func (t *loginTab) reload() error {
+	if t == nil || t.bs == nil {
+		return errors.New("登录窗口不可用")
+	}
+	return t.bs.call(t.session, "Page.reload", map[string]any{"ignoreCache": true}, nil)
 }
 
 func (t *loginTab) activate() {
