@@ -96,6 +96,9 @@ func jsonType(v any) string {
 }
 
 func SuggestParams(q *ReqRecord) []Candidate {
+	if isWSMethod(q.Method) {
+		return suggestWSParams(q)
+	}
 	out := []Candidate{}
 	if u, err := url.Parse(q.URL); err == nil {
 		for _, kv := range strings.Split(u.RawQuery, "&") {
@@ -164,6 +167,9 @@ func SuggestParams(q *ReqRecord) []Candidate {
 
 // BuildDraft turns a recorded request + chosen candidates into a tool template.
 func BuildDraft(q *ReqRecord, chosen []Candidate) (*Tool, error) {
+	if isWSMethod(q.Method) {
+		return BuildWSDraft(q, chosen)
+	}
 	t := &Tool{Method: q.Method, Params: []Param{}}
 	t.Headers, t.CredHeaders = SanitizeHeaders(q.ReqHeaders)
 	used := map[string]int{}
@@ -349,18 +355,15 @@ func setJSONPath(root *any, p string, val any) bool {
 	return false
 }
 
-var placeholderRe = regexp.MustCompile(`\{\{\s*([A-Za-z0-9_\.]+)\s*\}\}`)
+var placeholderRe = regexp.MustCompile(`\{\{\s*((?:header|cookie)\.[A-Za-z0-9][A-Za-z0-9_-]*|[A-Za-z0-9_\.]+)\s*\}\}`)
 
 // Placeholders lists all {{names}} used in the template.
 func (t *Tool) Placeholders() []string {
 	seen := map[string]bool{}
 	var out []string
-	all := t.URL + "\n" + t.Body
-	for _, v := range t.Headers {
-		all += "\n" + v
-	}
+	all := strings.Join(configTemplateTexts(t), "\n")
 	for _, m := range placeholderRe.FindAllStringSubmatch(all, -1) {
-		if isRefName(m[1]) {
+		if isServerRef(m[1], isWSMethod(t.Method)) {
 			continue
 		}
 		if !seen[m[1]] {
@@ -383,14 +386,19 @@ func (t *Tool) Normalize() error {
 	if t.Method == "" {
 		t.Method = "GET"
 	}
-	if _, err := url.Parse(t.URL); err != nil || !strings.HasPrefix(t.URL, "http") {
+	if isWSMethod(t.Method) {
+		u, err := url.Parse(t.URL)
+		if err != nil || (u.Scheme != "ws" && u.Scheme != "wss") {
+			return errors.New("WebSocket 工具地址必须以 ws:// 或 wss:// 开头")
+		}
+	} else if _, err := url.Parse(t.URL); err != nil || !strings.HasPrefix(t.URL, "http") {
 		return errors.New("请求地址必须以 http:// 或 https:// 开头")
 	}
 	have := map[string]bool{}
 	ps := []Param{}
 	for _, p := range t.Params {
 		p.Name = strings.TrimSpace(p.Name)
-		if p.Name == "" || have[p.Name] || isRefName(p.Name) {
+		if p.Name == "" || have[p.Name] || isServerRef(p.Name, isWSMethod(t.Method)) {
 			continue
 		}
 		if p.Type == "" {
@@ -410,7 +418,7 @@ func (t *Tool) Normalize() error {
 	clean := map[string]string{}
 	for k, v := range t.Headers {
 		// a credential header whose value comes from 配置管理 ({{secret.X}} / {{cfg.X}}) is safe to keep
-		if IsCredHeader(k) && !strings.Contains(v, "{{secret.") && !strings.Contains(v, "{{cfg.") {
+		if IsCredHeader(k) && !strings.Contains(v, "{{secret.") && !strings.Contains(v, "{{cfg.") && !strings.Contains(v, "{{header.") && !strings.Contains(v, "{{cookie.") {
 			lk := strings.ToLower(k)
 			found := false
 			for _, c := range t.CredHeaders {
@@ -521,10 +529,7 @@ func (t *Tool) Render(args map[string]any) (method, u string, headers map[string
 
 // RenderRefs lists {{cfg.X}} / {{secret.X}} references used by a template.
 func (t *Tool) RenderRefs() []string {
-	all := t.URL + "\n" + t.Body
-	for _, v := range t.Headers {
-		all += "\n" + v
-	}
+	all := strings.Join(configTemplateTexts(t), "\n")
 	seen := map[string]bool{}
 	out := []string{}
 	for _, m := range placeholderRe.FindAllStringSubmatch(all, -1) {
@@ -660,7 +665,8 @@ func renderJSONPlaceholders(v any, vals map[string]any, depth int, deferred *def
 		return x
 	case string:
 		if name, ok := wholePlaceholderName(x); ok {
-			if _, exists := vals[name]; exists || (deferred != nil && isRefName(name)) {
+			deferrable := deferred != nil && (deferred.deferName != nil && deferred.deferName(name) || deferred.deferName == nil && isRefName(name))
+			if _, exists := vals[name]; exists || deferrable {
 				return renderValue(vals, name, deferred, credentialEncoding{jsonLayers: layers})
 			}
 			return x
@@ -819,6 +825,9 @@ type CallResult struct {
 	DurationMs  int64             `json:"duration_ms"`
 	Error       string            `json:"error,omitempty"`
 	Relogged    bool              `json:"relogged,omitempty"`
+	Outcome     string            `json:"outcome,omitempty"`
+	Truncated   bool              `json:"truncated,omitempty"`
+	RowCount    int               `json:"row_count,omitempty"`
 	hops        []string
 	finalURL    string
 }
@@ -853,6 +862,9 @@ func (a *App) Send(p *PreparedCall) (*CallResult, error) {
 }
 
 func (a *App) send(p *PreparedCall, secrets *[]string) (*CallResult, error) {
+	if p.isWS() {
+		return a.sendWS(p, secrets)
+	}
 	r, err := p.resolve(func(ref string) (string, error) {
 		value, err := a.vault.Resolve(ref)
 		if err == nil {

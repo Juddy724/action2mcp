@@ -18,6 +18,7 @@ type exportTool struct {
 	Body        string            `json:"body"`
 	Params      []Param           `json:"params"`
 	CredHeaders []string          `json:"cred_headers"`
+	Config      ToolConfig        `json:"config,omitempty"`
 }
 
 type exportPack struct {
@@ -82,14 +83,19 @@ func (a *App) Export() ([]byte, error) {
 		names[t.ID] = t.Name
 		h := map[string]string{}
 		for k, v := range t.Headers {
-			if !IsCredHeader(k) {
-				h[k] = v
+			if IsCredHeader(k) && !(isWSMethod(t.Method) && (strings.Contains(v, "{{header.") || strings.Contains(v, "{{cookie.") || strings.Contains(v, "{{secret.") || strings.Contains(v, "{{cfg."))) {
+				continue
 			}
+			h[k] = v
 		}
 		for k, v := range h {
 			h[k] = a.vault.Scrub(a.vault.ToRefs(v))
 		}
-		f.Tools = append(f.Tools, exportTool{t.Approval, t.Name, t.Title, t.Description, t.Method, a.vault.Scrub(a.vault.ToRefs(t.URL)), h, a.vault.Scrub(a.vault.ToRefs(t.Body)), t.Params, t.CredHeaders})
+		cfg := t.Config
+		for i, m := range cfg.Messages {
+			cfg.Messages[i] = a.vault.Scrub(a.vault.ToRefs(m))
+		}
+		f.Tools = append(f.Tools, exportTool{t.Approval, t.Name, t.Title, t.Description, t.Method, a.vault.Scrub(a.vault.ToRefs(t.URL)), h, a.vault.Scrub(a.vault.ToRefs(t.Body)), t.Params, t.CredHeaders, cfg})
 	}
 	for _, p := range packs {
 		guide := a.vault.Scrub(strings.TrimSpace(p.Guide))
@@ -173,7 +179,7 @@ func (a *App) Import(b []byte) (*ImportResult, error) {
 	}
 	ids := map[string]int64{}
 	for _, et := range f.Tools {
-		t := &Tool{Approval: et.Approval, Name: et.Name, Title: et.Title, Description: et.Description, Method: et.Method, URL: et.URL, Headers: et.Headers, Body: et.Body, Params: et.Params, CredHeaders: et.CredHeaders}
+		t := &Tool{Approval: et.Approval, Name: et.Name, Title: et.Title, Description: et.Description, Method: et.Method, URL: et.URL, Headers: et.Headers, Body: et.Body, Params: et.Params, CredHeaders: et.CredHeaders, Config: et.Config}
 		if err := t.Normalize(); err != nil {
 			return res, errors.New(et.Name + ": " + err.Error())
 		}

@@ -31,7 +31,7 @@ PRAGMA user_version=5;`)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !s.hasColumn("tools", "approval") || !s.hasColumn("tools", "rev") {
+		if !s.hasColumn("tools", "approval") || !s.hasColumn("tools", "rev") || !s.hasColumn("tools", "config") {
 			t.Fatal("schema columns missing")
 		}
 		old, err := s.GetToolByName("legacy")
@@ -39,7 +39,7 @@ PRAGMA user_version=5;`)
 			t.Fatal("migration changed old tool policy or revision")
 		}
 		var version int
-		if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 6 {
+		if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 7 {
 			t.Fatal("wrong schema version")
 		}
 		s.db.Close()
@@ -49,13 +49,13 @@ PRAGMA user_version=5;`)
 		t.Fatal(err)
 	}
 	defer s.db.Close()
-	for _, method := range []string{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"} {
+	for _, method := range []string{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "WS"} {
 		tool := &Tool{Name: "tool_" + method, Method: method, URL: "https://example.com/api"}
 		if err := s.SaveTool(tool); err != nil {
 			t.Fatal(err)
 		}
 		want := "off"
-		if method == "POST" || method == "PUT" || method == "PATCH" || method == "DELETE" {
+		if method == "POST" || method == "PUT" || method == "PATCH" || method == "DELETE" || method == "WS" {
 			want = "always"
 		}
 		if tool.Approval != want || tool.Rev != 1 {

@@ -520,10 +520,10 @@ async function selectReq(id) {
   const hdrs = h => `<table class="kv">${Object.entries(h || {}).sort().map(([k, v]) => `<tr><td>${esc(k)}</td><td class="mono">${esc(hdrCell(k, v))}</td></tr>`).join('')}</table>`;
   $('#req-detail').innerHTML = `
     <div class="row">${methodBadge(q.method)}<b class="${q.status < 400 ? 'st-ok' : 'st-bad'}">${q.status || '-'}</b><span class="muted small">${esc(q.resource_type)} · ${esc(q.ts)}</span>
-      ${ws ? `<button class="pri" style="margin-left:auto" onclick="saveRecordedWS()">保存为 WebSocket 连接</button>` : `<button class="pri" style="margin-left:auto" onclick="openToolEditorFromReq()">保存为工具</button>`}</div>
+      <span style="margin-left:auto" class="row">${ws ? `<button class="pri" onclick="openToolEditorFromReq()">保存为工具</button><button onclick="saveRecordedWS()">保存为 WebSocket 连接</button>` : `<button class="pri" onclick="openToolEditorFromReq()">保存为工具</button>`}</span></div>
     <div class="mono small" style="margin:8px 0;word-break:break-all">${esc(q.url)}</div>
     <section class="request-note-panel" aria-label="接口作用说明"><h3>作用说明</h3>${requestNoteHTML(q, true)}</section>
-    ${ws ? `<div class="notice">这是一条 WebSocket 连接。发出的消息在「发出的消息」里，收到的在「收到的消息」里。保存为连接时只带上地址，录到的帧只作对照，需要自己写一条带 <code>{{command}}</code> 的模板。登录仍用「登录中心」的 Cookie。</div>` : ''}
+    ${ws ? `<div class="notice">这是一条 WebSocket 连接。可以把带 SQL 的出站消息保存为「工具」（走 SQL 护栏和审批），也可以保存为中间件「WebSocket 连接」。保存为工具时不会写入登录令牌，调用时从本机已收获的请求头注入。</div>` : ''}
     ${q.is_login ? `<div class="ok-notice login-box">🔑 这看起来是一个<b>登录请求</b>（密码已在页面上隐藏）。保存后，账号密码会加密存进「配置管理」，以后这个网站登录过期时会自动用它重新登录，AI 看不到账号密码。
       <div class="row" style="margin-top:8px"><button class="pri" onclick="saveLoginReq(${q.id})">保存为登录配置</button></div></div>` : ''}
     ${q.noise ? `<div class="notice">${esc(requestOverrideHint(q) || ('已被识别为无关请求：' + q.noise_reason))}${ws ? '' : '（如果它其实有用，也可以保存为工具）'}</div>` : ''}
@@ -613,8 +613,8 @@ async function secretMode(i, ref) {
 }
 async function secretRef(i, v) { EDIT.candidates[i].ref = v.replace(/[^A-Za-z0-9_]/g, '_'); collectEditor(); await redraft(); drawEditor(); }
 function refsIn(t) {
-  const all = [t.url, t.body, ...Object.values(t.headers || {})].join('\n');
-  const refs = [...new Set([...all.matchAll(/\{\{\s*((?:secret|cfg)\.[A-Za-z0-9_]+)\s*\}\}/g)].map(m => m[1]))];
+  const all = [t.url, t.body, ...Object.values(t.headers || {}), ...((t.config && t.config.messages) || [])].join('\n');
+  const refs = [...new Set([...all.matchAll(/\{\{\s*((?:secret|cfg|header|cookie)\.[A-Za-z0-9_.-]+)\s*\}\}/g)].map(m => m[1]))];
   return refs.length ? '<br>当前引用：' + refs.map(r => `<code>${esc(r)}</code>`).join(' ') : '';
 }
 async function saveLoginReq(id) {
@@ -646,10 +646,13 @@ function drawEditor() {
     <label>工具标识 *</label><input id="t-name" class="mono" value="${esc(t.name)}" placeholder="search_customer（英文、数字、下划线）">
     <label>显示名称</label><input id="t-title" value="${esc(t.title)}" placeholder="查询客户">
     <label>用途说明</label><input id="t-desc" value="${esc(t.description)}" placeholder="告诉 AI 什么时候用它，例如：按关键字查询 CRM 客户，返回客户列表">
-    <label>请求</label><div class="row"><select id="t-method" onchange="toolMethodChanged()">${['GET','HEAD','POST','PUT','PATCH','DELETE'].map(m => `<option ${m === t.method ? 'selected' : ''}>${m}</option>`).join('')}</select><input id="t-url" class="grow mono" value="${esc(t.url)}"></div>
+    <label>请求</label><div class="row"><select id="t-method" onchange="toolMethodChanged()">${['GET','HEAD','POST','PUT','PATCH','DELETE','WS'].map(m => `<option ${m === t.method ? 'selected' : ''}>${m}</option>`).join('')}</select><input id="t-url" class="grow mono" value="${esc(t.url)}"></div>
     <label for="t-approval">审批模式</label><select id="t-approval" onchange="EDIT.approvalManual=true;EDIT.tool.approval=this.value"><option value="off" ${t.approval !== 'always' ? 'selected' : ''}>不审批</option><option value="always" ${t.approval === 'always' ? 'selected' : ''}>每次都审批</option></select>
     <label>请求头 (JSON)</label><textarea id="t-headers" style="min-height:80px">${esc(JSON.stringify(t.headers || {}, null, 2))}</textarea>
     <label>请求体模板</label><textarea id="t-body" style="min-height:120px">${esc(t.body || '')}</textarea>
+    ${String(t.method).toUpperCase() === 'WS' ? `<label>WebSocket 消息</label><textarea id="t-messages" class="mono" style="min-height:120px">${esc((t.config && t.config.messages || []).join('\n'))}</textarea>
+    <label>SQL 护栏</label><div class="row"><label class="chk"><input type="checkbox" id="t-sqlguard" ${t.config && t.config.sql_guard && t.config.sql_guard.enabled ? 'checked' : ''}> 仅允许单条只读 SELECT，且必须有 LIMIT（最多 200 行）</label></div>
+    <div class="muted small">护栏开启后执行前会发 EXPLAIN 预检；关闭护栏不能同时把审批降为「不审批」。令牌请使用 <code>{{header.sso-epctoken}}</code>，不要写入字面值。</div>` : ''}
     <label>参数</label><div id="t-params">${paramsTable(t.params || [])}</div>
     <label>配置引用</label><div class="muted small">模板里可以写 <code>{{secret.名称}}</code> / <code>{{cfg.名称}}</code> 引用「配置管理」里的值，调用时在本机替换，AI 看不到。${refsIn(t)}</div>
     <label>登录凭证</label><div class="ok-notice">${(t.cred_headers || []).length ? `已移除 <span class="mono">${esc(t.cred_headers.join(', '))}</span>，不会保存进工具。` : '工具里不保存任何登录凭证。'}调用时会自动从专用浏览器的登录态里取 Cookie（CSRF 类请求头会从同名 Cookie 自动补上）。</div>
@@ -659,7 +662,7 @@ function drawEditor() {
   </div>
   <div class="row" style="margin-top:18px;justify-content:flex-end"><button onclick="closeModal()">取消</button><button class="pri big" onclick="saveTool()">保存工具</button></div>`);
 }
-function defaultToolApproval(method) { return ['POST', 'PUT', 'PATCH', 'DELETE'].includes(String(method).toUpperCase()) ? 'always' : 'off'; }
+function defaultToolApproval(method) { return ['POST', 'PUT', 'PATCH', 'DELETE', 'WS'].includes(String(method).toUpperCase()) ? 'always' : 'off'; }
 function toolMethodChanged() {
   EDIT.tool.method = $('#t-method').value;
   if (!EDIT.tool.id && !EDIT.approvalManual) $('#t-approval').value = EDIT.tool.approval = defaultToolApproval(EDIT.tool.method);
@@ -679,6 +682,12 @@ function collectEditor() {
   t.method = $('#t-method').value; t.url = $('#t-url').value.trim(); t.body = $('#t-body').value;
   t.approval = $('#t-approval').value;
   try { t.headers = JSON.parse($('#t-headers').value || '{}'); } catch { throw new Error('请求头不是合法的 JSON'); }
+  if (String(t.method).toUpperCase() === 'WS') {
+    t.config = t.config || {};
+    if ($('#t-messages')) t.config.messages = $('#t-messages').value.split('\n').map(s => s.trim()).filter(Boolean);
+    const on = $('#t-sqlguard') ? $('#t-sqlguard').checked : !!(t.config.sql_guard && t.config.sql_guard.enabled);
+    t.config.sql_guard = Object.assign({ param: 'sql', path: 'data.sql', max_rows: 200 }, t.config.sql_guard || {}, { enabled: on });
+  }
   document.querySelectorAll('#t-params tr[data-pi]').forEach(tr => {
     const p = t.params[+tr.dataset.pi]; if (!p) return;
     p.type = $('.p-type', tr).value; p.required = $('.p-req', tr).checked; p.description = $('.p-desc', tr).value; p.default = $('.p-def', tr).value;

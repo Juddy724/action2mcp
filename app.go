@@ -46,10 +46,12 @@ type App struct {
 	approvalInsertHook func() error
 	approvalDecideHook func() error
 	prepareNow         func() time.Time
+	wsReloginHook      func() error
 
 	vault   *Vault
 	smu     sync.Mutex
 	sstates map[string]*siteState
+	harvest *harvestState
 
 	mwmu        sync.Mutex
 	mwPool      sync.Map // cache key -> client (*sql.DB, redis client, mq clients)

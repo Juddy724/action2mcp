@@ -40,10 +40,15 @@ type deferredCredentials struct {
 	subs         []credentialSubstitution
 	preview      bool
 	maskedParams map[string]bool
+	deferName    func(string) bool
 }
 
 func renderValue(vals map[string]any, name string, d *deferredCredentials, enc credentialEncoding) any {
-	if d == nil || !isRefName(name) {
+	deferrable := isRefName(name)
+	if d != nil && d.deferName != nil {
+		deferrable = d.deferName(name)
+	}
+	if d == nil || !deferrable {
 		return vals[name]
 	}
 	token := fmt.Sprintf("%s%dEND", d.prefix, len(d.subs))
@@ -74,6 +79,12 @@ type PreparedCall struct {
 	subs         []credentialSubstitution
 	credHeaders  []string
 	secretValues []string
+	ws           bool
+	wsMessages   []string
+	wsSQL        string
+	wsConfig     ToolConfig
+	configErr    error
+	wsStats      *wsSessionStats
 }
 
 func replaceRequest(r RequestPreview, replace func(string) string) RequestPreview {
@@ -92,12 +103,21 @@ func (p *PreparedCall) fingerprint() string {
 		pairs = append(pairs, sub.token, fmt.Sprintf("A2MCREDENTIAL%dEND", i))
 		locations = append(locations, fmt.Sprintf("%s:%t:%d:%t", sub.ref, sub.encoding.query, sub.encoding.jsonLayers, sub.encoding.escapeHTML))
 	}
-	r := replaceRequest(p.request, strings.NewReplacer(pairs...).Replace)
+	replacer := strings.NewReplacer(pairs...)
+	r := replaceRequest(p.request, replacer.Replace)
+	msgs := make([]string, len(p.wsMessages))
+	for i, m := range p.wsMessages {
+		msgs[i] = replacer.Replace(m)
+	}
 	b, _ := json.Marshal(struct {
 		Request     RequestPreview
 		References  []string
 		CredHeaders []string
-	}{r, locations, p.credHeaders})
+		Messages    []string
+		SQL         string
+		Guard       bool
+		MaxRows     int
+	}{r, locations, p.credHeaders, msgs, p.wsSQL, p.wsConfig.sqlGuardEnabled(), p.wsConfig.maxRows()})
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
 }
@@ -135,12 +155,16 @@ func (a *App) Prepare(t *Tool, args map[string]any) (*PreparedCall, error) {
 	if _, err := rand.Read(random[:]); err != nil {
 		return nil, err
 	}
-	d := &deferredCredentials{prefix: "A2M" + hex.EncodeToString(random[:]) + "REF"}
+	d := &deferredCredentials{prefix: "A2M" + hex.EncodeToString(random[:]) + "REF", deferName: func(n string) bool { return isServerRef(n, isWSMethod(t.Method)) }}
 	method, u, headers, body, err := t.renderValues(vals, d)
 	if err != nil {
 		return nil, err
 	}
 	p := &PreparedCall{request: RequestPreview{method, u, headers, body}, subs: d.subs, credHeaders: append([]string(nil), t.CredHeaders...)}
+	if err := a.freezeWSCall(t, vals, d, p); err != nil {
+		return nil, fmt.Errorf("%s", a.scrubApprovalText(err.Error(), secrets))
+	}
+	p.subs = d.subs
 	p.PreviewHash = p.fingerprint()
 	p.secretValues = append(secrets, a.approvalSecretValues(t, vals)...)
 	displayVals := make(map[string]any, len(vals))
@@ -157,7 +181,7 @@ func (a *App) Prepare(t *Tool, args map[string]any) (*PreparedCall, error) {
 			maskedParams[param.Name] = true
 		}
 	}
-	display := &deferredCredentials{prefix: d.prefix, preview: true, maskedParams: maskedParams}
+	display := &deferredCredentials{prefix: d.prefix, preview: true, maskedParams: maskedParams, deferName: d.deferName}
 	method, u, headers, body, err = t.renderValues(displayVals, display)
 	if err != nil {
 		return nil, err
@@ -168,6 +192,12 @@ func (a *App) Prepare(t *Tool, args map[string]any) (*PreparedCall, error) {
 	}
 	replacer := strings.NewReplacer(pairs...)
 	p.Preview = replaceRequest(RequestPreview{method, u, headers, body}, replacer.Replace)
+	if p.ws && p.wsSQL != "" {
+		p.Preview.Body = p.wsSQL
+		if len(p.wsMessages) > 0 {
+			// Preview keeps credential placeholders; SQL is the user-facing payload.
+		}
+	}
 	p.Preview = a.scrubApprovalPreview(p.Preview, p.secretValues)
 	// An over-limit template cannot establish safe literal boundaries.
 	if analysis.limitedURL {

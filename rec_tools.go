@@ -89,7 +89,7 @@ func isSensitiveHeader(name string) bool {
 
 func isWriteMethod(method string) bool {
 	switch strings.ToUpper(strings.TrimSpace(method)) {
-	case "POST", "PUT", "PATCH", "DELETE":
+	case "POST", "PUT", "PATCH", "DELETE", "WS":
 		return true
 	default:
 		return false
