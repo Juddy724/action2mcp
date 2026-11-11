@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -203,7 +204,7 @@ func BuildDraft(q *ReqRecord, chosen []Candidate) (*Tool, error) {
 					desc = removedSecretDesc
 					reqd = true
 				}
-				t.Params = append(t.Params, Param{Name: name, Type: "string", Required: reqd, Default: c.Example, Description: desc})
+				t.Params = append(t.Params, Param{Name: name, Type: "string", Required: reqd, Default: c.Example, Description: desc, Secret: c.Secret})
 				break
 			}
 		}
@@ -240,7 +241,7 @@ func BuildDraft(q *ReqRecord, chosen []Candidate) (*Tool, error) {
 					desc = removedSecretDesc
 					reqd = true
 				}
-				t.Params = append(t.Params, Param{Name: name, Type: c.Type, Required: reqd, Default: c.Example, Description: desc})
+				t.Params = append(t.Params, Param{Name: name, Type: c.Type, Required: reqd, Default: c.Example, Description: desc, Secret: c.Secret})
 			}
 		}
 		b, _ := json.MarshalIndent(j, "", "  ")
@@ -270,7 +271,7 @@ func BuildDraft(q *ReqRecord, chosen []Candidate) (*Tool, error) {
 						desc = removedSecretDesc
 						reqd = true
 					}
-					t.Params = append(t.Params, Param{Name: name, Type: "string", Required: reqd, Default: c.Example, Description: desc})
+					t.Params = append(t.Params, Param{Name: name, Type: "string", Required: reqd, Default: c.Example, Description: desc, Secret: c.Secret})
 				}
 			}
 		}
@@ -534,17 +535,28 @@ func (t *Tool) RenderRefs() []string {
 // RenderWith fills the template with args; resolve serves {{cfg.X}} / {{secret.X}}, extra serves
 // internal values such as {{csrf}}.
 func (t *Tool) RenderWith(args map[string]any, resolve func(string) (string, error), extra map[string]any) (method, u string, headers map[string]string, body string, err error) {
+	vals, err := t.bindValues(args, resolve, extra, false, time.Now())
+	if err != nil {
+		return "", "", nil, "", err
+	}
+	return t.renderValues(vals, nil)
+}
+
+func (t *Tool) bindValues(args map[string]any, resolve func(string) (string, error), extra map[string]any, deferRefs bool, at time.Time) (map[string]any, error) {
 	vals := map[string]any{}
 	for k, v := range extra {
 		vals[k] = v
 	}
 	for _, r := range t.RenderRefs() {
+		if deferRefs {
+			continue
+		}
 		if resolve == nil {
-			return "", "", nil, "", fmt.Errorf("配置项「%s」无法读取", strings.SplitN(r, ".", 2)[1])
+			return nil, fmt.Errorf("配置项「%s」无法读取", strings.SplitN(r, ".", 2)[1])
 		}
 		v, err := resolve(r)
 		if err != nil {
-			return "", "", nil, "", err
+			return nil, err
 		}
 		vals[r] = v
 	}
@@ -552,25 +564,35 @@ func (t *Tool) RenderWith(args map[string]any, resolve func(string) (string, err
 		v, ok := args[p.Name]
 		if !ok || v == nil || (p.Default == "@today" && v == "") {
 			if p.Default == "@today" {
-				v = time.Now().Format("2006-01-02")
+				v = at.Format("2006-01-02")
 			} else if p.Default != "" && !p.Required {
 				v = p.Default
 			} else if p.Required {
-				return "", "", nil, "", fmt.Errorf("缺少参数: %s", p.Name)
+				return nil, fmt.Errorf("缺少参数: %s", p.Name)
 			} else {
 				v = ""
 			}
 		}
 		vals[p.Name] = coerce(p, v)
 	}
+	return vals, nil
+}
+
+func (t *Tool) renderValues(vals map[string]any, deferred *deferredCredentials) (method, u string, headers map[string]string, body string, err error) {
 	u = placeholderRe.ReplaceAllStringFunc(t.URL, func(m string) string {
 		n := placeholderRe.FindStringSubmatch(m)[1]
-		return url.QueryEscape(argString(vals[n]))
+		return url.QueryEscape(argString(renderValue(vals, n, deferred, credentialEncoding{query: true})))
 	})
 	headers = map[string]string{}
-	for k, v := range t.Headers {
+	keys := make([]string, 0, len(t.Headers))
+	for k := range t.Headers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v := t.Headers[k]
 		headers[k] = placeholderRe.ReplaceAllStringFunc(v, func(m string) string {
-			return argString(vals[placeholderRe.FindStringSubmatch(m)[1]])
+			return argString(renderValue(vals, placeholderRe.FindStringSubmatch(m)[1], deferred, credentialEncoding{}))
 		})
 	}
 	ct := strings.ToLower(headerGet(t.Headers, "content-type"))
@@ -586,14 +608,14 @@ func (t *Tool) RenderWith(args map[string]any, resolve func(string) (string, err
 			if err := dec.Decode(&v); err == nil && hasNestedPlaceholder(v, 0) {
 				// Walk each decoded layer so a placeholder inside a JSON string
 				// is escaped for that layer, then again for the outer document.
-				b = string(compactJSON(renderJSONPlaceholders(v, vals, 0)))
+				b = string(compactJSON(renderJSONPlaceholders(v, vals, 0, deferred, 1)))
 			} else {
-				b = legacyRenderJSONPlaceholders(b, vals)
+				b = legacyRenderJSONPlaceholders(b, vals, deferred)
 			}
 		}
 	} else {
 		b = placeholderRe.ReplaceAllStringFunc(b, func(m string) string {
-			s := argString(vals[placeholderRe.FindStringSubmatch(m)[1]])
+			s := argString(renderValue(vals, placeholderRe.FindStringSubmatch(m)[1], deferred, credentialEncoding{query: isForm}))
 			if isForm {
 				return url.QueryEscape(s)
 			}
@@ -612,25 +634,30 @@ func wholePlaceholderName(s string) (string, bool) {
 	return m[1], true
 }
 
-func renderJSONPlaceholders(v any, vals map[string]any, depth int) any {
+func renderJSONPlaceholders(v any, vals map[string]any, depth int, deferred *deferredCredentials, layers int) any {
 	if depth > 8 {
 		return v
 	}
 	switch x := v.(type) {
 	case map[string]any:
-		for k, val := range x {
-			x[k] = renderJSONPlaceholders(val, vals, depth+1)
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			x[k] = renderJSONPlaceholders(x[k], vals, depth+1, deferred, layers)
 		}
 		return x
 	case []any:
 		for i := range x {
-			x[i] = renderJSONPlaceholders(x[i], vals, depth+1)
+			x[i] = renderJSONPlaceholders(x[i], vals, depth+1, deferred, layers)
 		}
 		return x
 	case string:
 		if name, ok := wholePlaceholderName(x); ok {
-			if val, exists := vals[name]; exists {
-				return val
+			if _, exists := vals[name]; exists || (deferred != nil && isRefName(name)) {
+				return renderValue(vals, name, deferred, credentialEncoding{jsonLayers: layers})
 			}
 			return x
 		}
@@ -639,19 +666,19 @@ func renderJSONPlaceholders(v any, vals map[string]any, depth int) any {
 		}
 		if pre, tail, ok := splitCommandJSON(x); ok {
 			if inner, err := parseRecJSON(tail); err == nil {
-				rendered := renderJSONPlaceholders(inner, vals, depth+1)
+				rendered := renderJSONPlaceholders(inner, vals, depth+1, deferred, layers+1)
 				return pre + string(compactJSON(rendered))
 			}
 		}
 		trimmed := strings.TrimSpace(x)
 		if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
 			if inner, err := parseRecJSON(trimmed); err == nil {
-				rendered := renderJSONPlaceholders(inner, vals, depth+1)
+				rendered := renderJSONPlaceholders(inner, vals, depth+1, deferred, layers+1)
 				return string(compactJSON(rendered))
 			}
 		}
 		return placeholderRe.ReplaceAllStringFunc(x, func(m string) string {
-			return argString(vals[placeholderRe.FindStringSubmatch(m)[1]])
+			return argString(renderValue(vals, placeholderRe.FindStringSubmatch(m)[1], deferred, credentialEncoding{jsonLayers: layers}))
 		})
 	default:
 		return v
@@ -700,18 +727,22 @@ func hasNestedPlaceholder(v any, depth int) bool {
 	return false
 }
 
-func legacyRenderJSONPlaceholders(b string, vals map[string]any) string {
-	quoted := regexp.MustCompile(`"\{\{\s*([A-Za-z0-9_\.]+)\s*\}\}"`)
-	b = quoted.ReplaceAllStringFunc(b, func(m string) string {
-		n := quoted.FindStringSubmatch(m)[1]
-		jb, _ := json.Marshal(vals[n])
-		return string(jb)
+func legacyRenderJSONPlaceholders(b string, vals map[string]any, deferred *deferredCredentials) string {
+	if deferred != nil && deferred.preview {
+		b = quotePreviewJSONMasks(b, vals)
+	}
+	// One pass: argument text is never interpreted as another template reference.
+	quotedOrInline := regexp.MustCompile(`"\{\{\s*([A-Za-z0-9_\.]+)\s*\}\}"|\{\{\s*([A-Za-z0-9_\.]+)\s*\}\}`)
+	return quotedOrInline.ReplaceAllStringFunc(b, func(m string) string {
+		n := placeholderRe.FindStringSubmatch(m)[1]
+		v := renderValue(vals, n, deferred, credentialEncoding{jsonLayers: 1, escapeHTML: true})
+		if strings.HasPrefix(m, `"`) {
+			jb, _ := json.Marshal(v)
+			return string(jb)
+		}
+		jb, _ := json.Marshal(argString(v))
+		return string(jb[1 : len(jb)-1])
 	})
-	b = placeholderRe.ReplaceAllStringFunc(b, func(m string) string {
-		jb, _ := json.Marshal(argString(vals[placeholderRe.FindStringSubmatch(m)[1]]))
-		return strings.Trim(string(jb), `"`)
-	})
-	return b
 }
 
 func headerGet(h map[string]string, name string) string {
@@ -794,23 +825,44 @@ const maxResult = 60 * 1024
 // site answers "not logged in" it logs in again automatically (per the site's 登录配置) and
 // retries once. Everything returned is scrubbed of secret values.
 func (a *App) Execute(t *Tool, args map[string]any) (*CallResult, error) {
-	res, err := a.execute(t, args)
+	p, err := a.Prepare(t, args)
 	if err != nil {
 		return nil, errors.New(a.vault.Scrub(err.Error()))
 	}
-	res.Body = a.vault.Scrub(res.Body)
-	res.ReqBody = a.vault.Scrub(res.ReqBody)
-	res.URL = a.vault.Scrub(res.URL)
-	res.Error = a.vault.Scrub(res.Error)
+	return a.Send(p)
+}
+
+func (a *App) Send(p *PreparedCall) (*CallResult, error) {
+	secrets := append([]string{}, p.secretValues...)
+	res, err := a.send(p, &secrets)
+	if err != nil {
+		return nil, errors.New(a.scrubApprovalText(err.Error(), secrets))
+	}
+	res.Body = a.scrubApprovalText(res.Body, secrets)
+	res.ReqBody = a.scrubApprovalText(res.ReqBody, secrets)
+	res.URL = a.scrubApprovalText(res.URL, secrets)
+	res.Error = a.scrubApprovalText(res.Error, secrets)
 	for k, v := range res.Headers {
-		res.Headers[k] = a.vault.Scrub(v)
+		res.Headers[k] = a.scrubApprovalText(v, secrets)
 	}
 	return res, nil
 }
 
-func (a *App) execute(t *Tool, args map[string]any) (*CallResult, error) {
-	method, u, headers, body, err := t.RenderWith(args, a.vault.Resolve, nil)
+func (a *App) send(p *PreparedCall, secrets *[]string) (*CallResult, error) {
+	r, err := p.resolve(func(ref string) (string, error) {
+		value, err := a.vault.Resolve(ref)
+		_, name, _ := strings.Cut(ref, ".")
+		if err == nil && (strings.HasPrefix(ref, "secret.") || a.vault.TypeOf(name) == "secret") {
+			*secrets = append(*secrets, value)
+		}
+		return value, err
+	})
+	method, u, headers, body := r.Method, r.URL, r.Headers, r.Body
+	t := &Tool{CredHeaders: p.credHeaders}
 	if err != nil {
+		return nil, err
+	}
+	if err := a.checkToolDestination(context.Background(), u); err != nil {
 		return nil, err
 	}
 	site := a.store.EnsureSite(u)
@@ -910,8 +962,12 @@ func (a *App) doCall(t *Tool, method, u string, headers map[string]string, body 
 		}
 	}
 	start := time.Now()
-	client := *a.httpClient
+	client, closeIdle := a.toolHTTPClient()
+	defer closeIdle()
 	client.CheckRedirect = func(r *http.Request, via []*http.Request) error {
+		if err := a.checkToolDestination(r.Context(), r.URL.String()); err != nil {
+			return err
+		}
 		res.hops = append(res.hops, r.URL.String())
 		if len(via) >= 10 {
 			return errors.New("重定向次数过多")

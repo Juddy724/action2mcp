@@ -700,6 +700,11 @@ func (a *App) replayLogin(site *Site) error {
 	fl := site.Form
 	lr := fl.Request
 	hs := newHTTPSession(a.store.AllCookies())
+	client, closeIdle := a.toolHTTPClient()
+	defer closeIdle()
+	client.Timeout = 30 * time.Second
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	hs.client = &client
 	// drop the stale session cookies of this host so the login starts clean? keep them: most sites
 	// simply overwrite them, and some need e.g. a device cookie.
 	t := &Tool{Method: lr.Method, URL: lr.URL, Headers: lr.Headers, Body: lr.Body, CredHeaders: lr.CredHeaders}

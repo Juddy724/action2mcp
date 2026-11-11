@@ -243,6 +243,11 @@ func cmdServe(dataDir string, open bool) error {
 	if err != nil {
 		return fmt.Errorf("端口 %d 被占用: %v（可在 data/config.json 修改 port）", cfg.Port, err)
 	}
+	if err := app.store.CancelPendingApprovals(); err != nil {
+		ln.Close()
+		app.Shutdown()
+		return fmt.Errorf("清理遗留审批失败：%w", err)
+	}
 	srv := &http.Server{Handler: app.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	done := make(chan struct{})
 	shutdown := func() {
@@ -410,7 +415,7 @@ func cmdStdio(dataDir string) error {
 		return err
 	}
 	endpoint := baseURL(dataDir) + "/mcp"
-	client := &http.Client{Timeout: 240 * time.Second}
+	client := &http.Client{}
 	sc := bufio.NewScanner(os.Stdin)
 	sc.Buffer(make([]byte, 1<<20), 16<<20)
 	out := bufio.NewWriter(os.Stdout)
@@ -455,7 +460,9 @@ func cmdStdio(dataDir string) error {
 		}
 		var resp *http.Response
 		var err error
-		for attempt := 0; attempt < 2; attempt++ {
+		timeout, attempts := stdioCallPolicy(line)
+		client.Timeout = timeout
+		for attempt := 0; attempt < attempts; attempt++ {
 			req, _ := http.NewRequest("POST", endpoint, bytes.NewReader(line))
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Accept", "application/json, text/event-stream")
@@ -466,7 +473,9 @@ func cmdStdio(dataDir string) error {
 			if err == nil {
 				break
 			}
-			ensureServer(dataDir)
+			if attempt+1 < attempts {
+				ensureServer(dataDir)
+			}
 		}
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "a2m mcp:", err)
@@ -494,6 +503,16 @@ func cmdStdio(dataDir string) error {
 		write(b)
 	}
 	return nil
+}
+
+func stdioCallPolicy(line []byte) (time.Duration, int) {
+	var q struct {
+		Method string `json:"method"`
+	}
+	if json.Unmarshal(line, &q) == nil && q.Method == "tools/call" {
+		return 35 * time.Minute, 1
+	}
+	return 240 * time.Second, 2
 }
 
 // readSSE calls fn with the data of every SSE event in r.

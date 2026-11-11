@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-const Version = "0.5.2"
+const Version = "0.5.3"
 
 type Config struct {
 	Port        int      `json:"port"`
@@ -39,6 +39,13 @@ type App struct {
 	recStart time.Time
 	lastStop *StopInfo
 	quit     chan struct{}
+
+	approvalMu         sync.Mutex
+	approvals          map[int64]*pendingApproval
+	approvalTimeout    time.Duration
+	approvalInsertHook func() error
+	approvalDecideHook func() error
+	prepareNow         func() time.Time
 
 	vault   *Vault
 	smu     sync.Mutex

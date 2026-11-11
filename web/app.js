@@ -10,7 +10,7 @@ async function api(method, path, body) {
   const r = await fetch(path, opt);
   const t = await r.text();
   let j; try { j = t ? JSON.parse(t) : {}; } catch { j = { error: t }; }
-  if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+  if (!r.ok) { const e = new Error(j.error || ('HTTP ' + r.status)); e.status = r.status; throw e; }
   return j;
 }
 function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), ms); }
@@ -86,6 +86,7 @@ async function render() {
     if (h === 'recordings') await pageRecordings(app);
     else if (h.startsWith('recordings/')) await pageRecording(app, +h.split('/')[1]);
     else if (h === 'tools') await pageTools(app);
+    else if (h === 'approvals') await pageApprovals(app);
     else if (h === 'packs') await pagePacks(app);
     else if (h === 'settings') await pageSettings(app);
     else if (h === 'sites') await pageSites(app);
@@ -95,6 +96,279 @@ async function render() {
   } catch (e) { app.innerHTML = `<div class="card notice">加载失败：${esc(e.message)}</div>`; }
 }
 window.addEventListener('hashchange', render);
+
+// ---------- approvals ----------
+const APPROVAL_TITLE = document.title;
+const APPROVAL_SECRET_UNCHANGED = '******（未改动）';
+const APPROVAL_STATUS_LABELS = { pending: '待审批', approved: '已通过', edited: '修改后通过', rejected: '已拒绝', timeout: '已超时', cancelled: '已取消' };
+const APPROVALS = { pending: [], session: null, polling: false, listEpoch: 0, soundEnabled: false, audio: null };
+try { APPROVALS.soundEnabled = localStorage.getItem('a2m_approval_sound') === '1'; } catch { }
+
+function updateApprovalSoundButton() {
+  const btn = $('#approval-sound');
+  btn.textContent = APPROVALS.soundEnabled ? '提示音已启用 · 试听' : '启用提示音';
+  btn.setAttribute('aria-pressed', String(APPROVALS.soundEnabled));
+}
+function approvalAudioContext() {
+  const Audio = window.AudioContext || window.webkitAudioContext;
+  if (Audio && !APPROVALS.audio) APPROVALS.audio = new Audio();
+  return APPROVALS.audio;
+}
+async function enableApprovalSound() {
+  try {
+    const ctx = approvalAudioContext();
+    if (!ctx) { toast('当前浏览器不支持提示音'); return; }
+    await ctx.resume();
+    APPROVALS.soundEnabled = true;
+    try { localStorage.setItem('a2m_approval_sound', '1'); } catch { }
+    updateApprovalSoundButton();
+    playApprovalSound();
+  } catch { toast('提示音未能启用，请再次点击重试'); }
+}
+function playApprovalSound() {
+  if (!APPROVALS.soundEnabled) return;
+  try {
+    const ctx = approvalAudioContext();
+    if (!ctx || ctx.state !== 'running') return;
+    const tone = ctx.createOscillator(), volume = ctx.createGain(), start = ctx.currentTime;
+    tone.type = 'sine'; tone.frequency.setValueAtTime(880, start);
+    volume.gain.setValueAtTime(0, start); volume.gain.linearRampToValueAtTime(0.16, start + 0.02); volume.gain.exponentialRampToValueAtTime(0.001, start + 0.24);
+    tone.connect(volume); volume.connect(ctx.destination); tone.start(start); tone.stop(start + 0.25);
+    tone.onended = () => { tone.disconnect(); volume.disconnect(); };
+  } catch { }
+}
+// A remembered preference still needs a gesture to unlock audio in some browsers.
+document.addEventListener('click', () => {
+  if (APPROVALS.soundEnabled) {
+    try { const ctx = approvalAudioContext(); if (ctx?.state === 'suspended') ctx.resume().catch(() => {}); } catch { }
+  }
+});
+function updateApprovalBanner() {
+  const count = APPROVALS.pending.length;
+  $('#approval-banner').hidden = count === 0;
+  $('#approval-count').textContent = `有 ${count} 个调用等待审批`;
+  document.title = count ? `(${count}) 待审批 · ${APPROVAL_TITLE}` : APPROVAL_TITLE;
+}
+async function refreshApprovals() {
+  if (APPROVALS.polling) return;
+  APPROVALS.polling = true;
+  const epoch = APPROVALS.listEpoch;
+  try {
+    const rows = await api('POST', '/api/approvals/list', { status: 'pending' });
+    // A decision may finish while this list request is in flight.
+    if (epoch !== APPROVALS.listEpoch) return;
+    const oldIDs = new Set(APPROVALS.pending.map(p => String(p.id)));
+    APPROVALS.pending = rows;
+    updateApprovalBanner();
+    if (rows.some(p => !oldIDs.has(String(p.id)))) playApprovalSound();
+    const session = APPROVALS.session;
+    if (session && !session.deciding && !rows.some(p => p.id === session.item.id)) {
+      if (approvalModalOpen()) toast('当前审批已在其他地方结束或已过期');
+      forgetApproval(session.item.id);
+    } else renderApprovalSwitcher();
+  } catch { /* Server outages must not interrupt work or produce repeated toasts. */ }
+  finally { APPROVALS.polling = false; }
+}
+function approvalModalOpen() { return !$('#approval-modal').classList.contains('hidden'); }
+function openApprovalModal() {
+  if (!APPROVALS.pending.length) { toast('当前没有待审批调用'); return; }
+  if (!approvalModalOpen()) {
+    APPROVALS.returnFocus = document.activeElement;
+    APPROVALS.scroll = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    ['#app', '#console-top', '#modal'].forEach(sel => { $(sel).inert = true; });
+    $('#approval-modal').classList.remove('hidden');
+  }
+  if (!APPROVALS.session) selectApproval(APPROVALS.pending[0].id);
+  renderApprovalSwitcher();
+  $('#approval-tool-title').focus();
+}
+function closeApprovalModal() {
+  if (!approvalModalOpen() || APPROVALS.session?.deciding) return;
+  $('#approval-modal').classList.add('hidden');
+  ['#app', '#console-top', '#modal'].forEach(sel => { $(sel).inert = false; });
+  document.body.style.overflow = APPROVALS.scroll || '';
+  if (APPROVALS.returnFocus?.isConnected) APPROVALS.returnFocus.focus();
+}
+function renderApprovalSwitcher() {
+  const session = APPROVALS.session;
+  $('#approval-switcher').innerHTML = APPROVALS.pending.map(item => `<button data-approval-id="${esc(item.id)}" class="approval-item ${item.id === session?.item.id ? 'on' : ''}" aria-pressed="${item.id === session?.item.id}" ${session?.deciding ? 'disabled' : ''}>
+    <b>${esc(item.title || item.tool)}</b><span class="mono small">${esc(item.tool)}</span><span class="muted small">${esc(item.client || '未知调用方')}</span></button>`).join('');
+}
+$('#approval-switcher').addEventListener('click', event => {
+  const btn = event.target.closest('button[data-approval-id]');
+  if (btn) selectApproval(btn.dataset.approvalId);
+});
+function selectApproval(id) {
+  const previous = APPROVALS.session;
+  if (previous?.deciding || String(previous?.item.id) === String(id)) return;
+  const item = APPROVALS.pending.find(p => String(p.id) === String(id));
+  if (!item) return;
+  clearTimeout(previous?.previewTimer);
+  const params = item.params || [];
+  const initial = params.map(p => p.secret ? APPROVAL_SECRET_UNCHANGED : Object.hasOwn(item.args_display || {}, p.name) ? String(item.args_display[p.name] ?? '') : '');
+  const session = { item, params, initial, revision: 0, previewRevision: 0, previewRequest: 0, previewHash: item.preview_hash, previewLoading: false, previewError: '', deciding: false };
+  APPROVALS.session = session;
+  $('#approval-content').innerHTML = `
+    <h3 id="approval-tool-title" tabindex="-1">${esc(item.title || item.tool)}</h3>
+    <div class="muted small approval-meta"><span class="mono">${esc(item.tool)}</span> · 调用方：${esc(item.client || '未知调用方')} · ${esc(item.ts)}</div>
+    <h3>调用参数</h3>
+    <div class="approval-params">${params.map((p, i) => `<label for="approval-arg-${i}"><span class="mono">${esc(p.name)}</span>${p.required ? ' *' : ''} <span class="muted small">${esc(p.type)}</span>
+      ${p.description ? `<span class="muted small approval-param-hint">${esc(p.description)}</span>` : ''}
+      ${p.secret ? `<input id="approval-arg-${i}" class="approval-arg" type="password" autocomplete="new-password" spellcheck="false"><span class="muted small approval-param-hint">保留 ${esc(APPROVAL_SECRET_UNCHANGED)} 沿用原值；输入新值可替换。</span>` : `<textarea id="approval-arg-${i}" class="approval-arg" rows="2" spellcheck="false"></textarea>${p.default ? `<span class="muted small approval-param-hint">未传入时使用默认值：${esc(p.default)}</span>` : ''}`}</label>`).join('') || '<div class="muted small">这个工具没有参数</div>'}</div>
+    <div class="row approval-preview-heading"><h3 class="grow">请求预览</h3><button id="approval-refresh" class="sm" onclick="refreshApprovalPreview()">刷新预览</button></div>
+    <p id="approval-preview-state" class="small" role="status"></p><pre id="approval-preview"></pre>
+    <label for="approval-feedback" class="approval-feedback-label">告诉 AI 的意见（拒绝时必填）</label>
+    <textarea id="approval-feedback" placeholder="例如：请先核对参数，再重新调用"></textarea>
+    <p id="approval-action-hint" class="muted small"></p>
+    <div class="row approval-actions"><button id="approval-approve" class="pri" onclick="decideApproval('approve')">通过</button><button id="approval-edit" class="pri" onclick="decideApproval('edit')">修改后通过</button><button id="approval-reject" class="danger" onclick="decideApproval('reject')">拒绝并告诉 AI</button></div>`;
+  session.fields = params.map((p, i) => {
+    const field = $('#approval-arg-' + i); field.value = initial[i];
+    // Textareas normalize line endings; untouched values still use the snapshot.
+    initial[i] = field.value;
+    field.addEventListener('input', () => approvalParamsChanged(session));
+    if (p.secret) field.addEventListener('focus', () => { if (field.value === APPROVAL_SECRET_UNCHANGED) field.select(); });
+    return field;
+  });
+  $('#approval-preview').textContent = approvalPreviewText(item.preview);
+  updateApprovalControls(session);
+  renderApprovalSwitcher();
+  if (approvalModalOpen()) $('#approval-tool-title').focus();
+  if (!session.previewHash) refreshApprovalPreview(session);
+}
+function approvalPreviewText(preview) {
+  const p = preview || {};
+  const headers = Object.entries(p.headers || {}).map(([k, v]) => k + ': ' + v).join('\n');
+  return `${p.method || ''} ${p.url || ''}\n\n请求头\n${headers || '（无）'}\n\n请求体\n${p.body || '（空）'}`;
+}
+function approvalParamsDirty(session) { return session.fields.some((field, i) => field.value !== session.initial[i]); }
+function collectApprovalArgs(session) {
+  const args = Object.create(null);
+  session.params.forEach((p, i) => {
+    // Untouched fields retain the original value on the server, including masks.
+    if (session.fields[i].value !== session.initial[i]) args[p.name] = session.fields[i].value;
+  });
+  return args;
+}
+function updateApprovalControls(session) {
+  if (APPROVALS.session !== session) return;
+  const changed = approvalParamsDirty(session), busy = session.deciding;
+  const ready = session.previewRevision === session.revision && !!session.previewHash;
+  session.fields.forEach(field => { field.disabled = busy; });
+  $('#approval-feedback').disabled = busy;
+  $('#approval-close').disabled = busy;
+  $('#approval-approve').disabled = busy || changed || session.previewLoading;
+  $('#approval-edit').disabled = busy || !changed || session.previewLoading;
+  $('#approval-reject').disabled = busy;
+  $('#approval-refresh').disabled = busy || session.previewLoading;
+  $('#approval-switcher').querySelectorAll('button').forEach(btn => { btn.disabled = busy; });
+  $('#approval-content').setAttribute('aria-busy', String(busy));
+  $('#approval-preview').classList.toggle('stale', !ready);
+  $('#approval-preview').setAttribute('aria-busy', String(session.previewLoading));
+  const state = $('#approval-preview-state');
+  state.className = 'small ' + (session.previewError ? 'st-bad' : 'muted');
+  state.textContent = session.previewError || (ready ? '以下是当前参数的请求预览。' : '预览尚未更新，请等待或点击“刷新预览”。');
+  $('#approval-action-hint').textContent = busy ? '正在提交审批决定…' : changed ? '参数已修改，请核对预览后点击“修改后通过”。' : '“通过”将执行本次调用的原始参数。';
+}
+function approvalParamsChanged(session) {
+  if (APPROVALS.session !== session) return;
+  session.revision++; session.previewLoading = false; session.previewError = '';
+  clearTimeout(session.previewTimer);
+  session.previewTimer = setTimeout(() => refreshApprovalPreview(session), 300);
+  updateApprovalControls(session);
+}
+async function refreshApprovalPreview(session = APPROVALS.session) {
+  if (!session || APPROVALS.session !== session) return false;
+  clearTimeout(session.previewTimer);
+  const revision = session.revision, request = ++session.previewRequest;
+  session.previewLoading = true; session.previewError = '';
+  updateApprovalControls(session);
+  const current = () => APPROVALS.session === session && session.revision === revision && session.previewRequest === request;
+  try {
+    const result = await api('POST', `/api/approvals/${encodeURIComponent(session.item.id)}/preview`, { args: collectApprovalArgs(session), nonce: session.item.nonce });
+    if (!current()) return false;
+    $('#approval-preview').textContent = approvalPreviewText(result.preview);
+    session.previewHash = result.preview_hash; session.previewRevision = revision; session.previewLoading = false;
+    updateApprovalControls(session);
+    return true;
+  } catch (e) {
+    if (!current()) return false;
+    session.previewLoading = false; session.previewHash = '';
+    toast('预览失败：' + e.message, 5000);
+    if (e.status === 409 || e.status === 404) { forgetApproval(session.item.id); refreshApprovals(); }
+    else { session.previewError = e.message; updateApprovalControls(session); refreshApprovals(); }
+    return false;
+  }
+}
+function forgetApproval(id) {
+  APPROVALS.listEpoch++;
+  APPROVALS.pending = APPROVALS.pending.filter(p => p.id !== id);
+  updateApprovalBanner();
+  if (APPROVALS.session?.item.id === id) {
+    clearTimeout(APPROVALS.session.previewTimer);
+    APPROVALS.session = null;
+    $('#approval-content').replaceChildren();
+    $('#approval-close').disabled = false;
+    if (approvalModalOpen() && APPROVALS.pending.length) selectApproval(APPROVALS.pending[0].id);
+    else closeApprovalModal();
+  }
+  renderApprovalSwitcher();
+}
+async function decideApproval(action) {
+  const session = APPROVALS.session;
+  if (!session || session.deciding) return;
+  const feedback = $('#approval-feedback').value.trim(), changed = approvalParamsDirty(session);
+  if (action === 'reject' && !feedback) { toast('拒绝时请填写告诉 AI 的意见'); $('#approval-feedback').focus(); return; }
+  if (action === 'approve' && changed) { toast('参数已修改，请点击“修改后通过”'); return; }
+  if (action === 'edit' && !changed) return;
+  if (action !== 'reject' && (session.previewRevision !== session.revision || !session.previewHash)) {
+    if (await refreshApprovalPreview(session)) toast('请求预览已更新，请核对后再次确认', 5000);
+    return;
+  }
+  session.deciding = true;
+  clearTimeout(session.previewTimer);
+  updateApprovalControls(session);
+  try {
+    await api('POST', `/api/approvals/${encodeURIComponent(session.item.id)}/decide`, { action, args: collectApprovalArgs(session), feedback, nonce: session.item.nonce, preview_hash: session.previewHash || '' });
+    toast(action === 'reject' ? '已拒绝，意见已交给 AI' : action === 'edit' ? '已修改参数并通过审批' : '已通过审批');
+    forgetApproval(session.item.id);
+    refreshApprovals();
+  } catch (e) {
+    if (APPROVALS.session !== session) return;
+    toast(e.message, 5000);
+    if (e.status === 409 && e.message.includes('预览已过期')) {
+      session.previewHash = ''; session.previewRevision = -1;
+      if (await refreshApprovalPreview(session)) toast('预览已过期，已刷新，请核对后再次确认', 5000);
+    } else if (e.status === 409 || e.status === 404) { forgetApproval(session.item.id); refreshApprovals(); }
+    else refreshApprovals();
+  } finally {
+    if (APPROVALS.session === session) {
+      session.deciding = false;
+      if (!APPROVALS.pending.some(p => p.id === session.item.id)) { toast('当前审批已在其他地方结束或已过期'); forgetApproval(session.item.id); }
+      else updateApprovalControls(session);
+    }
+  }
+}
+async function pageApprovals(app) {
+  const rows = await api('POST', '/api/approvals/list', { status: 'all', limit: 1000 });
+  if (ROUTE !== 'approvals') return;
+  app.innerHTML = `<div class="card"><div class="row approval-history-heading"><h2 class="grow">审批记录</h2><button onclick="openApprovalModal()">处理待审批调用</button><button onclick="render()">刷新</button></div>
+    <p class="muted small">最近 1000 条。工具、参数和执行结果均来自审批时保存的脱敏快照。</p>
+    ${rows.length ? `<div class="approval-history-scroll"><table class="approval-history"><thead><tr><th>时间</th><th>工具 / 调用方</th><th>状态</th><th>意见</th><th>最终参数（脱敏）</th><th>执行结果</th></tr></thead><tbody>${rows.map(item => {
+      const known = Object.hasOwn(APPROVAL_STATUS_LABELS, item.status);
+      const args = item.final_args_display || item.args_display || {};
+      return `<tr><td class="small approval-time">${esc(item.ts)}${item.decided_at ? `<div class="muted small">决定于 ${esc(item.decided_at)}</div>` : ''}</td>
+        <td><b class="mono">${esc(item.tool)}</b><div>${esc(item.title)}</div><div class="muted small">${esc(item.client)}</div></td>
+        <td><span class="pill ${known ? 'approval-status-' + esc(item.status) : ''}">${esc(known ? APPROVAL_STATUS_LABELS[item.status] : item.status)}</span></td>
+        <td class="approval-wrap">${esc(item.feedback || '—')}</td><td><pre>${esc(JSON.stringify(args, null, 2))}</pre></td><td class="approval-wrap">${esc(item.result || '—')}</td></tr>`;
+    }).join('')}</tbody></table></div>` : '<div class="empty">还没有审批记录</div>'}</div>`;
+}
+updateApprovalSoundButton();
+if (window.ResizeObserver) new ResizeObserver(() => {
+  document.documentElement.style.setProperty('--console-top-height', $('#console-top').offsetHeight + 'px');
+}).observe($('#console-top'));
+refreshApprovals();
+setInterval(refreshApprovals, 1500);
 
 // ---------- recordings ----------
 async function pageRecordings(app) {
@@ -319,7 +593,7 @@ async function openToolEditorFromReq() {
 async function redraft() {
   const params = EDIT.candidates.filter(c => c.on);
   const t = await api('POST', `/api/requests/${EDIT.reqId}/draft`, { params });
-  if (EDIT.tool) { t.name = EDIT.tool.name || t.name; t.title = EDIT.tool.title || t.title; t.description = EDIT.tool.description || ''; }
+  if (EDIT.tool) { t.name = EDIT.tool.name || t.name; t.title = EDIT.tool.title || t.title; t.description = EDIT.tool.description || ''; t.method = EDIT.tool.method; t.approval = EDIT.tool.approval; }
   EDIT.tool = t;
 }
 async function toggleCand(i, on) { EDIT.candidates[i].on = on; collectEditor(); await redraft(); drawEditor(); }
@@ -359,6 +633,7 @@ async function editTool(id) {
 function drawEditor() {
   const t = EDIT.tool;
   const cands = EDIT.candidates;
+  if (!t.id && !EDIT.approvalManual) t.approval = defaultToolApproval(t.method);
   openModal(`
   <h2>${t.id ? '编辑工具' : '保存为工具'}</h2>
   ${cands ? `<h3>哪些值需要 AI 每次传入？<span class="muted small" style="font-weight:400">（勾选后会变成参数 {{名称}}）</span></h3>
@@ -371,7 +646,8 @@ function drawEditor() {
     <label>工具标识 *</label><input id="t-name" class="mono" value="${esc(t.name)}" placeholder="search_customer（英文、数字、下划线）">
     <label>显示名称</label><input id="t-title" value="${esc(t.title)}" placeholder="查询客户">
     <label>用途说明</label><input id="t-desc" value="${esc(t.description)}" placeholder="告诉 AI 什么时候用它，例如：按关键字查询 CRM 客户，返回客户列表">
-    <label>请求</label><div class="row"><select id="t-method">${['GET','POST','PUT','PATCH','DELETE'].map(m => `<option ${m === t.method ? 'selected' : ''}>${m}</option>`).join('')}</select><input id="t-url" class="grow mono" value="${esc(t.url)}"></div>
+    <label>请求</label><div class="row"><select id="t-method" onchange="toolMethodChanged()">${['GET','HEAD','POST','PUT','PATCH','DELETE'].map(m => `<option ${m === t.method ? 'selected' : ''}>${m}</option>`).join('')}</select><input id="t-url" class="grow mono" value="${esc(t.url)}"></div>
+    <label for="t-approval">审批模式</label><select id="t-approval" onchange="EDIT.approvalManual=true;EDIT.tool.approval=this.value"><option value="off" ${t.approval !== 'always' ? 'selected' : ''}>不审批</option><option value="always" ${t.approval === 'always' ? 'selected' : ''}>每次都审批</option></select>
     <label>请求头 (JSON)</label><textarea id="t-headers" style="min-height:80px">${esc(JSON.stringify(t.headers || {}, null, 2))}</textarea>
     <label>请求体模板</label><textarea id="t-body" style="min-height:120px">${esc(t.body || '')}</textarea>
     <label>参数</label><div id="t-params">${paramsTable(t.params || [])}</div>
@@ -382,6 +658,11 @@ function drawEditor() {
     <div class="muted small">可以不选：工具会先保存，之后在「流程包」页用「+ 添加工具」放进去。</div>
   </div>
   <div class="row" style="margin-top:18px;justify-content:flex-end"><button onclick="closeModal()">取消</button><button class="pri big" onclick="saveTool()">保存工具</button></div>`);
+}
+function defaultToolApproval(method) { return ['POST', 'PUT', 'PATCH', 'DELETE'].includes(String(method).toUpperCase()) ? 'always' : 'off'; }
+function toolMethodChanged() {
+  EDIT.tool.method = $('#t-method').value;
+  if (!EDIT.tool.id && !EDIT.approvalManual) $('#t-approval').value = EDIT.tool.approval = defaultToolApproval(EDIT.tool.method);
 }
 function paramsTable(ps) {
   if (!ps.length) return '<span class="muted small">无参数（模板里出现的 {{名称}} 会自动成为参数）</span>';
@@ -396,6 +677,7 @@ function collectEditor() {
   const t = EDIT.tool; if (!$('#t-name')) return t;
   t.name = $('#t-name').value.trim(); t.title = $('#t-title').value.trim(); t.description = $('#t-desc').value.trim();
   t.method = $('#t-method').value; t.url = $('#t-url').value.trim(); t.body = $('#t-body').value;
+  t.approval = $('#t-approval').value;
   try { t.headers = JSON.parse($('#t-headers').value || '{}'); } catch { throw new Error('请求头不是合法的 JSON'); }
   document.querySelectorAll('#t-params tr[data-pi]').forEach(tr => {
     const p = t.params[+tr.dataset.pi]; if (!p) return;
@@ -589,6 +871,13 @@ async function pageSettings(app) {
       </div>
     </div>
   </div>
+  <div class="card"><h2>审批设置</h2>
+    <form class="row" onsubmit="event.preventDefault();saveApprovalTimeout(this)">
+      <label for="approval-timeout">审批等待时间（秒）</label>
+      <input id="approval-timeout" name="approval_timeout_secs" type="number" min="30" max="1800" step="1" required value="${esc(settings.approval_timeout_secs ?? 300)}" aria-describedby="approval-timeout-hint">
+      <button type="submit" class="pri">保存</button><span class="muted small" id="approval-timeout-hint">30–1800，默认 300。超时后本次调用不会执行。</span>
+    </form>
+  </div>
   <div class="card"><h2>导出 / 导入</h2>
     <p class="muted">导出的 .a2m 文件只有工具定义、流程包、登录配置和配置项的<b>名称</b>，<b>不包含任何 Cookie、Token、登录态，也不包含密码等配置值</b>，可以放心发给同事。对方导入后，在「配置管理」里填上自己的账号密码（或用企业微信登录一次）就能用。</p>
     <div class="row"><a class="btn pri" style="background:var(--pri);color:#fff" href="/api/export">⬇ 导出 .a2m</a>
@@ -599,6 +888,14 @@ async function pageSettings(app) {
     <div class="row"><button onclick="openLogin()">打开浏览器登录</button><button class="danger" onclick="clearCreds()">清除本地登录态快照</button></div></div>
   <div class="card small muted">Action2MCP ${esc(s.version)} · 进程 ${s.pid} · 数据目录 ${esc(s.data_dir)}</div>`;
 }
+async function saveApprovalTimeout(form) {
+  const secs = Number(form.elements.approval_timeout_secs.value);
+  if (!Number.isInteger(secs) || secs < 30 || secs > 1800) { toast('审批等待时间必须是 30–1800 的整数'); return; }
+  const btn = $('button[type="submit"]', form); btn.disabled = true;
+  try { await api('PUT', '/api/settings', { approval_timeout_secs: secs }); toast('审批等待时间已保存'); }
+  catch (e) { toast('保存失败：' + e.message, 5000); }
+  finally { btn.disabled = false; }
+}
 async function importFile(inp) {
   const f = inp.files[0]; if (!f) return;
   try { const r = await api('POST', '/api/import', await f.text()); toast(`导入完成：新增工具 ${r.tools_added}，更新 ${r.tools_updated}；新增流程包 ${r.packs_added}；登录配置 ${r.sites_added + r.sites_updated} 个` + ((r.vault_to_fill || []).length ? `。请到「配置管理」填写：${r.vault_to_fill.join('、')}` : ''), 7000); refreshStatus(); }
@@ -607,7 +904,19 @@ async function importFile(inp) {
 }
 async function clearCreds() { if (!confirm('清除本地登录态快照？（专用浏览器里的登录不受影响）')) return; await api('DELETE', '/api/credentials'); render(); }
 
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+document.addEventListener('keydown', e => {
+  if (approvalModalOpen()) {
+    if (e.key === 'Escape') { e.preventDefault(); closeApprovalModal(); }
+    if (e.key === 'Tab') {
+      const modal = $('#approval-modal');
+      const fields = [...modal.querySelectorAll('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), a[href]')].filter(el => el.getClientRects().length);
+      const first = fields[0], last = fields[fields.length - 1];
+      if (!first) { e.preventDefault(); modal.focus(); }
+      else if (e.shiftKey && (document.activeElement === first || !fields.includes(document.activeElement))) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && (document.activeElement === last || !fields.includes(document.activeElement))) { e.preventDefault(); first.focus(); }
+    }
+  } else if (e.key === 'Escape') closeModal();
+});
 refreshStatus().then(render);
 
 // ---------- 登录中心 ----------

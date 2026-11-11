@@ -45,7 +45,7 @@ func TestServerMCPAndExport(t *testing.T) {
 		t.Fatalf("console not served: %d", resp.StatusCode)
 	}
 
-	tool := &Tool{Name: "echo_search", Title: "查询", Method: "POST", URL: upstream.URL + "/api/search",
+	tool := &Tool{Approval: "off", Name: "echo_search", Title: "查询", Method: "POST", URL: upstream.URL + "/api/search",
 		Headers: map[string]string{"Content-Type": "application/json"},
 		Body:    `{"kw":"{{kw}}"}`, Params: []Param{{Name: "kw", Type: "string", Required: true}},
 		CredHeaders: []string{"cookie"}}
