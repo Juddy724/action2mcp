@@ -36,9 +36,10 @@ type credentialSubstitution struct {
 }
 
 type deferredCredentials struct {
-	prefix  string
-	subs    []credentialSubstitution
-	preview bool
+	prefix       string
+	subs         []credentialSubstitution
+	preview      bool
+	maskedParams map[string]bool
 }
 
 func renderValue(vals map[string]any, name string, d *deferredCredentials, enc credentialEncoding) any {
@@ -120,13 +121,15 @@ func (p *PreparedCall) resolve(resolve func(string) (string, error)) (RequestPre
 }
 
 func (a *App) Prepare(t *Tool, args map[string]any) (*PreparedCall, error) {
+	analysis := analyzeApprovalTemplate(t)
+	secrets := a.approvalSecretValues(t, args)
 	at := time.Now()
 	if a.prepareNow != nil {
 		at = a.prepareNow()
 	}
 	vals, err := t.bindValues(args, nil, nil, true, at)
 	if err != nil {
-		return nil, fmt.Errorf("%s", a.vault.Scrub(err.Error()))
+		return nil, fmt.Errorf("%s", a.scrubApprovalText(err.Error(), secrets))
 	}
 	var random [16]byte
 	if _, err := rand.Read(random[:]); err != nil {
@@ -139,8 +142,9 @@ func (a *App) Prepare(t *Tool, args map[string]any) (*PreparedCall, error) {
 	}
 	p := &PreparedCall{request: RequestPreview{method, u, headers, body}, subs: d.subs, credHeaders: append([]string(nil), t.CredHeaders...)}
 	p.PreviewHash = p.fingerprint()
-	p.secretValues = a.approvalSecretValues(t, args)
+	p.secretValues = append(secrets, a.approvalSecretValues(t, vals)...)
 	displayVals := make(map[string]any, len(vals))
+	maskedParams := map[string]bool{}
 	for name, value := range vals {
 		displayVals[name] = value
 	}
@@ -150,9 +154,10 @@ func (a *App) Prepare(t *Tool, args map[string]any) (*PreparedCall, error) {
 				p.secretValues = append(p.secretValues, v)
 			}
 			displayVals[param.Name] = secretMask
+			maskedParams[param.Name] = true
 		}
 	}
-	display := &deferredCredentials{prefix: d.prefix, preview: true}
+	display := &deferredCredentials{prefix: d.prefix, preview: true, maskedParams: maskedParams}
 	method, u, headers, body, err = t.renderValues(displayVals, display)
 	if err != nil {
 		return nil, err
@@ -162,18 +167,26 @@ func (a *App) Prepare(t *Tool, args map[string]any) (*PreparedCall, error) {
 		pairs = append(pairs, sub.token, "{{"+sub.ref+"}}")
 	}
 	replacer := strings.NewReplacer(pairs...)
-	p.Preview = replaceRequest(RequestPreview{method, u, headers, body}, func(s string) string {
-		s = replacer.Replace(s)
-		s = strings.ReplaceAll(s, url.QueryEscape(secretMask), secretMask)
-		return a.scrubApprovalText(s, p.secretValues)
-	})
-	p.Preview = redactPreview(p.Preview)
+	p.Preview = replaceRequest(RequestPreview{method, u, headers, body}, replacer.Replace)
+	p.Preview = a.scrubApprovalPreview(p.Preview, p.secretValues)
+	// An over-limit template cannot establish safe literal boundaries.
+	if analysis.limitedURL {
+		p.Preview.URL = secretMask
+	}
+	if analysis.limitedBody {
+		p.Preview.Body = secretMask
+	}
+	for key, limited := range analysis.limitedHeaders {
+		if limited {
+			p.Preview.Headers[key] = secretMask
+		}
+	}
 	return p, nil
 }
 
 // Keep masks valid as JSON values without adding quotes inside JSON strings.
 // Only the display render calls this; execution retains its legacy rendering.
-func quotePreviewJSONMasks(body string, vals map[string]any) string {
+func quotePreviewJSONMasks(body string, maskedParams map[string]bool) string {
 	var out strings.Builder
 	for i := 0; i < len(body); {
 		if body[i] == '"' {
@@ -183,7 +196,7 @@ func quotePreviewJSONMasks(body string, vals map[string]any) string {
 			continue
 		}
 		if strings.HasPrefix(body[i:], "{{") {
-			if m := placeholderRe.FindStringSubmatch(body[i:]); m != nil && strings.HasPrefix(body[i:], m[0]) && vals[m[1]] == secretMask {
+			if m := placeholderRe.FindStringSubmatch(body[i:]); m != nil && strings.HasPrefix(body[i:], m[0]) && maskedParams[m[1]] {
 				out.Write(compactJSON(m[0]))
 				i += len(m[0])
 				continue

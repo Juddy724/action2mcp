@@ -308,7 +308,7 @@ func TestApprovalUnquotedSecretAPIAndHistory(t *testing.T) {
 	}
 }
 
-func TestApprovalPartialEditsKeepOriginalMaskedArgs(t *testing.T) {
+func TestApprovalPartialEditsKeepOriginalVerbatimArgs(t *testing.T) {
 	a := approvalTestApp(t)
 	secret := privateTestValue(t)
 	if err := a.vault.Upsert("partial", "secret", secret, "", ""); err != nil {
@@ -334,9 +334,10 @@ func TestApprovalPartialEditsKeepOriginalMaskedArgs(t *testing.T) {
 	defer cancel()
 	call := startApprovalCall(a, ctx, map[string]any{"value": original, "count": 1, "extra": "original"})
 	r := pendingApprovals(t, a, 1)[0]
-	if r.Params[0].Secret || !strings.Contains(r.ArgsDisplay["value"], secretMask) || strings.Contains(r.ArgsDisplay["value"], secret) {
-		t.Fatal("fixture must contain a partially masked non-secret parameter")
+	if r.Params[0].Secret || r.ArgsDisplay["value"] != original {
+		t.Fatal("non-secret parameter must be displayed verbatim")
 	}
+	requirePrivateApprovalValuesAbsent(t, r.Preview, secret)
 	unchanged, err := a.PreviewApproval(r.ID, r.Nonce, nil)
 	if err != nil || unchanged.PreviewHash != r.PreviewHash {
 		t.Fatal("empty preview diff did not preserve originals")
@@ -366,7 +367,7 @@ func TestApprovalPartialEditsKeepOriginalMaskedArgs(t *testing.T) {
 	}
 	body := <-received
 	if body["value"] != original || body["count"] != float64(2) {
-		t.Fatal("untouched masked parameter was sent back as display text")
+		t.Fatal("untouched parameter was not preserved verbatim")
 	}
 }
 
@@ -482,8 +483,8 @@ func TestApprovalDocumentation(t *testing.T) {
 				t.Fatalf("%s is missing approval documentation for %s", path, required)
 			}
 		}
-		if path == "README.md" && !strings.Contains(string(b), "| 平台 | 安装包 (v0.5.3) |") {
-			t.Fatal("download table version is not 0.5.3")
+		if path == "README.md" && !strings.Contains(string(b), "| 平台 | 安装包 (v0.5.4) |") {
+			t.Fatal("download table version is not 0.5.4")
 		}
 	}
 }

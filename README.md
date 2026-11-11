@@ -6,12 +6,12 @@
 
 最新版本：[Releases 页面](https://github.com/Juddy724/action2mcp/releases/latest)
 
-| 平台 | 安装包 (v0.5.3) |
+| 平台 | 安装包 (v0.5.4) |
 |---|---|
-| macOS (Apple 芯片) | [Action2MCP-0.5.3-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.3/Action2MCP-0.5.3-macOS-AppleSilicon.zip) |
-| macOS (Intel) | [Action2MCP-0.5.3-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.3/Action2MCP-0.5.3-macOS-Intel.zip) |
-| Windows x64 | [Action2MCP-0.5.3-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.3/Action2MCP-0.5.3-Windows-x64.zip) |
-| Linux x64 | [Action2MCP-0.5.3-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.3/Action2MCP-0.5.3-Linux-x64.zip) |
+| macOS (Apple 芯片) | [Action2MCP-0.5.4-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.4/Action2MCP-0.5.4-macOS-AppleSilicon.zip) |
+| macOS (Intel) | [Action2MCP-0.5.4-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.4/Action2MCP-0.5.4-macOS-Intel.zip) |
+| Windows x64 | [Action2MCP-0.5.4-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.4/Action2MCP-0.5.4-Windows-x64.zip) |
+| Linux x64 | [Action2MCP-0.5.4-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.4/Action2MCP-0.5.4-Linux-x64.zip) |
 
 解压后运行 `start.command`（macOS）、`start.bat`（Windows）或 `start.sh`（Linux），然后打开 http://localhost:7788 。详细说明见安装包里的 README.md。
 
@@ -32,6 +32,7 @@
 - 请求已经发出后无法撤回。
 - MCP 会话 DELETE 和 stdio 桥退出不保证取消待审批调用；这类调用会继续等待用户拒绝或超时。
 - 大整数精度与现有 MCP JSON 的 float64 解码路径一致，超过其精确表示范围的整数可能丢失精度。
+- 参数按整体替换，未提交的参数保留原值；非秘密参数原样展示、原样替换，不解析或重写内部 JSON/form。秘密参数整体遮罩；未改动的 ****** 保留原值，输入完整新值则替换整个参数；提交值内部夹带 ****** 则 400，未执行。
 
 ## 从源码构建
 

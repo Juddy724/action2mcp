@@ -346,7 +346,18 @@ func (a *App) scrubRecText(s string, lits []string) string {
 			}
 		}
 	}
-	return outsideRecRefs(s, func(part string) string { return replaceLiterals(part, lits) })
+	var safe []string
+	for _, x := range lits {
+		if crossFieldLiteral(x) {
+			safe = append(safe, x)
+		}
+	}
+	return outsideRecRefs(s, func(part string) string {
+		part = replaceLiterals(part, lits)
+		// Encoding-aware vault/recording forms, but only for literals that are
+		// already safe to search as substrings (see crossFieldLiteral).
+		return scrubSecretText(part, nil, safe)
+	})
 }
 
 func (a *App) recordingSecretLiterals(id int64) ([]string, error) {
@@ -1358,7 +1369,7 @@ func (a *App) recSaveTool(mc *mcpCtx, args map[string]any) (string, bool) {
 		return a.finishRec(map[string]any{
 			"dry_run": true, "name": t.Name, "title": t.Title, "method": t.Method,
 			"url": recSafeText(t.URL), "header_keys": keys, "body": recSafeText(t.Body),
-			"input_schema": t.InputSchema(),
+			"input_schema": a.mcpInputSchema(t),
 		}, lits), false
 	}
 	created := false
@@ -1383,7 +1394,7 @@ func (a *App) recSaveTool(mc *mcpCtx, args map[string]any) (string, bool) {
 		"tool_id": t.ID, "name": t.Name, "title": t.Title,
 		"pack_id": p.ID, "pack_name": p.Name, "pack_enabled": p.Enabled,
 		"created_pack": created, "overwritten": existingID != 0,
-		"input_schema": t.InputSchema(),
+		"input_schema": a.mcpInputSchema(t),
 	}, lits), false
 }
 

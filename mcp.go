@@ -405,9 +405,12 @@ func (a *App) recordedToolDefs(tools []*Tool, packNames map[int64][]string, skip
 		if ps := packNames[t.ID]; len(ps) > 0 {
 			desc += "（流程包：" + strings.Join(ps, "、") + "）"
 		}
-		item := map[string]any{"name": t.Name, "description": desc, "inputSchema": t.InputSchema()}
-		if t.Title != "" {
-			item["title"] = t.Title
+		secrets := a.mcpToolSecrets(t)
+		desc = a.scrubApprovalText(desc, secrets)
+		title := a.scrubApprovalText(t.Title, secrets)
+		item := map[string]any{"name": t.Name, "description": desc, "inputSchema": a.mcpInputSchema(t)}
+		if title != "" {
+			item["title"] = title
 		}
 		list = append(list, item)
 	}
@@ -574,7 +577,8 @@ func (a *App) mcpListPacks(mc *mcpCtx) any {
 		if !p.Enabled {
 			continue
 		}
-		po := packOut{ID: p.ID, Name: p.Name, Description: strings.TrimSpace(p.Description), Scenarios: strings.TrimSpace(p.Scenarios), Loaded: loaded[p.ID]}
+		secrets := a.mcpPackSecrets(p)
+		po := packOut{ID: p.ID, Name: p.Name, Description: strings.TrimSpace(a.scrubApprovalText(p.Description, secrets)), Scenarios: strings.TrimSpace(a.scrubApprovalText(p.Scenarios, secrets)), Loaded: loaded[p.ID]}
 		for _, id := range p.ToolIDs {
 			if n, ok := tname[id]; ok {
 				po.ToolNames = append(po.ToolNames, n)
@@ -661,11 +665,26 @@ func (a *App) mcpLoadPack(mc *mcpCtx, args map[string]any) any {
 
 // packGuideText is the pack guide as the model should see it. Secret values are masked.
 // {{secret.name}} references are left as written and are not resolved.
+func (a *App) mcpPackSecrets(p *Pack) []string {
+	if p == nil {
+		return nil
+	}
+	var secrets []string
+	for _, id := range p.ToolIDs {
+		t, err := a.store.GetTool(id)
+		if err != nil || t == nil {
+			continue
+		}
+		secrets = append(secrets, a.mcpToolSecrets(t)...)
+	}
+	return secrets
+}
+
 func (a *App) packGuideText(p *Pack) string {
 	if p == nil {
 		return ""
 	}
-	return strings.TrimSpace(a.vault.Scrub(p.Guide))
+	return strings.TrimSpace(a.scrubApprovalText(p.Guide, a.mcpPackSecrets(p)))
 }
 
 // flatPackGuides appends each enabled pack's guide to the flat-mode connection instructions.

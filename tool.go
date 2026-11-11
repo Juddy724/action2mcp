@@ -439,18 +439,22 @@ func (t *Tool) InputSchema() map[string]any {
 			ty = "string"
 		}
 		d := p.Description
+		secret := paramIsSecret(t, p)
 		if p.Default == "@today" {
 			if !strings.Contains(d, "今天") {
 				d = strings.TrimSpace(d + "（不填默认今天，格式 YYYY-MM-DD）")
 			}
-		} else if p.Default != "" && !strings.Contains(d, p.Default) {
+		} else if !secret && p.Default != "" && !strings.Contains(d, p.Default) {
 			d = strings.TrimSpace(d + " 示例: " + p.Default)
+		}
+		if secret && p.Default != "" && p.Default != "@today" {
+			d = strings.ReplaceAll(d, p.Default, secretMask)
 		}
 		prop := map[string]any{"type": ty}
 		if d != "" {
 			prop["description"] = d
 		}
-		if !p.Required && p.Default != "" && p.Default != "@today" {
+		if !secret && !p.Required && p.Default != "" && p.Default != "@today" {
 			var dv any = p.Default
 			if ty == "number" || ty == "integer" {
 				if f, err := strconv.ParseFloat(p.Default, 64); err == nil {
@@ -729,7 +733,7 @@ func hasNestedPlaceholder(v any, depth int) bool {
 
 func legacyRenderJSONPlaceholders(b string, vals map[string]any, deferred *deferredCredentials) string {
 	if deferred != nil && deferred.preview {
-		b = quotePreviewJSONMasks(b, vals)
+		b = quotePreviewJSONMasks(b, deferred.maskedParams)
 	}
 	// One pass: argument text is never interpreted as another template reference.
 	quotedOrInline := regexp.MustCompile(`"\{\{\s*([A-Za-z0-9_\.]+)\s*\}\}"|\{\{\s*([A-Za-z0-9_\.]+)\s*\}\}`)
@@ -851,8 +855,7 @@ func (a *App) Send(p *PreparedCall) (*CallResult, error) {
 func (a *App) send(p *PreparedCall, secrets *[]string) (*CallResult, error) {
 	r, err := p.resolve(func(ref string) (string, error) {
 		value, err := a.vault.Resolve(ref)
-		_, name, _ := strings.Cut(ref, ".")
-		if err == nil && (strings.HasPrefix(ref, "secret.") || a.vault.TypeOf(name) == "secret") {
+		if err == nil {
 			*secrets = append(*secrets, value)
 		}
 		return value, err
