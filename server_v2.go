@@ -179,7 +179,11 @@ func (a *App) registerV2(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/sites", func(w http.ResponseWriter, r *http.Request) { saveSite(w, r, 0) })
 	mux.HandleFunc("PUT /api/sites/{id}", func(w http.ResponseWriter, r *http.Request) { saveSite(w, r, pathID(r)) })
 	mux.HandleFunc("DELETE /api/sites/{id}", func(w http.ResponseWriter, r *http.Request) {
-		a.store.DeleteSite(pathID(r))
+		id := pathID(r)
+		if s, err := a.store.GetSite(id); err == nil && s != nil {
+			_ = a.ClearSiteHeaders(s.Origin)
+		}
+		a.store.DeleteSite(id)
 		writeJSON(w, 200, map[string]any{"ok": true})
 	})
 	mux.HandleFunc("POST /api/sites/{id}/relogin", func(w http.ResponseWriter, r *http.Request) {

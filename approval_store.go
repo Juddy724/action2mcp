@@ -11,7 +11,7 @@ import (
 
 func defaultApproval(method string) string {
 	switch strings.ToUpper(strings.TrimSpace(method)) {
-	case "POST", "PUT", "PATCH", "DELETE":
+	case "POST", "PUT", "PATCH", "DELETE", "WS":
 		return "always"
 	default:
 		return "off"

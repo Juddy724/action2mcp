@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -84,22 +86,25 @@ type Param struct {
 }
 
 type Tool struct {
-	ID          int64             `json:"id"`
-	Approval    string            `json:"approval"`
-	Rev         int64             `json:"rev"`
-	Name        string            `json:"name"`
-	Title       string            `json:"title"`
-	Description string            `json:"description"`
-	Method      string            `json:"method"`
-	URL         string            `json:"url"`
-	Headers     map[string]string `json:"headers"`
-	Body        string            `json:"body"`
-	Params      []Param           `json:"params"`
-	CredHeaders []string          `json:"cred_headers"`
-	SourceReqID int64             `json:"source_request_id,omitempty"`
-	CreatedAt   string            `json:"created_at,omitempty"`
-	UpdatedAt   string            `json:"updated_at,omitempty"`
-	Packs       []string          `json:"packs,omitempty"`
+	ID                int64             `json:"id"`
+	Approval          string            `json:"approval"`
+	Rev               int64             `json:"rev"`
+	Name              string            `json:"name"`
+	Title             string            `json:"title"`
+	Description       string            `json:"description"`
+	Method            string            `json:"method"`
+	URL               string            `json:"url"`
+	Headers           map[string]string `json:"headers"`
+	Body              string            `json:"body"`
+	Params            []Param           `json:"params"`
+	CredHeaders       []string          `json:"cred_headers"`
+	SourceReqID       int64             `json:"source_request_id,omitempty"`
+	CreatedAt         string            `json:"created_at,omitempty"`
+	UpdatedAt         string            `json:"updated_at,omitempty"`
+	Packs             []string          `json:"packs,omitempty"`
+	Config            ToolConfig        `json:"config"`
+	AllowDisableGuard bool              `json:"-"`
+	configErr         error
 }
 
 type Pack struct {
@@ -223,8 +228,42 @@ ON CONFLICT(source_request_id) DO UPDATE SET approval=CASE
 WHEN source_approval_floor.approval='always' OR excluded.approval='always' THEN 'always' ELSE 'off' END;`); err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec(`PRAGMA user_version=6`); err != nil {
+	if !s.hasColumn("tools", "config") {
+		if _, err := db.Exec(`ALTER TABLE tools ADD COLUMN config TEXT NOT NULL DEFAULT '{}'`); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS site_headers(
+		origin TEXT NOT NULL,
+		name TEXT NOT NULL,
+		value_enc TEXT NOT NULL,
+		generation INTEGER NOT NULL DEFAULT 0,
+		updated_at TEXT,
+		PRIMARY KEY(origin, name)
+	)`); err != nil {
 		return nil, err
+	}
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS site_header_gens(
+		origin TEXT PRIMARY KEY,
+		generation INTEGER NOT NULL,
+		started_at TEXT
+	)`); err != nil {
+		return nil, err
+	}
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS source_guard_floor(
+		source_request_id INTEGER PRIMARY KEY,
+		sql_guard INTEGER NOT NULL DEFAULT 0,
+		max_rows INTEGER NOT NULL DEFAULT 200
+	)`); err != nil {
+		return nil, err
+	}
+	if _, err := db.Exec(`PRAGMA user_version=7`); err != nil {
+		return nil, err
+	}
+	if runtime.GOOS != "windows" && path != "" && !strings.Contains(path, "mode=memory") && !strings.HasPrefix(path, ":") {
+		if st, err := os.Stat(path); err == nil && st.Mode().Perm() != 0o600 {
+			_ = os.Chmod(path, 0o600)
+		}
 	}
 	// recordings left in "recording" state by a crash are finished now
 	db.Exec(`UPDATE recordings SET status='done', ended_at=? WHERE status='recording'`, now())
@@ -648,13 +687,13 @@ func b2i(b bool) int {
 
 // ---------- tools ----------
 
-const toolCols = `id,name,title,description,method,url,headers,body,params,cred_headers,source_request_id,created_at,updated_at,approval,rev`
+const toolCols = `id,name,title,description,method,url,headers,body,params,cred_headers,source_request_id,created_at,updated_at,approval,rev,config`
 
 func scanTool(sc interface{ Scan(...any) error }) (*Tool, error) {
 	var t Tool
-	var h, p, c string
+	var h, p, c, cfg string
 	var src sql.NullInt64
-	if err := sc.Scan(&t.ID, &t.Name, &t.Title, &t.Description, &t.Method, &t.URL, &h, &t.Body, &p, &c, &src, &t.CreatedAt, &t.UpdatedAt, &t.Approval, &t.Rev); err != nil {
+	if err := sc.Scan(&t.ID, &t.Name, &t.Title, &t.Description, &t.Method, &t.URL, &h, &t.Body, &p, &c, &src, &t.CreatedAt, &t.UpdatedAt, &t.Approval, &t.Rev, &cfg); err != nil {
 		return nil, err
 	}
 	t.SourceReqID = src.Int64
@@ -669,6 +708,16 @@ func scanTool(sc interface{ Scan(...any) error }) (*Tool, error) {
 	}
 	if t.CredHeaders == nil {
 		t.CredHeaders = []string{}
+	}
+	parsed, err := parseToolConfigJSON(cfg)
+	if err != nil {
+		t.configErr = err
+		if isWSMethod(t.Method) {
+			// Keep a zero config so listing still works; execute/save must fail closed.
+			t.Config = ToolConfig{}
+		}
+	} else {
+		t.Config = parsed
 	}
 	return &t, nil
 }
@@ -732,6 +781,18 @@ func saveTool(w *sql.Tx, t *Tool) error {
 	if err := validateApproval(t.Approval); err != nil {
 		return err
 	}
+	if t.configErr != nil && isWSMethod(t.Method) {
+		return t.configErr
+	}
+	if err := inheritSqlGuard(w, t, t.AllowDisableGuard); err != nil {
+		return err
+	}
+	if err := validateToolConfig(t.Method, t.Config, false); err != nil {
+		return err
+	}
+	if err := validateWSCredentialBindings(t); err != nil {
+		return err
+	}
 	previous := "off"
 	sources := map[int64]bool{}
 	if t.ID != 0 {
@@ -783,8 +844,8 @@ func saveTool(w *sql.Tx, t *Tool) error {
 	t.UpdatedAt = now()
 	if t.ID == 0 {
 		t.CreatedAt = t.UpdatedAt
-		r, err := w.Exec(`INSERT INTO tools(name,title,description,method,url,headers,body,params,cred_headers,source_request_id,created_at,updated_at,approval,rev) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1)`,
-			t.Name, t.Title, t.Description, t.Method, t.URL, js(t.Headers), t.Body, js(t.Params), js(t.CredHeaders), t.SourceReqID, t.CreatedAt, t.UpdatedAt, t.Approval)
+		r, err := w.Exec(`INSERT INTO tools(name,title,description,method,url,headers,body,params,cred_headers,source_request_id,created_at,updated_at,approval,rev,config) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)`,
+			t.Name, t.Title, t.Description, t.Method, t.URL, js(t.Headers), t.Body, js(t.Params), js(t.CredHeaders), t.SourceReqID, t.CreatedAt, t.UpdatedAt, t.Approval, t.Config.marshal())
 		if err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
 				return fmt.Errorf("工具标识 %q 已存在，请换一个", t.Name)
@@ -797,8 +858,8 @@ func saveTool(w *sql.Tx, t *Tool) error {
 			return err
 		}
 	} else {
-		err := w.QueryRow(`UPDATE tools SET name=?,title=?,description=?,method=?,url=?,headers=?,body=?,params=?,cred_headers=?,source_request_id=?,updated_at=?,approval=?,rev=rev+1 WHERE id=? RETURNING rev,created_at`,
-			t.Name, t.Title, t.Description, t.Method, t.URL, js(t.Headers), t.Body, js(t.Params), js(t.CredHeaders), t.SourceReqID, t.UpdatedAt, t.Approval, t.ID).Scan(&t.Rev, &t.CreatedAt)
+		err := w.QueryRow(`UPDATE tools SET name=?,title=?,description=?,method=?,url=?,headers=?,body=?,params=?,cred_headers=?,source_request_id=?,updated_at=?,approval=?,rev=rev+1,config=? WHERE id=? RETURNING rev,created_at`,
+			t.Name, t.Title, t.Description, t.Method, t.URL, js(t.Headers), t.Body, js(t.Params), js(t.CredHeaders), t.SourceReqID, t.UpdatedAt, t.Approval, t.Config.marshal(), t.ID).Scan(&t.Rev, &t.CreatedAt)
 		if err != nil && strings.Contains(err.Error(), "UNIQUE") {
 			return fmt.Errorf("工具标识 %q 已存在，请换一个", t.Name)
 		}
@@ -817,6 +878,18 @@ func saveTool(w *sql.Tx, t *Tool) error {
 		if _, err := w.Exec(`INSERT INTO source_approval_floor(source_request_id,approval) VALUES(?,?)
 ON CONFLICT(source_request_id) DO UPDATE SET approval=CASE
 WHEN source_approval_floor.approval='always' OR excluded.approval='always' THEN 'always' ELSE 'off' END`, source, stricterApproval(previous, t.Approval)); err != nil {
+			return err
+		}
+		guard, rows := 0, sqlGuardMaxRowsCap
+		if t.Config.sqlGuardEnabled() {
+			guard = 1
+			rows = t.Config.maxRows()
+		}
+		if _, err := w.Exec(`INSERT INTO source_guard_floor(source_request_id,sql_guard,max_rows) VALUES(?,?,?)
+ON CONFLICT(source_request_id) DO UPDATE SET
+ sql_guard=CASE WHEN source_guard_floor.sql_guard=1 OR excluded.sql_guard=1 THEN 1 ELSE 0 END,
+ max_rows=CASE WHEN source_guard_floor.sql_guard=1 OR excluded.sql_guard=1 THEN MIN(source_guard_floor.max_rows, excluded.max_rows) ELSE excluded.max_rows END`,
+			source, guard, rows); err != nil {
 			return err
 		}
 	}

@@ -284,8 +284,8 @@ func (bs *BrowserSession) setupPage(session string) {
 	bs.mu.Lock()
 	rec := bs.rec
 	bs.mu.Unlock()
+	bs.call(session, "Network.enable", map[string]any{"maxPostDataSize": 262144}, nil)
 	if !bs.headless {
-		bs.call(session, "Network.enable", map[string]any{"maxPostDataSize": 262144}, nil)
 		bs.call(session, "Page.enable", nil, nil)
 		bs.call(session, "Runtime.enable", nil, nil)
 		bs.call(session, "Runtime.addBinding", map[string]any{"name": bindingName}, nil)
@@ -438,6 +438,17 @@ func (bs *BrowserSession) onRequest(ev cdp.Event) {
 		} `json:"redirectResponse"`
 	}
 	json.Unmarshal(ev.Params, &p)
+	hdrEarly := map[string]string{}
+	for hk, hv := range p.Request.Headers {
+		hdrEarly[hk] = fmt.Sprint(hv)
+	}
+	if p.Request.URL != "" && !strings.HasPrefix(p.Request.URL, "data:") && !strings.HasPrefix(p.Request.URL, "chrome") {
+		rk := key(ev.SessionID, p.RequestID)
+		bs.app.TrackHarvestHop(rk, p.Request.URL)
+		for hk, hv := range hdrEarly {
+			_ = bs.app.HarvestRequestHeader(rk, p.Request.URL, hk, hv)
+		}
+	}
 	bs.mu.Lock()
 	defer bs.mu.Unlock()
 	rec := bs.rec
@@ -488,12 +499,19 @@ func (bs *BrowserSession) onExtraInfo(ev cdp.Event) {
 		Headers   map[string]any `json:"headers"`
 	}
 	json.Unmarshal(ev.Params, &p)
+	rk := key(ev.SessionID, p.RequestID)
+	for hk, hv := range p.Headers {
+		if strings.HasPrefix(hk, ":") {
+			continue
+		}
+		_ = bs.app.HarvestRequestHeader(rk, "", hk, fmt.Sprint(hv))
+	}
 	bs.mu.Lock()
 	defer bs.mu.Unlock()
 	if bs.rec == nil {
 		return
 	}
-	if pr, ok := bs.rec.pending[key(ev.SessionID, p.RequestID)]; ok {
+	if pr, ok := bs.rec.pending[rk]; ok {
 		for k, v := range p.Headers {
 			if strings.HasPrefix(k, ":") {
 				continue
@@ -650,6 +668,13 @@ func (bs *BrowserSession) onWSHandshake(ev cdp.Event) {
 			continue
 		}
 		pr.rec.ReqHeaders[k] = fmt.Sprint(v)
+	}
+	rk := key(ev.SessionID, p.RequestID)
+	if pr.rec.URL != "" {
+		bs.app.TrackHarvestHop(rk, pr.rec.URL)
+		for k, v := range pr.rec.ReqHeaders {
+			_ = bs.app.HarvestRequestHeader(rk, pr.rec.URL, k, v)
+		}
 	}
 	if err := bs.persistWSLocked(rec, pr, true); err != nil {
 		log.Printf("保存 WebSocket 握手失败: %v", err)

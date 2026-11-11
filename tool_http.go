@@ -41,7 +41,7 @@ func (a *App) checkToolDestination(ctx context.Context, raw string) error {
 	port := u.Port()
 	if port == "" {
 		port = "80"
-		if u.Scheme == "https" {
+		if u.Scheme == "https" || u.Scheme == "wss" {
 			port = "443"
 		}
 	}

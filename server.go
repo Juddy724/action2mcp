@@ -410,6 +410,7 @@ func (a *App) Handler() http.Handler {
 	})
 	mux.HandleFunc("DELETE /api/credentials", func(w http.ResponseWriter, r *http.Request) {
 		a.store.ClearCookies()
+		_ = a.ClearAllSiteHeaders()
 		writeJSON(w, 200, map[string]any{"ok": true})
 	})
 
@@ -527,10 +528,14 @@ func (a *App) persistTool(t *Tool) error {
 	for k, v := range t.Headers {
 		t.Headers[k] = a.vault.ToRefs(v)
 	}
+	for i, m := range t.Config.Messages {
+		t.Config.Messages[i] = a.vault.ToRefs(m)
+	}
 	if err := a.validateTool(t); err != nil {
 		return err
 	}
 	a.markSecretParams(t)
+	t.AllowDisableGuard = true
 	if err := a.store.SaveTool(t); err != nil {
 		return err
 	}

@@ -121,6 +121,37 @@ func (v *Vault) open(name, enc string) (string, error) {
 	return string(pt), nil
 }
 
+func (v *Vault) encryptAD(ad, plain string) (string, error) {
+	if v == nil || v.aead == nil {
+		return "", errors.New("本地密钥不可用")
+	}
+	nonce := make([]byte, v.aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	ct := v.aead.Seal(nil, nonce, []byte(plain), []byte(ad))
+	return "v1:" + base64.StdEncoding.EncodeToString(append(nonce, ct...)), nil
+}
+
+func (v *Vault) decryptAD(ad, enc string) (string, error) {
+	if v == nil || v.aead == nil {
+		return "", errors.New("本地密钥不可用")
+	}
+	if enc == "" {
+		return "", errors.New("站点请求头无法解密")
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(enc, "v1:"))
+	if err != nil || len(raw) < v.aead.NonceSize() {
+		return "", errors.New("站点请求头无法解密")
+	}
+	ns := v.aead.NonceSize()
+	pt, err := v.aead.Open(nil, raw[:ns], raw[ns:], []byte(ad))
+	if err != nil {
+		return "", errors.New("站点请求头无法解密（secret.key 是否被替换？）")
+	}
+	return string(pt), nil
+}
+
 func (v *Vault) reload() error {
 	rows, err := v.db.Query(`SELECT name,type,value_enc,site FROM vault`)
 	if err != nil {
@@ -399,6 +430,17 @@ func (v *Vault) ToRefs(s string) string {
 // isRefName: placeholders served by the vault, not by the AI.
 func isRefName(n string) bool {
 	return strings.HasPrefix(n, "cfg.") || strings.HasPrefix(n, "secret.")
+}
+
+func isHeaderCookieRef(n string) bool {
+	return strings.HasPrefix(n, "header.") || strings.HasPrefix(n, "cookie.")
+}
+
+func isServerRef(n string, ws bool) bool {
+	if isRefName(n) {
+		return true
+	}
+	return ws && isHeaderCookieRef(n)
 }
 
 func normalizeOrigin(s string) string {

@@ -316,8 +316,12 @@ func (a *App) invokeTool(ctx context.Context, mc *mcpCtx, name string, args map[
 		result := ""
 		if err != nil {
 			result = "调用失败：" + err.Error()
+		} else if res.Outcome != "" && res.Outcome != outcomeSuccess {
+			result = res.Outcome + "：" + firstNonEmpty(res.Error, res.Body)
 		} else if res.Error != "" {
 			result = "请求失败：" + res.Error
+		} else if res.Outcome != "" {
+			result = res.Outcome
 		} else {
 			result = fmt.Sprintf("HTTP %d", res.Status)
 		}
@@ -326,6 +330,16 @@ func (a *App) invokeTool(ctx context.Context, mc *mcpCtx, name string, args map[
 	}
 	if err != nil {
 		return textResult(prefix+"调用失败："+err.Error(), true), nil
+	}
+	if res.Outcome != "" {
+		text := res.Body
+		if res.Error != "" && res.Outcome != outcomeSuccess {
+			text = firstNonEmpty(res.Error, res.Body)
+		}
+		if res.Relogged {
+			text = "（登录已过期，已自动重新登录并重试）\n" + text
+		}
+		return textResult(prefix+text, res.Outcome != outcomeSuccess), nil
 	}
 	if res.Error != "" {
 		return textResult(prefix+"请求失败："+res.Error, true), nil
