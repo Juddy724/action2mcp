@@ -283,8 +283,14 @@ func TestRec051PartialMultipartAndSave(t *testing.T) {
 	if out["req_body_partial"] != true || out["req_body_hidden"] == true {
 		t.Fatalf("partial: %s", text)
 	}
-	if strings.Contains(out["req_body"].(string), "…[已截断]") {
-		t.Fatalf("marker or tail returned raw: %s", text)
+	if strings.Count(out["req_body"].(string), "…[已截断]") != 1 || !strings.HasSuffix(out["req_body"].(string), "…[已截断]") {
+		t.Fatalf("expected exactly one trailing truncation marker: %s", text)
+	}
+	if n, _ := out["req_body_truncation"].(string); !strings.Contains(n, "采集") {
+		t.Fatalf("missing capture truncation note: %s", text)
+	}
+	if _, ok := out["resp_body_truncation"]; ok {
+		t.Fatalf("complete response must not carry a truncation note: %s", text)
 	}
 
 	var buf bytes.Buffer
@@ -474,5 +480,35 @@ func TestRec051NoiseAndMiddlewareCount(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("middleware_count: %s", txt)
+	}
+}
+
+func TestRecBodyTruncationMarkers(t *testing.T) {
+	app, _, c := startRecServer(t)
+	long := `{"items":[` + strings.Repeat(`{"name":"abcdefghij","n":1},`, 60) + `{"name":"end"}]}`
+	q := &ReqRecord{
+		Method: "POST", URL: "https://api.example.com/api/list",
+		ResourceType: "Fetch", Status: 200, RespMime: "application/json",
+		ReqHeaders: map[string]string{"Content-Type": "application/json"},
+		ReqBody:    `{"a":1}`,
+		RespBody:   long,
+	}
+	seedRecRequest(t, app, q)
+	text := mustTool(t, c, "rec_get_request", map[string]any{"request_id": q.ID, "max_body": 200})
+	out := decodeRec(t, text)
+	body, _ := out["resp_body"].(string)
+	if out["resp_body_truncated"] != true || !strings.HasSuffix(body, "…[已截断]") {
+		t.Fatalf("clipped body needs marker: %s", text)
+	}
+	if n, _ := out["resp_body_truncation"].(string); !strings.Contains(n, "max_body") || !strings.Contains(n, "原始体积") {
+		t.Fatalf("clipped body needs note: %s", text)
+	}
+	if _, ok := out["req_body_truncation"]; ok || strings.Contains(out["req_body"].(string), "已截断") {
+		t.Fatalf("small request body must be untouched: %s", text)
+	}
+	text = mustTool(t, c, "rec_get_request", map[string]any{"request_id": q.ID, "max_body": 100000})
+	out = decodeRec(t, text)
+	if _, ok := out["resp_body_truncation"]; ok || strings.Contains(out["resp_body"].(string), "已截断") {
+		t.Fatalf("full body must not be marked: %s", text)
 	}
 }

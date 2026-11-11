@@ -951,6 +951,14 @@ func (a *App) recGetRequest(args map[string]any) (string, bool) {
 	if respPartial {
 		out["resp_body_partial"] = true
 	}
+	if marked, note := bodyTruncationInfo("请求体", reqShown, reqTotal, reqPartial, reqCut, maxBody); note != "" {
+		out["req_body"] = marked
+		out["req_body_truncation"] = recSafeText(note)
+	}
+	if marked, note := bodyTruncationInfo("响应体", respShown, respTotal, respPartial, respCut, maxBody); note != "" {
+		out["resp_body"] = marked
+		out["resp_body_truncation"] = recSafeText(note)
+	}
 	if reqOutline != nil {
 		out["req_body_outline"] = reqOutline
 	}
@@ -2418,6 +2426,28 @@ func (a *App) recBodyView(body, ct string, lits []string, max int) (recSafeText,
 	}
 	shown, _, cut := clipText(safe, max)
 	return recSafeText(shown), total, cut, false, false, nil
+}
+
+// bodyTruncationInfo makes a cut body obvious to the reader. A body can be cut
+// at capture time (partial: the recording kept only the first maxBody bytes) or
+// when shown (cut: max_body is smaller than the body). In both cases the shown
+// text ends with an explicit marker and a note explains how much is missing.
+func bodyTruncationInfo(label string, shown recSafeText, total int, partial, cut bool, max int) (recSafeText, string) {
+	if !partial && !cut {
+		return shown, ""
+	}
+	var parts []string
+	if partial {
+		parts = append(parts, fmt.Sprintf("%s在录制采集时超过 %d KB 上限，已被截断，只保留了前面一部分，后面的内容录制里没有。", label, maxBody/1024))
+	}
+	if cut {
+		parts = append(parts, fmt.Sprintf("%s太长，已截断：这里显示脱敏后内容的前 %d 字节（原始体积 %d 字节）；需要更多可调大 max_body（上限 100000）。", label, len(shown), total))
+	}
+	text := string(shown)
+	if text != "" {
+		text += "\n…[已截断]"
+	}
+	return recSafeText(text), strings.Join(parts, "")
 }
 
 func (a *App) maskHeaderMap(h map[string]string, lits []string) map[string]string {

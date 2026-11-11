@@ -424,7 +424,7 @@ func TestRecToolsAnnotateSaveScrub(t *testing.T) {
 	if err := json.Unmarshal([]byte(detail), &det); err != nil {
 		t.Fatalf("detail json: %v %s", err, detail)
 	}
-	if det.WriteHint == "" || !det.ReqBodyTruncated || det.ReqBodyTotal <= 20 || len(det.ReqBody) > 20 {
+	if det.WriteHint == "" || !det.ReqBodyTruncated || det.ReqBodyTotal <= 20 || len(det.ReqBody) > 20+len("\n…[已截断]") {
 		t.Fatalf("truncation: %+v", det)
 	}
 	var sawPass, sawID bool
