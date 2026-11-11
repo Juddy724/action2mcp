@@ -8,6 +8,10 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%234f46e5'/><circle cx='16' cy='16' r='6' fill='%23fff'/></svg>">
 </head>
 <body>
+<div id="console-top">
+<div id="approval-banner" class="approval-banner" hidden>
+  <button id="approval-open" onclick="openApprovalModal()"><span aria-hidden="true">⚠</span> <strong id="approval-count" role="status"></strong><span>查看并审批 →</span></button>
+</div>
 <header>
   <div class="brand"><span class="logo"></span>Action2MCP <small>把业务操作录成 AI 工具</small></div>
   <nav>
@@ -17,12 +21,23 @@
     <a href="#/middleware" data-nav="middleware">中间件</a>
     <a href="#/vault" data-nav="vault">配置管理</a>
     <a href="#/packs" data-nav="packs">流程包</a>
+    <a href="#/approvals" data-nav="approvals">审批记录</a>
     <a href="#/settings" data-nav="settings">接入 AI / 设置</a>
   </nav>
+  <button id="approval-sound" class="sm" onclick="enableApprovalSound()" aria-pressed="false">启用提示音</button>
   <div id="statusbar"></div>
 </header>
+</div>
 <main id="app"></main>
 <div id="modal" class="modal hidden"><div class="modal-box"><button class="modal-close" onclick="closeModal()">×</button><div id="modal-body"></div></div></div>
+<div id="approval-modal" class="modal approval-modal hidden" role="dialog" aria-modal="true" aria-labelledby="approval-heading" aria-describedby="approval-description" tabindex="-1">
+  <div class="modal-box approval-box">
+    <button id="approval-close" class="modal-close" onclick="closeApprovalModal()" aria-label="稍后处理，保留当前编辑">×</button>
+    <h2 id="approval-heading">调用审批</h2>
+    <p id="approval-description" class="muted small">请核对即将发送的请求。关闭弹窗会保留当前编辑，调用继续等待审批。</p>
+    <div class="approval-layout"><aside><h3>待审批调用</h3><div id="approval-switcher" class="approval-switcher"></div></aside><section id="approval-content" aria-label="审批详情"></section></div>
+  </div>
+</div>
 <div id="toast"></div>
 <script src="app.js"></script>
 </body>

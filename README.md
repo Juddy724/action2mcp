@@ -6,12 +6,12 @@
 
 最新版本：[Releases 页面](https://github.com/Juddy724/action2mcp/releases/latest)
 
-| 平台 | 安装包 (v0.5.2) |
+| 平台 | 安装包 (v0.5.3) |
 |---|---|
-| macOS (Apple 芯片) | [Action2MCP-0.5.2-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.2/Action2MCP-0.5.2-macOS-AppleSilicon.zip) |
-| macOS (Intel) | [Action2MCP-0.5.2-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.2/Action2MCP-0.5.2-macOS-Intel.zip) |
-| Windows x64 | [Action2MCP-0.5.2-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.2/Action2MCP-0.5.2-Windows-x64.zip) |
-| Linux x64 | [Action2MCP-0.5.2-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.2/Action2MCP-0.5.2-Linux-x64.zip) |
+| macOS (Apple 芯片) | [Action2MCP-0.5.3-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.3/Action2MCP-0.5.3-macOS-AppleSilicon.zip) |
+| macOS (Intel) | [Action2MCP-0.5.3-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.3/Action2MCP-0.5.3-macOS-Intel.zip) |
+| Windows x64 | [Action2MCP-0.5.3-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.3/Action2MCP-0.5.3-Windows-x64.zip) |
+| Linux x64 | [Action2MCP-0.5.3-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.3/Action2MCP-0.5.3-Linux-x64.zip) |
 
 解压后运行 `start.command`（macOS）、`start.bat`（Windows）或 `start.sh`（Linux），然后打开 http://localhost:7788 。详细说明见安装包里的 README.md。
 
@@ -24,6 +24,14 @@
 - 配置管理：账号密码等加密保存，对 AI 不可见
 - 中间件管理：MySQL/OceanBase、Redis、MQ、WebSocket，按操作开关权限
 - MCP 接入：Streamable HTTP（http://localhost:7788/mcp）或 stdio（`a2m mcp`）
+- 工具审批：在工具编辑页的「审批模式」选择不审批（off）或每次都审批（always）；写入工具默认每次都审批。AI 调用时，控制台会出现待审批卡片，可以通过、修改参数后通过或拒绝；等待超时可在「接入 AI / 设置」调整
+
+### 工具审批的范围与限制
+
+- 审批只约束通过 MCP 发起的 AI 调用；能直接访问 localhost HTTP 的客户端仍可伪造请求，审批不能代替本机访问权限管理。
+- 请求已经发出后无法撤回。
+- MCP 会话 DELETE 和 stdio 桥退出不保证取消待审批调用；这类调用会继续等待用户拒绝或超时。
+- 大整数精度与现有 MCP JSON 的 float64 解码路径一致，超过其精确表示范围的整数可能丢失精度。
 
 ## 从源码构建
 

@@ -262,7 +262,7 @@ func argObject(v any) (map[string]any, error) {
 // toggle is the security boundary; load_pack only controls what is advertised in tools/list.
 func (a *App) invokeTool(ctx context.Context, mc *mcpCtx, name string, args map[string]any) (any, *rpcErr) {
 	client := "未知客户端"
-	if mc.sess != nil {
+	if mc != nil && mc.sess != nil {
 		client = mc.sess.clientName()
 	}
 	if isRecTool(name) {
@@ -286,12 +286,49 @@ func (a *App) invokeTool(ctx context.Context, mc *mcpCtx, name string, args map[
 		}
 		return nil, &rpcErr{-32602, msg}
 	}
-	res, err := a.Execute(t, args)
+	var pending *pendingApproval
+	if t.Approval == "always" {
+		var err error
+		args, err = copyApprovalArgs(args)
+		if err != nil {
+			return textResult(err.Error(), true), nil
+		}
+	}
+	prepared, err := a.Prepare(t, args)
 	if err != nil {
 		return textResult("调用失败："+err.Error(), true), nil
 	}
+	prefix := ""
+	if t.Approval == "always" {
+		pending, err = a.waitApproval(ctx, t, args, prepared, client)
+		if err != nil {
+			return textResult(err.Error(), true), nil
+		}
+		if !a.approvalCommitValid(pending) {
+			a.approvalResult(pending.record.ID, "未执行：工具在审批期间被修改/关闭/请求内容已变化")
+			return textResult("工具或请求内容在审批期间变化，未执行，请重新调用", true), nil
+		}
+		prepared = pending.prepared
+		prefix = a.approvalEditPrefix(pending)
+	}
+	res, err := a.Send(prepared)
+	if pending != nil {
+		result := ""
+		if err != nil {
+			result = "调用失败：" + err.Error()
+		} else if res.Error != "" {
+			result = "请求失败：" + res.Error
+		} else {
+			result = fmt.Sprintf("HTTP %d", res.Status)
+		}
+		result = strings.SplitN(result, "\n", 2)[0]
+		a.approvalResult(pending.record.ID, truncate(result, 500))
+	}
+	if err != nil {
+		return textResult(prefix+"调用失败："+err.Error(), true), nil
+	}
 	if res.Error != "" {
-		return textResult("请求失败："+res.Error, true), nil
+		return textResult(prefix+"请求失败："+res.Error, true), nil
 	}
 	text := fmt.Sprintf("HTTP %d\n%s", res.Status, res.Body)
 	if res.Relogged {
@@ -302,7 +339,7 @@ func (a *App) invokeTool(ctx context.Context, mc *mcpCtx, name string, args map[
 	} else if res.Status == 403 {
 		text += "\n\n[提示] 目标网站返回无权限（403）。已经尝试过重新登录，可能是当前账号没有这个操作的权限。"
 	}
-	return textResult(text, res.Status >= 400), nil
+	return textResult(prefix+text, res.Status >= 400), nil
 }
 
 // ---------- tool lists ----------

@@ -110,7 +110,7 @@ func TestTieredDiscovery(t *testing.T) {
 	defer srv.Close()
 
 	app.vault.Upsert("svc_password", "secret", secret, upstream.URL, "")
-	echo := &Tool{Name: "echo_login", Title: "回显", Method: "POST", URL: upstream.URL + "/echo",
+	echo := &Tool{Approval: "off", Name: "echo_login", Title: "回显", Method: "POST", URL: upstream.URL + "/echo",
 		Headers: map[string]string{"Content-Type": "application/json"},
 		Body:    `{"kw":"{{kw}}","pw":"{{secret.svc_password}}"}`, Params: []Param{{Name: "kw", Type: "string", Required: true}}}
 	other := &Tool{Name: "hidden_tool", Title: "隐藏", Method: "GET", URL: upstream.URL + "/h"}

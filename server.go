@@ -256,10 +256,20 @@ func (a *App) Handler() http.Handler {
 		writeJSON(w, 200, map[string]any{"tool": t, "input_schema": t.InputSchema()})
 	})
 	saveTool := func(w http.ResponseWriter, r *http.Request, id int64) {
-		var t Tool
-		if err := readJSON(r, &t); err != nil {
+		var in struct {
+			Tool
+			Approval json.RawMessage `json:"approval"`
+		}
+		if err := readJSON(r, &in); err != nil {
 			writeErr(w, 400, err)
 			return
+		}
+		t := in.Tool
+		if in.Approval != nil {
+			if err := json.Unmarshal(in.Approval, &t.Approval); err != nil || t.Approval == "" {
+				writeErr(w, 400, errors.New("审批模式只能是 off 或 always"))
+				return
+			}
 		}
 		t.ID = id
 		if err := a.persistTool(&t); err != nil {
@@ -436,20 +446,21 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /mcp", a.handleMCPStream)
 	mux.HandleFunc("DELETE /mcp", a.handleMCPDelete)
 
-	// settings (MCP exposure mode + built-in 录制分析 pack)
+	// settings (MCP exposure mode, built-in 录制分析 pack, approval timeout)
 	mux.HandleFunc("GET /api/settings", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, a.settingsView())
 	})
 	mux.HandleFunc("PUT /api/settings", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
-			MCPMode     *string `json:"mcp_mode"`
-			RecAnalysis *bool   `json:"rec_analysis"`
+			MCPMode             *string         `json:"mcp_mode"`
+			RecAnalysis         *bool           `json:"rec_analysis"`
+			ApprovalTimeoutSecs json.RawMessage `json:"approval_timeout_secs"`
 		}
 		if err := readJSON(r, &in); err != nil {
 			writeErr(w, 400, err)
 			return
 		}
-		if in.MCPMode == nil && in.RecAnalysis == nil {
+		if in.MCPMode == nil && in.RecAnalysis == nil && in.ApprovalTimeoutSecs == nil {
 			writeErr(w, 400, errors.New("没有要更新的设置"))
 			return
 		}
@@ -468,6 +479,14 @@ func (a *App) Handler() http.Handler {
 			}
 			updates[settingRecAnalysis] = v
 		}
+		if in.ApprovalTimeoutSecs != nil {
+			var secs int
+			if err := json.Unmarshal(in.ApprovalTimeoutSecs, &secs); err != nil || secs < 30 || secs > 1800 {
+				writeErr(w, 400, errors.New("approval_timeout_secs 必须是 30–1800 的整数"))
+				return
+			}
+			updates["approval_timeout_secs"] = strconv.Itoa(secs)
+		}
 		if err := a.store.SetSettings(updates); err != nil {
 			writeErr(w, 500, err)
 			return
@@ -475,7 +494,11 @@ func (a *App) Handler() http.Handler {
 		a.broadcastToolsChanged()
 		writeJSON(w, 200, a.settingsView())
 	})
-	return localOnly(mux)
+	// Approval routes apply their strict JSON guard before the legacy console guard.
+	console := http.NewServeMux()
+	a.registerApprovals(console)
+	console.Handle("/", localOnly(mux))
+	return console
 }
 
 var exitServer = func() {}
@@ -507,6 +530,7 @@ func (a *App) persistTool(t *Tool) error {
 	if err := a.validateTool(t); err != nil {
 		return err
 	}
+	a.markSecretParams(t)
 	if err := a.store.SaveTool(t); err != nil {
 		return err
 	}
@@ -535,7 +559,8 @@ func (a *App) validateTool(t *Tool) error {
 }
 
 func (a *App) settingsView() map[string]any {
-	return map[string]any{"mcp_mode": a.mcpMode(), "rec_analysis": a.recAnalysisEnabled()}
+	return map[string]any{"mcp_mode": a.mcpMode(), "rec_analysis": a.recAnalysisEnabled(),
+		"approval_timeout_secs": int(a.store.ApprovalTimeout() / time.Second)}
 }
 
 func suggestToolName(q *ReqRecord) string {

@@ -80,10 +80,13 @@ type Param struct {
 	Description string `json:"description"`
 	Required    bool   `json:"required"`
 	Default     string `json:"default,omitempty"`
+	Secret      bool   `json:"secret,omitempty"`
 }
 
 type Tool struct {
 	ID          int64             `json:"id"`
+	Approval    string            `json:"approval"`
+	Rev         int64             `json:"rev"`
 	Name        string            `json:"name"`
 	Title       string            `json:"title"`
 	Description string            `json:"description"`
@@ -151,6 +154,8 @@ CREATE TABLE IF NOT EXISTS request_notes(
   group_key TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS idx_request_notes_rec ON request_notes(recording_id);
 CREATE TABLE IF NOT EXISTS tools(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, title TEXT, description TEXT, method TEXT, url TEXT, headers TEXT, body TEXT, params TEXT, cred_headers TEXT, source_request_id INTEGER, created_at TEXT, updated_at TEXT);
+CREATE TABLE IF NOT EXISTS source_approval_floor(source_request_id INTEGER PRIMARY KEY, approval TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS tool_approval_sources(tool_id INTEGER REFERENCES tools(id) ON DELETE CASCADE, source_request_id INTEGER NOT NULL, PRIMARY KEY(tool_id,source_request_id));
 CREATE TABLE IF NOT EXISTS packs(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, description TEXT, enabled INTEGER, created_at TEXT);
 CREATE TABLE IF NOT EXISTS pack_tools(pack_id INTEGER REFERENCES packs(id) ON DELETE CASCADE, tool_id INTEGER REFERENCES tools(id) ON DELETE CASCADE, PRIMARY KEY(pack_id, tool_id));
 CREATE TABLE IF NOT EXISTS cookie_jar(name TEXT, domain TEXT, path TEXT, value TEXT, expires REAL, secure INTEGER, http_only INTEGER, session INTEGER, updated_at TEXT, PRIMARY KEY(name, domain, path));
@@ -160,6 +165,7 @@ CREATE TABLE IF NOT EXISTS middleware(id INTEGER PRIMARY KEY AUTOINCREMENT, name
 CREATE TABLE IF NOT EXISTS pack_middleware(pack_id INTEGER REFERENCES packs(id) ON DELETE CASCADE, mw_id INTEGER REFERENCES middleware(id) ON DELETE CASCADE, PRIMARY KEY(pack_id, mw_id));
 CREATE TABLE IF NOT EXISTS mw_audit(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, client TEXT, mw TEXT, tool TEXT, action TEXT, perm TEXT, allowed INTEGER, result TEXT, ms INTEGER);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS approvals(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, tool TEXT, tool_id INTEGER, tool_rev INTEGER, client TEXT, args_display TEXT, final_args_display TEXT, status TEXT, feedback TEXT, decided_at TEXT, result TEXT, title TEXT, preview_display TEXT, params_json TEXT);
 
 `
 	if _, err := db.Exec(schema); err != nil {
@@ -198,7 +204,26 @@ CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 			return nil, err
 		}
 	}
-	if _, err := db.Exec(`PRAGMA user_version=5`); err != nil {
+	for _, col := range []struct{ name, ddl string }{
+		{"approval", `ALTER TABLE tools ADD COLUMN approval TEXT NOT NULL DEFAULT 'off'`},
+		{"rev", `ALTER TABLE tools ADD COLUMN rev INTEGER NOT NULL DEFAULT 1`},
+	} {
+		if !s.hasColumn("tools", col.name) {
+			if _, err := db.Exec(col.ddl); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO tool_approval_sources(tool_id,source_request_id)
+SELECT id,source_request_id FROM tools WHERE source_request_id>0 ON CONFLICT DO NOTHING;
+INSERT INTO source_approval_floor(source_request_id,approval)
+SELECT source_request_id,CASE WHEN MAX(approval='always') THEN 'always' ELSE 'off' END
+FROM tools WHERE source_request_id>0 GROUP BY source_request_id
+ON CONFLICT(source_request_id) DO UPDATE SET approval=CASE
+WHEN source_approval_floor.approval='always' OR excluded.approval='always' THEN 'always' ELSE 'off' END;`); err != nil {
+		return nil, err
+	}
+	if _, err := db.Exec(`PRAGMA user_version=6`); err != nil {
 		return nil, err
 	}
 	// recordings left in "recording" state by a crash are finished now
@@ -623,13 +648,13 @@ func b2i(b bool) int {
 
 // ---------- tools ----------
 
-const toolCols = `id,name,title,description,method,url,headers,body,params,cred_headers,source_request_id,created_at,updated_at`
+const toolCols = `id,name,title,description,method,url,headers,body,params,cred_headers,source_request_id,created_at,updated_at,approval,rev`
 
 func scanTool(sc interface{ Scan(...any) error }) (*Tool, error) {
 	var t Tool
 	var h, p, c string
 	var src sql.NullInt64
-	if err := sc.Scan(&t.ID, &t.Name, &t.Title, &t.Description, &t.Method, &t.URL, &h, &t.Body, &p, &c, &src, &t.CreatedAt, &t.UpdatedAt); err != nil {
+	if err := sc.Scan(&t.ID, &t.Name, &t.Title, &t.Description, &t.Method, &t.URL, &h, &t.Body, &p, &c, &src, &t.CreatedAt, &t.UpdatedAt, &t.Approval, &t.Rev); err != nil {
 		return nil, err
 	}
 	t.SourceReqID = src.Int64
@@ -689,14 +714,63 @@ func (s *Store) GetToolByName(name string) (*Tool, error) {
 }
 
 func (s *Store) SaveTool(t *Tool) error {
-	return saveTool(s.db, t)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := validateApproval(t.Approval); err != nil {
+		return err
+	}
+	if err := saveTool(tx, t); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
-type toolWriter interface {
-	Exec(string, ...any) (sql.Result, error)
-}
-
-func saveTool(w toolWriter, t *Tool) error {
+func saveTool(w *sql.Tx, t *Tool) error {
+	if err := validateApproval(t.Approval); err != nil {
+		return err
+	}
+	previous := "off"
+	sources := map[int64]bool{}
+	if t.ID != 0 {
+		var source int64
+		if err := w.QueryRow(`SELECT approval,COALESCE(source_request_id,0) FROM tools WHERE id=?`, t.ID).Scan(&previous, &source); err != nil {
+			return err
+		}
+		if t.SourceReqID <= 0 {
+			t.SourceReqID = source
+		}
+		if source > 0 {
+			sources[source] = true
+		}
+		rows, err := w.Query(`SELECT source_request_id FROM tool_approval_sources WHERE tool_id=?`, t.ID)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			if err := rows.Scan(&source); err != nil {
+				rows.Close()
+				return err
+			}
+			sources[source] = true
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+	}
+	if t.SourceReqID > 0 {
+		sources[t.SourceReqID] = true
+	}
+	if t.Approval == "" {
+		t.Approval = defaultApproval(t.Method)
+		if t.ID != 0 {
+			t.Approval = previous
+		}
+	}
 	if t.Headers == nil {
 		t.Headers = map[string]string{}
 	}
@@ -709,31 +783,42 @@ func saveTool(w toolWriter, t *Tool) error {
 	t.UpdatedAt = now()
 	if t.ID == 0 {
 		t.CreatedAt = t.UpdatedAt
-		r, err := w.Exec(`INSERT INTO tools(name,title,description,method,url,headers,body,params,cred_headers,source_request_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-			t.Name, t.Title, t.Description, t.Method, t.URL, js(t.Headers), t.Body, js(t.Params), js(t.CredHeaders), t.SourceReqID, t.CreatedAt, t.UpdatedAt)
+		r, err := w.Exec(`INSERT INTO tools(name,title,description,method,url,headers,body,params,cred_headers,source_request_id,created_at,updated_at,approval,rev) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1)`,
+			t.Name, t.Title, t.Description, t.Method, t.URL, js(t.Headers), t.Body, js(t.Params), js(t.CredHeaders), t.SourceReqID, t.CreatedAt, t.UpdatedAt, t.Approval)
 		if err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
 				return fmt.Errorf("工具标识 %q 已存在，请换一个", t.Name)
 			}
 			return err
 		}
+		t.Rev = 1
 		t.ID, err = r.LastInsertId()
-		return err
+		if err != nil {
+			return err
+		}
+	} else {
+		err := w.QueryRow(`UPDATE tools SET name=?,title=?,description=?,method=?,url=?,headers=?,body=?,params=?,cred_headers=?,source_request_id=?,updated_at=?,approval=?,rev=rev+1 WHERE id=? RETURNING rev,created_at`,
+			t.Name, t.Title, t.Description, t.Method, t.URL, js(t.Headers), t.Body, js(t.Params), js(t.CredHeaders), t.SourceReqID, t.UpdatedAt, t.Approval, t.ID).Scan(&t.Rev, &t.CreatedAt)
+		if err != nil && strings.Contains(err.Error(), "UNIQUE") {
+			return fmt.Errorf("工具标识 %q 已存在，请换一个", t.Name)
+		}
+		if err == sql.ErrNoRows {
+			return errors.New("工具不存在，无法更新")
+		}
+		if err != nil {
+			return err
+		}
 	}
-	r, err := w.Exec(`UPDATE tools SET name=?,title=?,description=?,method=?,url=?,headers=?,body=?,params=?,cred_headers=?,updated_at=? WHERE id=?`,
-		t.Name, t.Title, t.Description, t.Method, t.URL, js(t.Headers), t.Body, js(t.Params), js(t.CredHeaders), t.UpdatedAt, t.ID)
-	if err != nil && strings.Contains(err.Error(), "UNIQUE") {
-		return fmt.Errorf("工具标识 %q 已存在，请换一个", t.Name)
-	}
-	if err != nil {
-		return err
-	}
-	n, err := r.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n != 1 {
-		return errors.New("工具不存在，无法更新")
+	// Console writes may lower this tool, but never its historical source floors.
+	for source := range sources {
+		if _, err := w.Exec(`INSERT INTO tool_approval_sources(tool_id,source_request_id) VALUES(?,?) ON CONFLICT DO NOTHING`, t.ID, source); err != nil {
+			return err
+		}
+		if _, err := w.Exec(`INSERT INTO source_approval_floor(source_request_id,approval) VALUES(?,?)
+ON CONFLICT(source_request_id) DO UPDATE SET approval=CASE
+WHEN source_approval_floor.approval='always' OR excluded.approval='always' THEN 'always' ELSE 'off' END`, source, stricterApproval(previous, t.Approval)); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -748,6 +833,11 @@ func (s *Store) SaveToolInPack(t *Tool, packID int64) error {
 	var id int64
 	if err := tx.QueryRow(`SELECT id FROM packs WHERE id=?`, packID).Scan(&id); err != nil {
 		return fmt.Errorf("流程包不存在或无法读取：%w", err)
+	}
+	// MCP cannot lower the policy, including when saving under a new name.
+	t.Approval = defaultApproval(t.Method)
+	if err := inheritToolApproval(tx, t); err != nil {
+		return err
 	}
 	originalID := t.ID
 	if err := saveTool(tx, t); err != nil {

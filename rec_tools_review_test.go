@@ -280,6 +280,14 @@ func TestReview051Finding04SensitiveAncestry(t *testing.T) {
 	if label == nil || !label.Required || label.Default != "" {
 		t.Fatalf("renamed secret param: %+v", tool.Params)
 	}
+	if !label.Secret || !paramIsSecret(tool, *label) {
+		t.Fatal("renamed secret flag lost")
+	}
+	legacy := *label
+	legacy.Secret, legacy.Description = false, ""
+	if !paramIsSecret(tool, legacy) {
+		t.Fatal("legacy renamed secret location was not detected")
+	}
 	if strings.Contains(tool.Body, shortSecret) {
 		t.Fatal(tool.Body)
 	}

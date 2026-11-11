@@ -8,6 +8,7 @@ import (
 )
 
 type exportTool struct {
+	Approval    string            `json:"approval"`
 	Name        string            `json:"name"`
 	Title       string            `json:"title"`
 	Description string            `json:"description"`
@@ -88,7 +89,7 @@ func (a *App) Export() ([]byte, error) {
 		for k, v := range h {
 			h[k] = a.vault.Scrub(a.vault.ToRefs(v))
 		}
-		f.Tools = append(f.Tools, exportTool{t.Name, t.Title, t.Description, t.Method, a.vault.Scrub(a.vault.ToRefs(t.URL)), h, a.vault.Scrub(a.vault.ToRefs(t.Body)), t.Params, t.CredHeaders})
+		f.Tools = append(f.Tools, exportTool{t.Approval, t.Name, t.Title, t.Description, t.Method, a.vault.Scrub(a.vault.ToRefs(t.URL)), h, a.vault.Scrub(a.vault.ToRefs(t.Body)), t.Params, t.CredHeaders})
 	}
 	for _, p := range packs {
 		guide := a.vault.Scrub(strings.TrimSpace(p.Guide))
@@ -172,15 +173,9 @@ func (a *App) Import(b []byte) (*ImportResult, error) {
 	}
 	ids := map[string]int64{}
 	for _, et := range f.Tools {
-		t := &Tool{Name: et.Name, Title: et.Title, Description: et.Description, Method: et.Method, URL: et.URL, Headers: et.Headers, Body: et.Body, Params: et.Params, CredHeaders: et.CredHeaders}
+		t := &Tool{Approval: et.Approval, Name: et.Name, Title: et.Title, Description: et.Description, Method: et.Method, URL: et.URL, Headers: et.Headers, Body: et.Body, Params: et.Params, CredHeaders: et.CredHeaders}
 		if err := t.Normalize(); err != nil {
 			return res, errors.New(et.Name + ": " + err.Error())
-		}
-		if old, err := a.store.GetToolByName(t.Name); err == nil {
-			t.ID = old.ID
-			res.ToolsUpdated++
-		} else {
-			res.ToolsAdded++
 		}
 		for _, ref := range t.RenderRefs() {
 			_, n, _ := strings.Cut(ref, ".")
@@ -192,8 +187,15 @@ func (a *App) Import(b []byte) (*ImportResult, error) {
 				res.VaultToFill = append(res.VaultToFill, n)
 			}
 		}
-		if err := a.store.SaveTool(t); err != nil {
+		a.markSecretParams(t)
+		updated, err := a.store.ImportTool(t)
+		if err != nil {
 			return res, err
+		}
+		if updated {
+			res.ToolsUpdated++
+		} else {
+			res.ToolsAdded++
 		}
 		a.store.EnsureSite(t.URL)
 		ids[t.Name] = t.ID

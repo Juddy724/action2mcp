@@ -1,13 +1,13 @@
 *{box-sizing:border-box}
 :root{--bg:#f6f7fb;--card:#fff;--line:#e6e8ef;--text:#1f2330;--muted:#6b7280;--pri:#4f46e5;--pri2:#eef0ff;--red:#ef4444;--green:#10b981;--amber:#f59e0b}
 body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Noto Sans CJK SC",sans-serif}
-header{display:flex;align-items:center;gap:28px;padding:0 28px;height:60px;background:#fff;border-bottom:1px solid var(--line);position:sticky;top:0;z-index:10}
+header{display:flex;align-items:center;flex-wrap:wrap;gap:10px 20px;padding:10px 24px;min-height:60px;background:#fff;border-bottom:1px solid var(--line)}
 .brand{font-weight:700;font-size:17px;display:flex;align-items:center;gap:8px;white-space:nowrap}
 .brand small{font-weight:400;color:var(--muted);font-size:12px}
 .logo{width:22px;height:22px;border-radius:7px;background:var(--pri);display:inline-block;position:relative}
 .logo:after{content:"";position:absolute;left:7px;top:7px;width:8px;height:8px;border-radius:50%;background:#fff}
-nav{display:flex;gap:4px}
-nav a{padding:6px 14px;border-radius:8px;color:var(--text);text-decoration:none}
+nav{display:flex;flex-wrap:wrap;gap:4px}
+nav a{padding:6px 14px;border-radius:8px;color:var(--text);text-decoration:none;white-space:nowrap}
 nav a.active,nav a:hover{background:var(--pri2);color:var(--pri)}
 #statusbar{margin-left:auto;display:flex;align-items:center;gap:10px;font-size:13px}
 main{max-width:1600px;margin:24px auto;padding:0 24px}
@@ -53,7 +53,7 @@ tr.sel td{background:var(--pri2)}
 code{background:#f1f3f9;padding:1px 6px;border-radius:5px;font-size:12.5px}
 pre{background:#0f172a;color:#e2e8f0;padding:12px 14px;border-radius:8px;overflow:auto;font-size:12px;max-height:340px;margin:6px 0 0;white-space:pre-wrap;word-break:break-all}
 .split{display:grid;grid-template-columns:1.25fr 1fr;gap:16px;align-items:start}
-.detail{position:sticky;top:76px;max-height:calc(100vh - 96px);overflow:auto}
+.detail{position:sticky;top:calc(var(--console-top-height,60px) + 16px);max-height:calc(100vh - var(--console-top-height,60px) - 36px);overflow:auto}
 .url{max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .collapse-h{cursor:pointer;color:var(--muted);padding:10px;user-select:none}
 .collapse-h:hover{color:var(--pri)}
@@ -142,3 +142,59 @@ button.sm{padding:4px 10px;font-size:13px}
 .chip-x{border:none;background:none;color:#94a3b8;font-size:18px;line-height:1;padding:2px 6px;border-radius:6px;cursor:pointer}
 .chip-x:hover{background:#fee2e2;color:#dc2626}
 .pick-list{display:flex;flex-direction:column;gap:6px;margin-top:12px;max-height:55vh;overflow:auto}
+
+/* Approval notices and the header stay together at the top while scrolling. */
+#console-top{position:sticky;top:0;z-index:20}
+#approval-sound{white-space:nowrap}
+.approval-banner{background:#b45309;color:#fff;border-bottom:3px solid var(--amber)}
+.approval-banner[hidden]{display:none}
+.approval-banner button{display:flex;align-items:center;gap:14px;width:100%;padding:12px 28px;border:0;border-radius:0;background:transparent;color:inherit;text-align:left;font-size:16px}
+.approval-banner button:hover{background:#92400e}
+.approval-banner button span:last-child{margin-left:auto;font-size:13px;white-space:nowrap}
+.approval-banner button:focus-visible{outline:3px solid #fff;outline-offset:-5px}
+.approval-modal{z-index:70;padding:32px 16px}
+.approval-box{width:min(1140px,100%);background:var(--card)}
+.approval-box>h2{padding-right:32px;margin-bottom:6px}
+.approval-layout{display:grid;grid-template-columns:220px minmax(0,1fr);gap:24px;align-items:start;margin-top:20px}
+.approval-layout>aside{position:sticky;top:0;max-height:70vh;overflow:auto}
+.approval-layout>section{min-width:0}
+.approval-switcher{display:flex;flex-direction:column;gap:8px}
+.approval-item{display:flex;flex-direction:column;gap:2px;width:100%;text-align:left;overflow-wrap:anywhere;padding:10px 12px}
+.approval-item.on{border-color:var(--pri);background:var(--pri2);box-shadow:inset 3px 0 var(--pri)}
+.approval-item:focus-visible,.approval-actions button:focus-visible{outline:2px solid var(--pri);outline-offset:2px}
+.approval-meta{margin-bottom:18px;overflow-wrap:anywhere}
+#approval-tool-title{overflow-wrap:anywhere;margin-bottom:4px}
+.approval-params{display:grid;gap:12px}
+.approval-params label{display:block;min-width:0;overflow-wrap:anywhere}
+.approval-arg{display:block;width:100%;margin-top:4px}
+textarea.approval-arg{min-height:50px;resize:vertical}
+.approval-param-hint{display:block}
+.approval-preview-heading{margin-top:20px}
+.approval-preview-heading h3{margin:0}
+#approval-preview-state{margin:6px 0}
+#approval-preview{border:2px solid transparent;max-height:360px}
+#approval-preview.stale{opacity:.6;border-color:var(--amber)}
+.approval-feedback-label{display:block;margin:18px 0 6px}
+.approval-actions{position:sticky;bottom:0;background:var(--card);padding:12px 0;margin-top:10px;border-top:1px solid var(--line)}
+.approval-history-scroll{overflow-x:auto}
+.approval-history{min-width:1000px}
+.approval-history td{vertical-align:top;overflow-wrap:anywhere}
+.approval-history-heading h2{margin:0}
+.approval-history pre{min-width:190px;max-width:380px;max-height:180px;margin:0}
+.approval-time{min-width:165px}
+.approval-wrap{min-width:150px;max-width:280px;white-space:pre-wrap}
+.approval-status-pending{background:#fef3c7;color:#92400e;font-weight:600}
+.approval-status-approved,.approval-status-edited{background:#dcfce7;color:#15803d}
+.approval-status-rejected{background:#fee2e2;color:#b91c1c}
+.approval-status-timeout,.approval-status-cancelled{background:#f1f5f9;color:var(--muted)}
+#approval-timeout{width:110px}
+@media (max-width:1450px){.brand small{display:none}nav a{padding:6px 10px}}
+@media (max-width:800px){
+  header{padding:10px 16px;gap:8px 12px}nav{order:3;width:100%}#statusbar{order:4;flex-wrap:wrap;margin-left:0}
+  .approval-banner button{padding:12px 16px;flex-wrap:wrap;gap:4px 10px}
+  .approval-banner button span:last-child{margin-left:0}
+  .approval-modal{padding:12px 8px}.approval-box{padding:20px 16px}
+  .approval-layout{grid-template-columns:minmax(0,1fr);gap:18px}
+  .approval-layout>aside{position:static;max-height:180px}
+  .approval-switcher{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr))}
+}

@@ -542,7 +542,7 @@ func (a *App) buildRecDraft(q *ReqRecord, chosen []Candidate) (*Tool, error) {
 			if typ == "" {
 				typ = "string"
 			}
-			t.Params = append(t.Params, Param{Name: name, Type: typ, Required: reqd, Default: ex, Description: desc})
+			t.Params = append(t.Params, Param{Name: name, Type: typ, Required: reqd, Default: ex, Description: desc, Secret: c.Secret})
 			repl[c.Path] = "{{" + name + "}}"
 		}
 		body, err := rebuildMultipart(mpBody, mpBoundary, repl)
@@ -1334,6 +1334,7 @@ func (a *App) recSaveTool(mc *mcpCtx, args map[string]any) (string, bool) {
 				t.Params[i].Default = sp.Default
 			}
 			if c.Secret {
+				t.Params[i].Secret = true
 				// §1: a sensitive field is a required parameter with an empty
 				// default. Do not keep the captured value in the description.
 				t.Params[i].Default = ""
@@ -2627,7 +2628,7 @@ func newRecSecretParam(t *Tool, path string, v any) string {
 	for i := 2; used[name]; i++ {
 		name = fmt.Sprintf("%s_%d", base, i)
 	}
-	t.Params = append(t.Params, Param{Name: name, Type: recScalarType(v), Required: true, Description: removedSecretDesc})
+	t.Params = append(t.Params, Param{Name: name, Type: recScalarType(v), Required: true, Description: removedSecretDesc, Secret: true})
 	return "{{" + name + "}}"
 }
 
