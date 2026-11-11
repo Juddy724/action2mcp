@@ -267,7 +267,10 @@ WHEN source_approval_floor.approval='always' OR excluded.approval='always' THEN 
 	if err := s.migrateWSSiteOrigins(); err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec(`PRAGMA user_version=8`); err != nil {
+	if err := s.migrateV9SQLConsoleRowEnv(); err != nil {
+		return nil, err
+	}
+	if _, err := db.Exec(`PRAGMA user_version=9`); err != nil {
 		return nil, err
 	}
 	if runtime.GOOS != "windows" && path != "" && !strings.Contains(path, "mode=memory") && !strings.HasPrefix(path, ":") {

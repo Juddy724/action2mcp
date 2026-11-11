@@ -1234,8 +1234,8 @@ function openMWEditor(m) {
     ${m.fromRecording ? `<div class="full f-term"><label>录到的帧（只读，不会发送）</label><pre class="mono" style="max-height:160px;overflow:auto">${wsRender(m.recordedBody || '', '→')}</pre></div>
     <div class="full f-term"><div class="notice">保存的是终端式的文本帧模板。请另写一条模板，把命令的位置写成 <code>{{command}}</code>。上面录到的帧只作对照，不会写入模板，测试连接和以后的调用也都不会自动发出这些帧。查询参数如果每次不同，写成 <code>{{参数名}}</code>。登录用「登录中心」的 Cookie。二进制帧、子协议和按响应决定的初始化不在这个连接里重放。</div></div>` : `<div class="full f-term"><p class="muted small" style="margin:0">认证用这个地址对应网站在「登录中心」里的 Cookie，不在这里填密码。默认的两行帧是：先发命令，再发一个回车。</p></div>`}
     <div class="full f-sql"><p class="muted small" style="margin:0">在消息里用 <code>{{sql}}</code> 表示要执行的语句。spaceCode、dsId、envId、envType、dbType 写成 <code>{{ds.space_code}}</code>、<code>{{ds.ds_id}}</code> 等，保存时按所选数据源自动填入，不会成为 AI 参数。登录令牌用 <code>{{header.sso-epctoken}}</code>，不要写入字面值。测试连接只做握手，不会执行 SQL。</p></div>
-    <div class="full f-sql"><h3 style="margin:10px 0 4px">默认环境参数</h3><p class="muted small" style="margin:0 0 8px">各数据源共用。某一行需要不同值时，点该行「高级」覆盖。</p>
-      <div class="row ds-defaults"><label>spaceCode <input id="mw-space" class="mono" value="${esc(sd.space_code || '')}"></label><label>envId <input id="mw-envid" class="mono" value="${esc(asNumOrStr(sd.env_id))}"></label><label>envType <input id="mw-envtype" class="mono" value="${esc(sd.env_type || '')}"></label><label>dbType <input id="mw-dbtype" class="mono" value="${esc(sd.db_type || '')}"></label></div></div>
+    <div class="full f-sql"><h3 style="margin:10px 0 4px">默认环境参数</h3><p class="muted small" style="margin:0 0 8px">各数据源共用的 spaceCode、dbType。某一行需要不同值时，点该行「高级」覆盖。envId 和 envType 按行填写，三个值一起确定一个库。</p>
+      <div class="row ds-defaults"><label>spaceCode <input id="mw-space" class="mono" value="${esc(sd.space_code || '')}"></label><label>dbType <input id="mw-dbtype" class="mono" value="${esc(sd.db_type || '')}"></label></div></div>
     ${dsTableHTML(c.datasources)}` : ''}
     ${t === 'mysql' ? `<label>类型</label><div class="muted small">MySQL / OceanBase（MySQL 模式）/ MariaDB / TiDB 等兼容 MySQL 协议的数据库</div>` : ''}
     ${t === 'mq' ? `<label>消息队列</label><select id="mw-mqkind" onchange="mwFormUI()">${Object.entries(MW.mq_kinds).map(([k, v]) => `<option value="${k}" ${c.mq_kind === k ? 'selected' : ''}>${v}</option>`).join('')}</select>` : ''}
@@ -1275,30 +1275,31 @@ function permSwitchHTML(d, on) {
   return `<label class="perm-sw"><label class="switch"><input type="checkbox" data-perm="${esc(d.key)}" ${on ? 'checked' : ''}><span></span></label><div><b>${esc(d.label)}</b><div class="muted small">${esc(d.hint)}</div></div></label>`;
 }
 function dsTableHTML(rows) {
-  const list = (rows && rows.length) ? rows : [{ alias: '', ds_id: '', description: '' }];
-  return `<div class="full f-sql"><div class="row" style="margin:10px 0 6px"><h3 style="margin:0">数据源</h3><span class="muted small grow">填写「名称」「数据源ID」「说明（给AI看）」。名称和说明会列在工具描述里，供 AI 选择数据库；数据源 ID 只保存在本机。</span><button type="button" class="sm" onclick="addDSRow()">添加</button></div>
-    <table class="ds-table"><thead><tr><th>名称</th><th>数据源ID</th><th>说明（给AI看）</th><th></th></tr></thead>
+  const list = (rows && rows.length) ? rows : [{ alias: '', ds_id: '', env_id: '', env_type: 'PROD', description: '' }];
+  return `<div class="full f-sql"><div class="row" style="margin:10px 0 6px"><h3 style="margin:0">数据源</h3><span class="muted small grow">填写「名称」「数据源 ID」「envId」「envType」「说明（给 AI 看）」。名称和说明会列在工具描述里，供 AI 选择数据库。数据源 ID、envId、envType 三个值一起确定一个库，只保存在本机。envType 默认为 PROD。可在数据平台对该库录制一次查询，从 execute 消息里复制这三个值。</span><button type="button" class="sm" onclick="addDSRow()">添加</button></div>
+    <table class="ds-table"><thead><tr><th>名称</th><th>数据源ID</th><th>envId</th><th>envType</th><th>说明（给AI看）</th><th></th></tr></thead>
     <tbody id="mw-ds-body">${list.map(dsRowHTML).join('')}</tbody></table></div>`;
 }
 function dsRowHTML(d) {
   d = d || {};
-  const adv = !!(d.space_code || d.env_id || d.env_type || d.db_type);
+  const adv = !!(d.space_code || d.db_type);
+  const envType = (d.env_type == null || d.env_type === '') ? 'PROD' : d.env_type;
   return `<tr class="ds-row${adv ? ' adv-on' : ''}">
     <td><input class="ds-alias" placeholder="如 orders" value="${esc(d.alias || '')}"></td>
     <td><input class="ds-id mono" placeholder="数据源 ID" value="${esc(asNumOrStr(d.ds_id))}"></td>
+    <td><input class="ds-envid mono" placeholder="envId" value="${esc(asNumOrStr(d.env_id))}"></td>
+    <td><input class="ds-envtype mono" placeholder="PROD" value="${esc(envType)}"></td>
     <td><input class="ds-desc" placeholder="例如：订单相关表" value="${esc(d.description || '')}"></td>
     <td class="ds-actions"><button type="button" class="sm" onclick="toggleDSAdv(this)">高级</button> <button type="button" class="danger sm" onclick="delDSRow(this)">删除</button>
       <div class="ds-adv"><div class="row" style="margin-top:6px">
         <input class="ds-space" placeholder="spaceCode 覆盖" value="${esc(d.space_code || '')}">
-        <input class="ds-envid mono" placeholder="envId 覆盖" value="${esc(asNumOrStr(d.env_id))}">
-        <input class="ds-envtype" placeholder="envType 覆盖" value="${esc(d.env_type || '')}">
         <input class="ds-dbtype" placeholder="dbType 覆盖" value="${esc(d.db_type || '')}">
       </div></div></td></tr>`;
 }
 function addDSRow() {
   const tb = $('#mw-ds-body');
   if (!tb) return;
-  tb.insertAdjacentHTML('beforeend', dsRowHTML({}));
+  tb.insertAdjacentHTML('beforeend', dsRowHTML({ env_type: 'PROD' }));
 }
 function delDSRow(btn) {
   const tr = btn.closest('tr');
@@ -1318,18 +1319,18 @@ function collectDatasources() {
       description: ($('.ds-desc', tr).value || '').trim(),
     };
     if (d.ds_id === '') delete d.ds_id;
+    const ei = maybeJSONNum(($('.ds-envid', tr).value || ''));
+    const et = ($('.ds-envtype', tr).value || '').trim() || 'PROD';
+    if (ei !== '') d.env_id = ei;
+    d.env_type = et;
     if (tr.classList.contains('adv-on')) {
       const sc = ($('.ds-space', tr).value || '').trim();
-      const ei = maybeJSONNum($('.ds-envid', tr).value);
-      const et = ($('.ds-envtype', tr).value || '').trim();
       const dt = ($('.ds-dbtype', tr).value || '').trim();
       if (sc) d.space_code = sc;
-      if (ei !== '') d.env_id = ei;
-      if (et) d.env_type = et;
       if (dt) d.db_type = dt;
     }
     return d;
-  }).filter(d => d.alias || d.ds_id || d.description);
+  }).filter(d => d.alias || d.ds_id || d.env_id || d.description);
 }
 function looksLikeTermMsgs(s) { return s.includes('{{command}}') && !s.includes('{{sql}}'); }
 function looksLikeDefaultSQLMsgs(s) { return s.trim() === DEFAULT_WS_SQL_MSG; }
@@ -1409,11 +1410,8 @@ function mwCollect(id) {
     if (cfg.ws_mode === 'sql_console') {
       const defaults = {
         space_code: ($('#mw-space') && $('#mw-space').value || '').trim(),
-        env_id: maybeJSONNum($('#mw-envid') && $('#mw-envid').value),
-        env_type: ($('#mw-envtype') && $('#mw-envtype').value || '').trim(),
         db_type: ($('#mw-dbtype') && $('#mw-dbtype').value || '').trim(),
       };
-      if (defaults.env_id === '') delete defaults.env_id;
       cfg.sql_defaults = defaults;
       cfg.datasources = collectDatasources();
       cfg.command_allow = [];
