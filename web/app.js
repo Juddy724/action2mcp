@@ -960,12 +960,15 @@ async function pageSites(app) {
         ${s.last_error && s.status !== 'valid' ? `<div class="muted small" style="max-width:280px">${esc(s.last_error)}</div>` : ''}
         ${s.cooldown ? `<div class="small st-bad">已暂停自动登录（密码错误）</div>` : ''}</td>
       <td class="small">${esc(s.last_login_at || '-')}<div class="muted small">自动登录 ${s.login_count} 次</div></td>
-      <td style="text-align:right;white-space:nowrap"><button onclick="siteRelogin(${s.id}, this)">测试重新登录</button> <button onclick="siteOpen(${s.id})">打开浏览器登录</button>
+      <td style="text-align:right;white-space:nowrap">${s.pending ? `<button onclick="siteCancel(${s.id}, this)">取消</button> ` : ''}<button onclick="siteRelogin(${s.id}, this)">测试重新登录</button> <button onclick="siteOpen(${s.id})">打开浏览器登录</button>
         <button onclick="editSite(${s.id})">编辑</button> <button class="danger" onclick="delSite(${s.id})">删除</button></td></tr>`; }).join('')}
     </tbody></table>`}
     <div class="row" style="margin-top:12px"><button onclick="editSite(0)">＋ 添加网站</button><button onclick="render()">刷新</button></div>
   </div>
   <div class="card small muted">提示：企业微信本身的登录（扫码）过期时，AI 调用会返回“企业微信登录已过期，请在弹出的窗口扫码后重试”，并自动弹出登录窗口；扫码后再让 AI 重试即可。</div>`;
+  const pending = SITES.some(s => s.pending);
+  clearTimeout(pageSites._poll);
+  if (pending) pageSites._poll = setTimeout(() => { if (ROUTE === 'sites' || location.hash === '#/sites') render(); }, 1500);
 }
 async function siteRelogin(id, btn) {
   btn.disabled = true; btn.textContent = '登录中…';
@@ -977,7 +980,13 @@ async function siteRelogin(id, btn) {
   render();
 }
 async function siteOpen(id) {
-  try { await api('POST', `/api/sites/${id}/open`); toast('已打开登录窗口，登录完成后会自动保存登录态并关闭窗口', 5000); } catch (e) { toast(e.message, 5000); }
+  try { await api('POST', `/api/sites/${id}/open`); toast('已打开登录窗口，登录完成后会自动保存登录态并关闭窗口', 5000); render(); } catch (e) { toast(e.message, 5000); }
+}
+async function siteCancel(id, btn) {
+  if (btn) btn.disabled = true;
+  try { await api('POST', `/api/sites/${id}/cancel`, {}); toast('已取消登录等待'); }
+  catch (e) { toast(e.message, 5000); }
+  render();
 }
 async function delSite(id) { if (!confirm('删除这个网站的登录配置？（不影响工具，下次调用时会重新创建默认配置）')) return; await api('DELETE', '/api/sites/' + id); render(); }
 let VAULT_NAMES = [];
@@ -989,7 +998,7 @@ async function editSite(id) {
   openModal(`
   <h2>${id ? '编辑登录配置' : '添加网站'}</h2>
   <div class="form-grid">
-    <label>网站地址 *</label><input id="s-origin" class="mono" value="${esc(s.origin)}" placeholder="https://zentao.example.com">
+    <label>网站地址 *</label><div><input id="s-origin" class="mono" value="${esc(s.origin)}" placeholder="https://app.example.com"><div class="muted small">请填写 http:// 或 https://。WebSocket 地址请改成对应的网页源（wss → https，ws → http）。</div></div>
     <label>名称</label><input id="s-name" value="${esc(s.name)}" placeholder="禅道">
     <label>登录方式</label><select id="s-method" onchange="siteMethodUI()">${Object.entries(METHOD_NAMES).map(([k, n]) => `<option value="${k}" ${k === s.method ? 'selected' : ''}>${n}</option>`).join('')}</select>
     <label>登录入口</label><input id="s-entry" class="mono" value="${esc(s.entry_url)}" placeholder="留空 = 网站首页（会自动跳到登录页）">
@@ -1028,6 +1037,27 @@ async function saveSite(id) {
     form: { mode: $('#s-mode').value, username_ref: $('#s-user').value, password_ref: $('#s-pass').value, login_url: $('#s-loginurl').value.trim(), csrf_field: $('#s-csrf').value.trim(),
       user_selector: $('#s-usel').value.trim(), pass_selector: $('#s-psel').value.trim(), submit_selector: $('#s-ssel').value.trim(), request: old && old.form ? old.form.request : null },
   };
+  const mapOrigin = v => {
+    if (!v) return v;
+    try {
+      const u = new URL(v.includes('://') ? v : ('https://' + v));
+      if (u.protocol === 'wss:') u.protocol = 'https:';
+      else if (u.protocol === 'ws:') u.protocol = 'http:';
+      if (u.protocol === 'http:' || u.protocol === 'https:') return u.origin;
+    } catch {}
+    return v;
+  };
+  const httpURL = (v, field) => {
+    if (!v) return '';
+    try {
+      const u = new URL(v);
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return field + '必须是 http:// 或 https:// 地址' + (u.protocol === 'ws:' || u.protocol === 'wss:' ? '，不能使用 ' + u.protocol + '//' : '');
+    } catch { return field + '格式不正确，请填写 http:// 或 https:// 地址'; }
+    return '';
+  };
+  s.origin = mapOrigin(s.origin);
+  const bad = httpURL(s.origin, '网站地址') || httpURL(s.entry_url, '登录入口') || httpURL(s.check_url, '检测地址') || httpURL(s.form.login_url, '登录页');
+  if (bad) { toast('保存失败：' + bad, 5000); return; }
   try { id ? await api('PUT', '/api/sites/' + id, s) : await api('POST', '/api/sites', s); closeModal(); toast('已保存登录配置'); render(); }
   catch (e) { toast('保存失败：' + e.message, 5000); }
 }

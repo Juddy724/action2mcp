@@ -222,6 +222,23 @@ func (a *App) registerV2(mux *http.ServeMux) {
 		}
 		writeJSON(w, 200, map[string]any{"ok": true})
 	})
+	mux.Handle("POST /api/sites/{id}/cancel", a.approvalOnly(func(w http.ResponseWriter, r *http.Request) {
+		var in map[string]any
+		if err := readJSON(r, &in); err != nil && r.ContentLength > 0 {
+			writeErr(w, 400, err)
+			return
+		}
+		s, err := a.store.GetSite(pathID(r))
+		if err != nil {
+			writeErr(w, 404, errors.New("站点不存在"))
+			return
+		}
+		if err := a.CancelLogin(s); err != nil {
+			writeErr(w, 400, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true})
+	}))
 
 	// ---------- 录制：保存为登录配置 ----------
 	mux.HandleFunc("POST /api/recordings/{id}/detect-login", func(w http.ResponseWriter, r *http.Request) {

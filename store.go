@@ -264,6 +264,9 @@ WHEN source_approval_floor.approval='always' OR excluded.approval='always' THEN 
 	if err := s.migrateV8WSToolsToSQLMiddleware(); err != nil {
 		return nil, err
 	}
+	if err := s.migrateWSSiteOrigins(); err != nil {
+		return nil, err
+	}
 	if _, err := db.Exec(`PRAGMA user_version=8`); err != nil {
 		return nil, err
 	}

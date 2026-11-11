@@ -137,6 +137,9 @@ func (a *App) registerMW(mux *http.ServeMux) {
 			writeErr(w, 400, err)
 			return
 		}
+		if m.Type == "websocket" && strings.TrimSpace(m.Config.URL) != "" {
+			a.store.EnsureSite(m.Config.URL)
+		}
 		a.mwPoolDrop(m.ID)
 		a.broadcastToolsChanged()
 		for _, v := range a.mwViews() {

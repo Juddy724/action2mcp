@@ -22,10 +22,64 @@ func loginErr(f string, a ...any) error { return &LoginErr{fmt.Sprintf(f, a...)}
 
 const (
 	formFailCooldown = 10 * time.Minute
-	pendingMax       = 10 * time.Minute
+	pendingLoginMax  = 5 * time.Minute
 	browserLoginMax  = 35 * time.Second
 	ssoStuckAfter    = 4 * time.Second
 )
+
+// loginSurface is a page opened for interactive login (a real browser tab or a test fake).
+type loginSurface interface {
+	info() (pageInfo, error)
+	close()
+	navigate(u string) error
+	reload() error
+}
+
+type loginBrowser interface {
+	Alive() bool
+	Cookies() ([]Cookie, error)
+}
+
+func (a *App) loginWait() time.Duration {
+	if a != nil && a.pendingLoginMax > 0 {
+		return a.pendingLoginMax
+	}
+	return pendingLoginMax
+}
+
+func formatLoginWait(d time.Duration) string {
+	if d >= time.Minute && d%time.Minute == 0 {
+		return fmt.Sprintf("%d 分钟", int(d.Minutes()))
+	}
+	if d >= time.Second {
+		return fmt.Sprintf("%d 秒", int(d.Seconds()))
+	}
+	return d.String()
+}
+
+func sleepCancel(d time.Duration, cancel <-chan struct{}) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-cancel:
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+func browserHTTPURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", errors.New("登录地址不能为空")
+	}
+	mapped := mapWSToHTTPURL(raw)
+	u, err := url.Parse(mapped)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return "", errors.New("登录地址必须是 http:// 或 https://")
+	}
+	return mapped, nil
+}
 
 var (
 	loginFailRe = regexp.MustCompile(`(?i)(密码错误|密码不正确|密码有误|用户名或密码|账号或密码|帐号或密码|用户名不存在|账号不存在|帐号不存在|用户不存在|登录失败|登陆失败|认证失败|验证码|invalid\s*(user\s*name|username|password|credentials?|login)|incorrect|wrong\s*password|bad\s*credentials|authentication\s*failed|login\s*failed)`)
@@ -70,7 +124,7 @@ func (a *App) ReloginCount(origin string) int {
 func (a *App) pendingErr(site *Site, st *siteState) error {
 	a.smu.Lock()
 	defer a.smu.Unlock()
-	if st.pending && time.Since(st.pendingAt) < pendingMax {
+	if st.pending && time.Since(st.pendingAt) < a.loginWait() {
 		return loginErr("「%s」正在等待你在弹出的浏览器窗口中完成登录（%s），登录完成后再重试即可", site.DisplayName(), st.pendingMsg)
 	}
 	st.pending = false
@@ -321,6 +375,7 @@ func (a *App) browserLogin(site *Site, fill bool) error {
 		stableHref                       string
 		stableSince                      time.Time
 		lastErr                          string
+		headerReload                     bool
 		deadline                         = time.Now().Add(browserLoginMax)
 	)
 	for time.Now().Before(deadline) {
@@ -349,6 +404,15 @@ func (a *App) browserLogin(site *Site, fill bool) error {
 				cs, err := bs.Cookies()
 				if err == nil && len(cs) > 0 {
 					a.store.ReplaceCookies(cs)
+				}
+				if miss := a.missingSiteHeaders(site); len(miss) > 0 {
+					if !headerReload {
+						headerReload = true
+						_ = tab.reload()
+					}
+					// Keep looping until the header is harvested or the deadline hits.
+					stableSince = time.Now()
+					continue
 				}
 				return nil
 			}
@@ -480,19 +544,41 @@ func (a *App) ssoWindowOpen(host string) bool {
 	a.smu.Lock()
 	defer a.smu.Unlock()
 	for _, st := range a.sstates {
-		if st.pending && st.ssoHost == host && time.Since(st.pendingAt) < pendingMax {
+		if st.pending && st.ssoHost == host && time.Since(st.pendingAt) < a.loginWait() {
 			return true
 		}
 	}
 	return false
 }
 
+func (a *App) openLoginSurface(target string) (loginBrowser, loginSurface, error) {
+	if a.openLogin != nil {
+		return a.openLogin(target)
+	}
+	bs, tab, err := a.openVisibleTab(target)
+	if err != nil {
+		return nil, nil, err
+	}
+	return bs, tab, nil
+}
+
 func (a *App) popLogin(site *Site, st *siteState, nu *needUser, block bool) error {
+	_ = block // always track pending so the console can cancel or time out
 	target := nu.url
 	if target == "" || nu.reason == "manual" || nu.reason == "nocreds" {
 		target = site.Entry()
 	}
-	bs, tab, err := a.openVisibleTab(target)
+	target, err := browserHTTPURL(target)
+	if err != nil {
+		return err
+	}
+	a.smu.Lock()
+	if st.pending && time.Since(st.pendingAt) < a.loginWait() {
+		a.smu.Unlock()
+		return errors.New("正在等待登录，请先在弹出的窗口中完成登录，或点「取消」")
+	}
+	a.smu.Unlock()
+	bs, tab, err := a.openLoginSurface(target)
 	if err != nil {
 		return err
 	}
@@ -500,63 +586,238 @@ func (a *App) popLogin(site *Site, st *siteState, nu *needUser, block bool) erro
 	if nu.reason != "sso" {
 		short = "等待登录"
 	}
-	if block {
-		a.smu.Lock()
-		st.pending, st.pendingAt, st.pendingMsg = true, time.Now(), short
-		st.ssoHost = ""
-		if nu.reason == "sso" {
-			st.ssoHost = hostOf(nu.url)
-		}
-		a.smu.Unlock()
+	cancel := make(chan struct{})
+	a.smu.Lock()
+	st.pending, st.pendingAt, st.pendingMsg = true, time.Now(), short
+	st.ssoHost = ""
+	if nu.reason == "sso" {
+		st.ssoHost = hostOf(nu.url)
 	}
+	st.cancel = cancel
+	st.loginSurf = tab
+	a.smu.Unlock()
 	go func() {
-		if block {
-			defer func() {
-				a.smu.Lock()
+		defer func() {
+			a.smu.Lock()
+			if st.cancel == cancel {
 				st.pending = false
-				a.smu.Unlock()
-			}()
+				st.cancel = nil
+				st.loginSurf = nil
+			}
+			a.smu.Unlock()
+		}()
+		a.watchLoginWindow(site, st, bs, tab, cancel)
+	}()
+	return nil
+}
+
+func (a *App) watchLoginWindow(site *Site, st *siteState, bs loginBrowser, tab loginSurface, cancel <-chan struct{}) {
+	var (
+		stableHref  string
+		stableSince time.Time
+		fails       int
+		didHarvest  bool
+		lastCheck   time.Time
+		checkedOK   bool
+		poll        = 400 * time.Millisecond
+		end         = time.Now().Add(a.loginWait())
+	)
+	for {
+		if !sleepCancel(poll, cancel) {
+			tab.close()
+			a.store.SetSiteError(site.ID, "已取消登录等待")
+			log.Printf("已取消登录等待：%s", site.Origin)
+			return
 		}
-		var stableHref string
-		var stableSince time.Time
-		fails := 0
-		end := time.Now().Add(pendingMax)
-		for time.Now().Before(end) {
-			time.Sleep(700 * time.Millisecond)
-			if !bs.Alive() {
+		if time.Now().After(end) {
+			tab.close()
+			msg := "登录等待超时（" + formatLoginWait(a.loginWait()) + "）"
+			if miss := a.missingSiteHeaders(site); len(miss) > 0 {
+				msg += "，尚未收获请求头：" + strings.Join(miss, "、")
+			}
+			a.store.SetSiteStatus(site.ID, "invalid", msg, false)
+			log.Printf("%s：%s", site.Origin, msg)
+			return
+		}
+		if bs != nil && !bs.Alive() {
+			a.store.SetSiteError(site.ID, "登录窗口已关闭")
+			log.Printf("登录窗口已关闭：%s", site.Origin)
+			return
+		}
+		pi, err := tab.info()
+		if err != nil {
+			fails++
+			if fails > 5 {
+				a.store.SetSiteError(site.ID, "登录窗口已关闭")
+				log.Printf("登录窗口已关闭：%s", site.Origin)
 				return
 			}
-			pi, err := tab.info()
-			if err != nil {
-				fails++
-				if fails > 5 {
-					return // tab closed by the user
+			continue
+		}
+		fails = 0
+		loggedIn := site.loggedInPage(pi)
+		if !loggedIn && pi.Ready == "complete" {
+			if checkedOK && time.Since(lastCheck) < 2*time.Second {
+				loggedIn = true
+			} else if lastCheck.IsZero() || time.Since(lastCheck) >= 2*time.Second {
+				if bs != nil {
+					if cs, err := bs.Cookies(); err == nil && len(cs) > 0 {
+						a.store.ReplaceCookies(cs)
+					}
 				}
-				continue
+				lastCheck = time.Now()
+				if ok, _ := a.CheckSite(site); ok {
+					loggedIn, checkedOK = true, true
+				} else {
+					checkedOK = false
+				}
 			}
-			fails = 0
-			if !site.loggedInPage(pi) {
-				stableHref = ""
-				continue
-			}
-			if stableHref != pi.Href {
-				stableHref, stableSince = pi.Href, time.Now()
-				continue
-			}
-			if time.Since(stableSince) < 1200*time.Millisecond {
-				continue
-			}
+		}
+		if !loggedIn {
+			stableHref = ""
+			continue
+		}
+		if stableHref != pi.Href {
+			stableHref, stableSince = pi.Href, time.Now()
+			continue
+		}
+		if time.Since(stableSince) < 300*time.Millisecond {
+			continue
+		}
+		if bs != nil {
 			if cs, err := bs.Cookies(); err == nil && len(cs) > 0 {
 				a.store.ReplaceCookies(cs)
 			}
-			a.bumpGen(st)
-			a.store.SetSiteStatus(site.ID, "valid", "", true)
-			log.Printf("已在弹出的窗口中完成登录：%s", site.Origin)
-			tab.close()
-			return
 		}
-	}()
+		if miss := a.missingSiteHeaders(site); len(miss) > 0 {
+			if !didHarvest {
+				didHarvest = true
+				entry, err := browserHTTPURL(site.Entry())
+				if err != nil {
+					entry = site.Origin + "/"
+				}
+				if rerr := tab.reload(); rerr != nil {
+					_ = tab.navigate(entry)
+				} else if !sameSite(pi.Href, site.Origin) {
+					_ = tab.navigate(entry)
+				}
+				log.Printf("%s：已登录，正在刷新页面以收获请求头 %s", site.Origin, strings.Join(miss, "、"))
+			}
+			continue
+		}
+		a.bumpGen(st)
+		a.store.SetSiteStatus(site.ID, "valid", "", true)
+		log.Printf("已在弹出的窗口中完成登录：%s", site.Origin)
+		tab.close()
+		return
+	}
+}
+
+// CancelLogin stops a waiting interactive login, closes the window it opened, and resets the waiting state.
+func (a *App) CancelLogin(site *Site) error {
+	if site == nil {
+		return errors.New("站点不存在")
+	}
+	st := a.state(site.Origin)
+	a.smu.Lock()
+	if !st.pending {
+		a.smu.Unlock()
+		return errors.New("当前没有等待中的登录")
+	}
+	ch, tab := st.cancel, st.loginSurf
+	a.smu.Unlock()
+	if ch != nil {
+		select {
+		case <-ch:
+		default:
+			close(ch)
+		}
+	}
+	if tab != nil {
+		tab.close()
+	}
+	// Give the watcher a moment to record the cancelled state.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		a.smu.Lock()
+		pending := st.pending
+		a.smu.Unlock()
+		if !pending {
+			return nil
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	a.smu.Lock()
+	st.pending = false
+	a.smu.Unlock()
+	a.store.SetSiteError(site.ID, "已取消登录等待")
 	return nil
+}
+
+func (a *App) requiredSiteHeaders(site *Site) []string {
+	if a == nil || a.store == nil || site == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	add := func(names ...string) {
+		for _, n := range names {
+			n = headerNameKey(n)
+			if n == "" || n == "cookie" || n == "authorization" || !IsCredHeader(n) {
+				continue
+			}
+			if !seen[n] {
+				seen[n] = true
+				out = append(out, n)
+			}
+		}
+	}
+	addRefs := func(parts ...string) {
+		for _, s := range parts {
+			for _, g := range placeholderRe.FindAllStringSubmatch(s, -1) {
+				if strings.HasPrefix(g[1], "header.") {
+					add(strings.TrimPrefix(g[1], "header."))
+				}
+			}
+		}
+	}
+	if tools, err := a.store.ListTools(); err == nil {
+		for _, t := range tools {
+			if !sameSite(credOrigin(t.URL), site.Origin) {
+				continue
+			}
+			addRefs(t.URL, t.Body)
+			for _, v := range t.Headers {
+				addRefs(v)
+			}
+			for _, msg := range t.Config.Messages {
+				addRefs(msg)
+			}
+			add(t.CredHeaders...)
+		}
+	}
+	if ms, err := a.store.ListMiddleware(); err == nil {
+		for _, m := range ms {
+			if m.Type != "websocket" || !sameSite(credOrigin(m.Config.URL), site.Origin) {
+				continue
+			}
+			add(collectHeaderRefs(m)...)
+		}
+	}
+	if site.Form.Request != nil {
+		add(site.Form.Request.CredHeaders...)
+	}
+	return out
+}
+
+func (a *App) missingSiteHeaders(site *Site) []string {
+	var miss []string
+	for _, name := range a.requiredSiteHeaders(site) {
+		if _, err := a.GetSiteHeader(site.Origin, name); err != nil {
+			miss = append(miss, name)
+		}
+	}
+	return miss
 }
 
 // ---------- HTTP replay of a recorded login request ----------

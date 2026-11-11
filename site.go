@@ -176,6 +176,18 @@ func (st *Store) saveSite(s *Site) error {
 	if s.Origin == "" {
 		return errors.New("网站地址不能为空")
 	}
+	if err := requireHTTPOrigin(s.Origin, "网站地址"); err != nil {
+		return err
+	}
+	if err := requireHTTPLoginURL(s.EntryURL, "登录入口"); err != nil {
+		return err
+	}
+	if err := requireHTTPLoginURL(s.CheckURL, "检测地址"); err != nil {
+		return err
+	}
+	if err := requireHTTPLoginURL(s.Form.LoginURL, "登录页"); err != nil {
+		return err
+	}
 	switch s.Method {
 	case MethodSSO, MethodForm, MethodManual:
 	default:
@@ -223,13 +235,118 @@ func (st *Store) SetSiteStatus(id int64, status, lastErr string, loggedIn bool) 
 	st.db.Exec(`UPDATE sites SET status=?,last_error=?,last_check_at=? WHERE id=?`, status, lastErr, ts, id)
 }
 
+// SetSiteError records a message without changing the current validity status
+// (used when the user cancels a wait or closes the login window).
+func (st *Store) SetSiteError(id int64, lastErr string) {
+	st.db.Exec(`UPDATE sites SET last_error=?,last_check_at=? WHERE id=?`, lastErr, now(), id)
+}
+
 func (st *Store) DeleteSite(id int64) {
 	st.siteMu.Lock()
 	defer st.siteMu.Unlock()
 	st.db.Exec(`DELETE FROM sites WHERE id=?`, id)
 }
 
+// requireHTTPOrigin checks that origin is already an http(s) site origin
+// (ws/wss must have been mapped by normalizeOrigin / credOrigin first).
+func requireHTTPOrigin(origin, field string) error {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return errors.New(field + "必须是 http:// 或 https:// 地址（WebSocket 的 wss:// 会按 https:// 保存，ws:// 按 http:// 保存）")
+	}
+	return nil
+}
+
+// requireHTTPLoginURL validates a user-editable login-related URL. Empty is allowed.
+// Unlike site origin, ws/wss is not silently remapped: the login page itself must be http(s).
+func requireHTTPLoginURL(raw, field string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return errors.New(field + "格式不正确，请填写 http:// 或 https:// 地址")
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https":
+		return nil
+	case "ws", "wss":
+		return errors.New(field + "必须是 http:// 或 https:// 地址，不能使用 " + u.Scheme + "://")
+	default:
+		return errors.New(field + "必须是 http:// 或 https:// 地址")
+	}
+}
+
+// mapWSToHTTPURL rewrites ws:// → http:// and wss:// → https://, leaving other URLs unchanged.
+func mapWSToHTTPURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return raw
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "wss":
+		u.Scheme = "https"
+	case "ws":
+		u.Scheme = "http"
+	default:
+		return raw
+	}
+	return u.String()
+}
+
+func remapSiteLoginURLs(s *Site) bool {
+	changed := false
+	if v := mapWSToHTTPURL(s.EntryURL); v != s.EntryURL {
+		s.EntryURL, changed = v, true
+	}
+	if v := mapWSToHTTPURL(s.CheckURL); v != s.CheckURL {
+		s.CheckURL, changed = v, true
+	}
+	if v := mapWSToHTTPURL(s.Form.LoginURL); v != s.Form.LoginURL {
+		s.Form.LoginURL, changed = v, true
+	}
+	return changed
+}
+
+// migrateWSSiteOrigins remaps login-center origins stored as ws:// or wss://
+// to the matching http:// or https:// origin. Idempotent.
+func (st *Store) migrateWSSiteOrigins() error {
+	st.siteMu.Lock()
+	defer st.siteMu.Unlock()
+	for _, s := range st.ListSites() {
+		mapped := credOrigin(s.Origin)
+		urlsChanged := remapSiteLoginURLs(s)
+		if mapped == "" || mapped == s.Origin {
+			if urlsChanged {
+				if err := st.saveSite(s); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		other, err := scanSite(st.db.QueryRow(`SELECT `+siteCols+` FROM sites WHERE origin=?`, mapped))
+		if err == nil && other != nil && other.ID != s.ID {
+			// Keep the already-correct http(s) row; drop the ws/wss duplicate.
+			if _, err := st.db.Exec(`DELETE FROM sites WHERE id=?`, s.ID); err != nil {
+				return err
+			}
+			continue
+		}
+		s.Origin = mapped
+		if err := st.saveSite(s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // EnsureSite returns the site for a URL, creating a default entry for a new host.
+// WebSocket addresses are stored under their http(s) origin (wss→https, ws→http).
 func (st *Store) EnsureSite(rawURL string) *Site {
 	o := originOf(rawURL)
 	if o == "" {
@@ -378,6 +495,8 @@ type siteState struct {
 	pendingAt  time.Time
 	ssoHost    string // host of the SSO page shown in the pending window
 	relogins   int
+	cancel     chan struct{}
+	loginSurf  loginSurface
 }
 
 func (a *App) state(origin string) *siteState {

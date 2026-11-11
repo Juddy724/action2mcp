@@ -439,17 +439,7 @@ type wsFrame struct {
 }
 
 func browserOrigin(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" {
-		return ""
-	}
-	switch strings.ToLower(u.Scheme) {
-	case "wss":
-		u.Scheme = "https"
-	case "ws":
-		u.Scheme = "http"
-	}
-	return strings.ToLower(u.Scheme + "://" + u.Host)
+	return credOrigin(raw)
 }
 
 func runWSSession(ctx context.Context, wsURL string, header http.Header, messages []string, promptNeedle string, maxBytes int) (string, bool, error) {
