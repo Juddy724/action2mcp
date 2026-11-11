@@ -6,12 +6,12 @@
 
 最新版本：[Releases 页面](https://github.com/Juddy724/action2mcp/releases/latest)
 
-| 平台 | 安装包 (v0.5.7) |
+| 平台 | 安装包 (v0.5.8) |
 |---|---|
-| macOS (Apple 芯片) | [Action2MCP-0.5.7-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.7/Action2MCP-0.5.7-macOS-AppleSilicon.zip) |
-| macOS (Intel) | [Action2MCP-0.5.7-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.7/Action2MCP-0.5.7-macOS-Intel.zip) |
-| Windows x64 | [Action2MCP-0.5.7-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.7/Action2MCP-0.5.7-Windows-x64.zip) |
-| Linux x64 | [Action2MCP-0.5.7-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.7/Action2MCP-0.5.7-Linux-x64.zip) |
+| macOS (Apple 芯片) | [Action2MCP-0.5.8-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.8/Action2MCP-0.5.8-macOS-AppleSilicon.zip) |
+| macOS (Intel) | [Action2MCP-0.5.8-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.8/Action2MCP-0.5.8-macOS-Intel.zip) |
+| Windows x64 | [Action2MCP-0.5.8-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.8/Action2MCP-0.5.8-Windows-x64.zip) |
+| Linux x64 | [Action2MCP-0.5.8-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.8/Action2MCP-0.5.8-Linux-x64.zip) |
 
 解压后运行 `start.command`（macOS）、`start.bat`（Windows）或 `start.sh`（Linux），然后打开 http://localhost:7788 。详细说明见安装包里的 README.md。
 
@@ -25,7 +25,7 @@
 - 中间件管理：MySQL/OceanBase、Redis、MQ、WebSocket（终端或 SQL 控制台），按操作开关权限
 - MCP 接入：Streamable HTTP（http://localhost:7788/mcp）或 stdio（`a2m mcp`）
 - 工具审批：在工具编辑页的「审批模式」选择不审批（off）或每次都审批（always）；写入工具默认每次都审批。WebSocket SQL 控制台每次执行都要审批。AI 调用时，控制台会出现待审批卡片，可以通过、修改参数后通过或拒绝；等待超时可在「接入 AI / 设置」调整
-- WebSocket SQL 控制台：在「中间件管理」里把数据平台的 SQL 查询登记为中间件，AI 通过 `ws_sql_query` 按数据源别名查询；只读 SELECT、显式 LIMIT、EXPLAIN 预检、200 行封顶，令牌从本机收获的请求头注入。一个库由数据源 ID、envId、envType 三个值确定（0.5.7）
+- WebSocket SQL 控制台：在「中间件管理」里把数据平台的 SQL 查询登记为中间件，AI 通过 `ws_sql_query` 按数据源别名查询；只读 SELECT、显式 LIMIT、EXPLAIN 预检、200 行封顶，令牌从本机收获的请求头注入。一个库由数据源 ID、envId、envType 三个值确定（0.5.7）。`{{header.cookie}}` 从登录中心的 Cookie 罐取值，不当作需要单独收获的请求头（0.5.8）
 
 ### 工具审批的范围与限制
 
@@ -59,6 +59,10 @@
 - 从 WebSocket 中间件（终端或 SQL 控制台）自动创建登录配置时，网站地址使用对应的 http(s) 源（`wss://` → `https://`，`ws://` → `http://`），不再把 `wss://` 填进登录中心。登录入口、登录页和检测地址必须是 `http://` 或 `https://`。
 - 「测试重新登录 / 打开浏览器登录」时，如果浏览器里已经处于登录状态，会马上判定成功并关闭窗口；若还缺 `sso-epctoken` 这类必要请求头，会刷新或再次打开该网站以捕获请求头，全部收获后才算成功。
 - 等待登录最多 5 分钟，超时会结束并显示失败原因；等待过程中可以点「取消」，关闭弹出的窗口也会结束等待，状态不会一直停在「等待登录」。
+
+### WebSocket Cookie 绑定（0.5.8）
+
+工具或 SQL 控制台中间件里的 `{{header.cookie}}`（大小写不敏感）会从登录中心该网站的 Cookie 罐组装 Cookie 请求头，而不是去查已收获的自定义请求头。登录只要其他必要请求头（例如 `sso-epctoken`）已经收获即可完成；不会因为缺少名叫 cookie 的收获项而一直视为未登录。测试连接和真实调用在罐里没有该网站的 Cookie 时，会提示缺少 Cookie，而不会说「站点缺少请求头 cookie」。Cookie 值会作为密钥脱敏，不会出现在工具说明、审批预览、审计或报错里。从 0.5.4 的护栏 `WS` 工具迁过来的 Cookie 绑定会被规范化为 `{{header.cookie}}`。
 
 ## 从源码构建
 

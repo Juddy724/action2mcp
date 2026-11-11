@@ -14,17 +14,18 @@ import (
 )
 
 type countingWS struct {
-	mu        sync.Mutex
-	conns     int
-	messages  []string
-	all       []string
-	explain   int
-	business  int
-	upgrader  websocket.Upgrader
-	token     string
-	failToken string
-	rows      int
-	typeALL   bool
+	mu              sync.Mutex
+	conns           int
+	messages        []string
+	all             []string
+	explain         int
+	business        int
+	upgrader        websocket.Upgrader
+	token           string
+	failToken       string
+	rows            int
+	typeALL         bool
+	handshakeCookie string
 }
 
 func newCountingWS(rows int) *countingWS {
@@ -50,6 +51,7 @@ func (c *countingWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close()
 	c.mu.Lock()
 	c.conns++
+	c.handshakeCookie = r.Header.Get("Cookie")
 	c.mu.Unlock()
 	_, data, err := conn.ReadMessage()
 	if err != nil {

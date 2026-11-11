@@ -359,10 +359,55 @@ func decodeMWConfig(raw string) (MWConfig, error) {
 	return c, nil
 }
 
+// normalizeCookieHeaderBinding canonicalizes a Cookie header so
+// {{header.cookie}} (any case) and leftover literals become a jar binding.
+// Other valid bindings ({{cookie.NAME}}, {{secret.*}}, {{cfg.*}}) are kept.
+func normalizeCookieHeaderBinding(headers map[string]string) {
+	if headers == nil {
+		return
+	}
+	var keys []string
+	var first string
+	seen := false
+	for k, v := range headers {
+		if !strings.EqualFold(k, "Cookie") {
+			continue
+		}
+		keys = append(keys, k)
+		if !seen {
+			first = v
+			seen = true
+		}
+	}
+	if !seen {
+		return
+	}
+	for _, k := range keys {
+		delete(headers, k)
+	}
+	headers["Cookie"] = canonicalCookieBinding(first)
+}
+
+func canonicalCookieBinding(v string) string {
+	s := strings.TrimSpace(v)
+	if bindingPlaceholder(s) {
+		ref := strings.TrimSpace(s[2 : len(s)-2])
+		if isCookieJarRef(ref) {
+			return "{{header.cookie}}"
+		}
+		return s
+	}
+	return "{{header.cookie}}"
+}
+
 func normalizeSQLConsole(m *Middleware) error {
 	c := &m.Config
 	c.WSMode = wsModeSQLConsole
 	c.URL = strings.TrimSpace(c.URL)
+	if c.WSHeaders == nil {
+		c.WSHeaders = map[string]string{}
+	}
+	normalizeCookieHeaderBinding(c.WSHeaders)
 	if c.URL == "" {
 		return errors.New("请填写 WebSocket 地址")
 	}
@@ -433,9 +478,6 @@ func normalizeSQLConsole(m *Middleware) error {
 		return errors.New("请至少添加一个数据源：填写名称、数据源 ID、envId，以及给 AI 看的说明")
 	}
 	c.Datasources = clean
-	if c.WSHeaders == nil {
-		c.WSHeaders = map[string]string{}
-	}
 	return nil
 }
 
@@ -703,10 +745,8 @@ func (a *App) callWSSQL(ctx context.Context, c *mwCall, args map[string]any) (st
 	if err := checkGuardedSQL(sqlText, ds.maxRows(&c.m.Config)); err != nil {
 		return c.blocked(err.Error()), true
 	}
-	for _, name := range collectHeaderRefs(c.m) {
-		if _, err := a.GetSiteHeader(c.m.Config.URL, name); err != nil {
-			return c.blocked(err.Error()), true
-		}
+	if err := a.ensureSQLConsoleCredentials(c.m, nil); err != nil {
+		return c.blocked(err.Error()), true
 	}
 	tool, err := c.m.sqlConsoleTool(ds)
 	if err != nil {
@@ -766,11 +806,9 @@ func (a *App) testWSSQLConsole(ctx context.Context, m *Middleware) (string, erro
 	if err := normalizeSQLConsole(m); err != nil {
 		return "", err
 	}
-	refs := collectHeaderRefs(m)
-	for _, name := range refs {
-		if _, err := a.GetSiteHeader(m.Config.URL, name); err != nil {
-			return "", err
-		}
+	var secrets []string
+	if err := a.ensureSQLConsoleCredentials(m, &secrets); err != nil {
+		return "", err
 	}
 	if strings.Contains(m.Config.URL, "{{") && hasUserURLPlaceholders(m.Config.URL) {
 		return "地址格式正确。调用时再填入数据源并执行 SQL；测试连接未发起真实会话", nil
@@ -779,20 +817,22 @@ func (a *App) testWSSQLConsole(ctx context.Context, m *Middleware) (string, erro
 	for k, v := range m.Config.WSHeaders {
 		if bindingPlaceholder(v) {
 			ref := strings.TrimSpace(v[2 : len(v)-2])
-			if strings.HasPrefix(ref, "header.") {
-				val, err := a.GetSiteHeader(m.Config.URL, strings.TrimPrefix(ref, "header."))
-				if err != nil {
-					return "", err
-				}
-				headers.Set(k, val)
+			val, err := a.resolveWSRef(ref, m.Config.URL, &secrets)
+			if err != nil {
+				return "", err
 			}
+			headers.Set(k, val)
 		} else if v != "" {
 			headers.Set(k, v)
 		}
 	}
 	cookies, _ := a.CookiesFor(m.Config.URL)
-	if ch, _ := CookieHeader(cookies, m.Config.URL); ch != "" {
+	if ch, matched := CookieHeader(cookies, m.Config.URL); ch != "" {
 		headers.Set("Cookie", ch)
+		rememberSecret(&secrets, ch)
+		for _, c := range matched {
+			rememberSecret(&secrets, c.Value)
+		}
 	}
 	cctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
@@ -807,18 +847,13 @@ func (a *App) testWSSQLConsole(ctx context.Context, m *Middleware) (string, erro
 	return "连接成功，已完成握手（未执行 SQL）", nil
 }
 
-func collectHeaderRefs(m *Middleware) []string {
-	seen := map[string]bool{}
-	var out []string
+func walkSQLConsolePlaceholders(m *Middleware, fn func(ref string)) {
+	if m == nil {
+		return
+	}
 	add := func(s string) {
 		for _, g := range placeholderRe.FindAllStringSubmatch(s, -1) {
-			if strings.HasPrefix(g[1], "header.") {
-				n := strings.TrimPrefix(g[1], "header.")
-				if !seen[n] {
-					seen[n] = true
-					out = append(out, n)
-				}
-			}
+			fn(g[1])
 		}
 	}
 	add(m.Config.URL)
@@ -828,7 +863,56 @@ func collectHeaderRefs(m *Middleware) []string {
 	for _, msg := range m.Config.WSMessages {
 		add(msg)
 	}
+}
+
+// collectHeaderRefs lists harvested custom request-header names referenced by
+// the middleware. header.cookie is excluded: it comes from the login-center
+// cookie jar, not site_headers.
+func collectHeaderRefs(m *Middleware) []string {
+	seen := map[string]bool{}
+	var out []string
+	walkSQLConsolePlaceholders(m, func(ref string) {
+		if isCookieJarRef(ref) {
+			return
+		}
+		name, ok := headerBindingName(ref)
+		if !ok {
+			return
+		}
+		key := headerNameKey(name)
+		if key == "" || key == "cookie" {
+			return
+		}
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, key)
+		}
+	})
 	return out
+}
+
+func sqlConsoleNeedsCookieJar(m *Middleware) bool {
+	need := false
+	walkSQLConsolePlaceholders(m, func(ref string) {
+		if isCookieJarRef(ref) {
+			need = true
+		}
+	})
+	return need
+}
+
+func (a *App) ensureSQLConsoleCredentials(m *Middleware, secrets *[]string) error {
+	for _, name := range collectHeaderRefs(m) {
+		if _, err := a.GetSiteHeader(m.Config.URL, name); err != nil {
+			return err
+		}
+	}
+	if sqlConsoleNeedsCookieJar(m) {
+		if _, err := a.resolveCookieJar(m.Config.URL, secrets); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func hasUserURLPlaceholders(raw string) bool {

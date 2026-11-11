@@ -408,41 +408,79 @@ func (p *PreparedCall) replaceSubs(s string, resolve func(string) (string, error
 }
 
 func isMissingHeaderErr(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "站点缺少请求头")
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "站点缺少请求头") || strings.Contains(s, "站点缺少 Cookie")
+}
+
+const missingCookieMsg = "站点缺少 Cookie，请在登录中心登录该网站后再试"
+
+func errMissingCookie() error {
+	return errors.New(missingCookieMsg)
+}
+
+func rememberSecret(secrets *[]string, values ...string) {
+	if secrets == nil {
+		return
+	}
+	for _, v := range values {
+		if v != "" {
+			*secrets = append(*secrets, v)
+		}
+	}
+}
+
+// resolveCookieJar returns the Cookie header the browser would send to rawURL
+// from the login-center jar. The value is registered as a secret for redaction.
+func (a *App) resolveCookieJar(rawURL string, secrets *[]string) (string, error) {
+	cs, _ := a.CookiesFor(rawURL)
+	ch, matched := CookieHeader(cs, rawURL)
+	if ch == "" {
+		return "", errMissingCookie()
+	}
+	rememberSecret(secrets, ch)
+	for _, c := range matched {
+		rememberSecret(secrets, c.Value)
+	}
+	return ch, nil
 }
 
 func (a *App) resolveWSRef(ref, rawURL string, secrets *[]string) (string, error) {
 	switch {
-	case strings.HasPrefix(ref, "header."):
-		name := strings.TrimPrefix(ref, "header.")
-		v, err := a.GetSiteHeader(rawURL, name)
-		if err != nil {
-			return "", err
-		}
-		*secrets = append(*secrets, v)
-		return v, nil
-	case strings.HasPrefix(ref, "cookie."):
-		name := strings.TrimPrefix(ref, "cookie.")
-		cs, _ := a.CookiesFor(rawURL)
-		_, matched := CookieHeader(cs, rawURL)
-		var hits []Cookie
-		for _, c := range matched {
-			if strings.EqualFold(c.Name, name) {
-				hits = append(hits, c)
-			}
-		}
-		if len(hits) == 0 {
-			return "", fmt.Errorf("站点缺少 Cookie %s，请在登录中心登录该网站后再试", name)
-		}
-		if len(hits) > 1 && len(hits[0].Path) == len(hits[1].Path) {
-			return "", fmt.Errorf("Cookie %s 存在多个匹配项，已拒绝", name)
-		}
-		*secrets = append(*secrets, hits[0].Value)
-		return hits[0].Value, nil
+	case isCookieJarRef(ref):
+		return a.resolveCookieJar(rawURL, secrets)
 	default:
+		if name, ok := headerBindingName(ref); ok {
+			v, err := a.GetSiteHeader(rawURL, name)
+			if err != nil {
+				return "", err
+			}
+			rememberSecret(secrets, v)
+			return v, nil
+		}
+		if name, ok := cookieBindingName(ref); ok {
+			cs, _ := a.CookiesFor(rawURL)
+			_, matched := CookieHeader(cs, rawURL)
+			var hits []Cookie
+			for _, c := range matched {
+				if strings.EqualFold(c.Name, name) {
+					hits = append(hits, c)
+				}
+			}
+			if len(hits) == 0 {
+				return "", fmt.Errorf("站点缺少 Cookie %s，请在登录中心登录该网站后再试", name)
+			}
+			if len(hits) > 1 && len(hits[0].Path) == len(hits[1].Path) {
+				return "", fmt.Errorf("Cookie %s 存在多个匹配项，已拒绝", name)
+			}
+			rememberSecret(secrets, hits[0].Value)
+			return hits[0].Value, nil
+		}
 		v, err := a.vault.Resolve(ref)
 		if err == nil && v != "" {
-			*secrets = append(*secrets, v)
+			rememberSecret(secrets, v)
 		}
 		return v, err
 	}
@@ -465,12 +503,17 @@ func (a *App) reloginForWS(p *PreparedCall, stats *wsSessionStats) error {
 	for time.Now().Before(deadline) {
 		need := false
 		for _, sub := range p.subs {
-			if strings.HasPrefix(sub.ref, "header.") {
-				need = true
-				if _, err := a.GetSiteHeader(p.request.URL, strings.TrimPrefix(sub.ref, "header.")); err == nil {
-					need = false
-					break
-				}
+			if isCookieJarRef(sub.ref) {
+				continue
+			}
+			name, ok := headerBindingName(sub.ref)
+			if !ok {
+				continue
+			}
+			need = true
+			if _, err := a.GetSiteHeader(p.request.URL, name); err == nil {
+				need = false
+				break
 			}
 		}
 		if !need {
