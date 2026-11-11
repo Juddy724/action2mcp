@@ -365,17 +365,11 @@ func (v *Vault) secretVariants() []string {
 	return out
 }
 
-// Scrub replaces any secret value in s with ******.
+// Scrub replaces any secret value in s with ******. Encoding-aware forms
+// (URL, JSON, HTML, standard and URL-safe base64, with or without padding)
+// are matched as substrings so AI-visible text cannot leak a known secret.
 func (v *Vault) Scrub(s string) string {
-	if v == nil || s == "" {
-		return s
-	}
-	for _, x := range v.secretVariants() {
-		if strings.Contains(s, x) {
-			s = strings.ReplaceAll(s, x, secretMask)
-		}
-	}
-	return s
+	return scrubSecretText(s, v, nil)
 }
 
 // ToRefs replaces raw secret values inside a template with {{secret.NAME}} so they are never stored in a tool.

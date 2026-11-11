@@ -198,13 +198,17 @@ func (a *App) editApprovalArgs(p *pendingApproval, args map[string]any) (map[str
 	if err != nil {
 		return nil, err
 	}
+	params := map[string]Param{}
 	for _, param := range p.tool.Params {
-		if edits[param.Name] == ApprovalSecretUnchanged && a.paramIsSecret(p.tool, param, p.args[param.Name]) {
-			delete(edits, param.Name)
-		}
+		params[param.Name] = param
 	}
 	for key, value := range edits {
-		merged[key] = value
+		param := params[key]
+		param.Name = key
+		merged[key], err = mergeApprovalValue(p.args[key], value, a.paramIsSecret(p.tool, param, p.args[key]))
+		if err != nil {
+			return nil, err
+		}
 	}
 	return copyApprovalArgs(merged)
 }
@@ -224,7 +228,7 @@ func (a *App) PreviewApproval(id int64, nonce string, args map[string]any) (*App
 	if err != nil {
 		return nil, approvalErr(400, a.scrubApprovalText(err.Error(), p.prepared.secretValues))
 	}
-	prepared.Preview = replaceRequest(prepared.Preview, func(s string) string { return a.scrubApprovalText(s, p.prepared.secretValues) })
+	prepared.Preview = a.scrubApprovalPreview(prepared.Preview, p.prepared.secretValues)
 	return &ApprovalPreview{prepared.Preview, prepared.PreviewHash}, nil
 }
 
@@ -266,7 +270,7 @@ func (a *App) DecideApproval(id int64, nonce, action string, args map[string]any
 			return approvalErr(409, "预览已过期，请刷新后重新确认")
 		}
 		prepared.secretValues = append(prepared.secretValues, p.prepared.secretValues...)
-		prepared.Preview = replaceRequest(prepared.Preview, func(s string) string { return a.scrubApprovalText(s, prepared.secretValues) })
+		prepared.Preview = a.scrubApprovalPreview(prepared.Preview, prepared.secretValues)
 		r.Status = "approved"
 		if action == "edit" {
 			r.Status = "edited"
