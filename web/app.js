@@ -725,7 +725,18 @@ async function pageTools(app) {
       <div class="muted small">${esc(t.description || '（没有用途说明，建议补充，AI 会更会用）')}</div>
       <div class="small" style="margin-top:4px">${methodBadge(t.method)} <span class="mono">${esc(t.url)}</span></div>
       <div class="small muted" style="margin-top:4px">参数：${t.params.length ? t.params.map(p => `<code>${esc(p.name)}</code>`).join(' ') : '无'}　·　流程包：${(t.packs || []).length ? t.packs.map(esc).join('、') : '<span style="color:var(--amber)">未加入任何流程包</span>'}</div></div>
-    <button class="pri" onclick="testTool(${t.id})">▶ 测试</button><button onclick="editTool(${t.id})">编辑</button><button class="danger" onclick="delTool(${t.id})">删除</button></div></div>`).join('')}`;
+    <button class="pri" onclick="testTool(${t.id})">▶ 测试</button><button onclick="editTool(${t.id})">编辑</button>${isWSGuardTool(t) ? `<button onclick="convertToolToMW(${t.id})">转为 SQL 控制台</button>` : ''}<button class="danger" onclick="delTool(${t.id})">删除</button></div></div>`).join('')}`;
+}
+function isWSGuardTool(t) {
+  return String(t.method || '').toUpperCase() === 'WS' && t.config && t.config.sql_guard && t.config.sql_guard.enabled;
+}
+async function convertToolToMW(id) {
+  if (!confirm('把这个 WebSocket SQL 工具转成「中间件管理」里的 SQL 控制台？原工具会删除，所属流程包会改挂到新的中间件。请补全数据源的名称和说明。')) return;
+  try {
+    const m = await api('POST', '/api/tools/' + id + '/convert-to-middleware');
+    toast('已转为中间件「' + m.name + '」，请到「中间件」页核对数据源并填写说明');
+    refreshStatus(); render();
+  } catch (e) { toast('转换失败：' + e.message, 5000); }
 }
 async function delTool(id) { if (!confirm('删除这个工具？')) return; await api('DELETE', '/api/tools/' + id); refreshStatus(); render(); }
 async function testTool(id) {
@@ -1076,9 +1087,29 @@ async function delVault(id) { if (!confirm('删除这个配置？引用它的工
 // ---------- 中间件 ----------
 let MW = null;
 const MW_PORTS = { mysql: 3306, redis: 6379, rocketmq: 9876, kafka: 9092, rabbitmq: 5672 };
+const DEFAULT_WS_TERM_MSGS = ['{"type":"TERMINAL_COMMAND","text":"{{command}}"}', '{"type":"TERMINAL_COMMAND","text":"\\r"}'];
+const DEFAULT_WS_SQL_MSG = 'execute {"data":{"sql":"{{sql}}","spaceCode":"{{ds.space_code}}","dsId":"{{ds.ds_id}}","envId":"{{ds.env_id}}","envType":"{{ds.env_type}}","dbType":"{{ds.db_type}}"},"token":"{{header.sso-epctoken}}"}';
+function mwIsSQL(m) {
+  return !!(m && m.type === 'websocket' && m.config && m.config.ws_mode === 'sql_console');
+}
+function mwPermDefsFor(m) {
+  if (mwIsSQL(m)) return (MW && MW.perm_defs_sql_console) || [];
+  const typ = m && m.type;
+  return (MW && MW.perm_defs && typ && MW.perm_defs[typ]) || [];
+}
+function currentWSMode() {
+  const el = document.querySelector('#modal-body input[name="mw-wsmode"]:checked');
+  return el ? el.value : 'terminal';
+}
+function asNumOrStr(v) { return v === undefined || v === null ? '' : String(v); }
+function maybeJSONNum(v) {
+  const s = String(v == null ? '' : v).trim();
+  if (s !== '' && /^-?\d+$/.test(s)) return Number(s);
+  return s;
+}
 function permText(m) {
-  const defs = (MW && MW.perm_defs ? MW.perm_defs[m.type] : null) || [];
-  const on = defs.filter(d => m.config.perms[d.key]).map(d => d.label);
+  const defs = mwPermDefsFor(m);
+  const on = defs.filter(d => m.config.perms && m.config.perms[d.key]).map(d => d.label);
   return on.length ? '权限：' + on.join('、') : '权限：无';
 }
 function mwAddr(m) {
@@ -1096,15 +1127,15 @@ async function pageMiddleware(app) {
   const audit = await api('GET', '/api/middleware/audit?limit=100');
   app.innerHTML = `
   <div class="card"><h2>中间件管理</h2>
-    <p class="muted small">在这里登记数据库（MySQL / OceanBase）、Redis、消息队列（RocketMQ / Kafka / RabbitMQ）、WebSocket，再把它们加入「流程包」。流程包开启后，AI 会看到 <code>db_query</code>、<code>redis_command</code>、<code>mq_send</code>、<code>pod_read_log</code> 等通用工具，
+    <p class="muted small">在这里登记数据库（MySQL / OceanBase）、Redis、消息队列（RocketMQ / Kafka / RabbitMQ）、WebSocket（终端或 SQL 控制台），再把它们加入「流程包」。流程包开启后，AI 会看到 <code>db_query</code>、<code>redis_command</code>、<code>mq_send</code>、<code>pod_read_log</code>、<code>ws_sql_query</code> 等通用工具，
     但<b>只能做你开启了权限的操作</b>，没开启的会收到「无权限」错误。<b>密码加密保存在「配置管理」里，AI 看不到</b>（工具列表、调用结果、错误、日志、导出文件里都不会出现）；连接地址也不会出现在工具说明里。</p>
     ${MW.items.length === 0 ? '<div class="empty">还没有中间件。点下面的按钮添加第一个。</div>' : `
     <table><thead><tr><th>名称</th><th>类型 / 地址</th><th>权限</th><th>范围 / 限制</th><th>流程包</th><th></th></tr></thead><tbody>
     ${MW.items.map(m => `<tr>
       <td><b>${esc(m.name)}</b><div class="muted small">${esc(m.config.description || '')}</div></td>
       <td class="mw-addr"><span class="mw-type t-${esc(m.type)}">${esc(m.kind_label)}</span><div class="mono small">${esc(mwAddr(m))}${m.config.database ? ' / ' + esc(m.config.database) : ''}</div>
-        <div class="small">${m.type === 'websocket' ? '<span class="muted">使用登录中心的 Cookie</span>' : (m.config.password_ref ? (m.password_set ? '🔒 密码已保存' : '<span class="st-bad">密码待填写</span>') : '<span class="muted">无密码</span>')}</div></td>
-      <td>${(MW.perm_defs[m.type] || []).map(d => `<span class="perm ${m.config.perms[d.key] ? 'on' : ''}">${esc(d.label)}</span>`).join('')}</td>
+        <div class="small">${m.type === 'websocket' ? (mwIsSQL(m) ? '<span class="muted">登录中心 Cookie + 已收获的请求头令牌</span>' : '<span class="muted">使用登录中心的 Cookie</span>') : (m.config.password_ref ? (m.password_set ? '🔒 密码已保存' : '<span class="st-bad">密码待填写</span>') : '<span class="muted">无密码</span>')}</div></td>
+      <td>${mwPermDefsFor(m).map(d => `<span class="perm ${m.config.perms[d.key] ? 'on' : ''}">${esc(d.label)}</span>`).join('')}${mwIsSQL(m) ? ' <span class="perm on">最多 ' + esc(m.config.max_rows || 200) + ' 行</span> <span class="perm on">必须索引</span>' : ''}</td>
       <td class="small">${esc(mwScope(m))}</td>
       <td class="small mw-packs">${m.packs.length ? m.packs.map(esc).join('、') : '<span class="muted">未加入</span>'}</td>
       <td style="text-align:right;white-space:nowrap"><button onclick="testMWSaved(${m.id},this)">测试连接</button> <button onclick="editMW(${m.id})">编辑</button> <button class="danger" onclick="delMW(${m.id})">删除</button></td></tr>`).join('')}
@@ -1128,7 +1159,12 @@ function mwScope(m) {
   } else if (m.type === 'redis') {
     if (c.key_prefixes && c.key_prefixes.length) p.push('key 前缀：' + c.key_prefixes.join('、'));
   } else if (m.type === 'websocket') {
-    if (c.command_allow && c.command_allow.length) p.push('命令：' + c.command_allow.join('、'));
+    if (mwIsSQL(m)) {
+      const aliases = (c.datasources || []).filter(d => d && d.alias && d.enabled !== false).map(d => d.alias);
+      if (aliases.length) p.push('数据源：' + aliases.join('、'));
+      p.push('最多 ' + (c.max_rows || 200) + ' 行');
+      p.push('必须索引');
+    } else if (c.command_allow && c.command_allow.length) p.push('命令：' + c.command_allow.join('、'));
     else p.push('执行命令不限');
   } else if (c.topics && c.topics.length) p.push('Topic：' + c.topics.join('、'));
   p.push(c.timeout_sec + ' 秒超时');
@@ -1140,8 +1176,8 @@ function mwDefault(type) {
   return { id: 0, name: '', type, password_set: false, config: { host: ws ? '' : '127.0.0.1', port: type === 'mysql' ? 3306 : type === 'redis' ? 6379 : ws ? 0 : 9876, user: '', password_ref: '', database: '',
     addrs: '', mq_kind: 'rocketmq', redis_mode: 'standalone', master_name: '', tls: false, tls_skip_verify: false, sasl: '', broker_addr: '', perms,
     allowed_dbs: [], allowed_tables: [], key_prefixes: [], topics: [], max_rows: 200, max_result_kb: 256, timeout_sec: ws ? 30 : 15, require_where: true, description: '',
-    url: '', ws_messages: ['{"type":"TERMINAL_COMMAND","text":"{{command}}"}', '{"type":"TERMINAL_COMMAND","text":"\\r"}'],
-    command_allow: ['tail', 'head', 'ls', 'cat', 'grep', 'pwd'] } };
+    url: '', ws_mode: 'terminal', ws_messages: ['{"type":"TERMINAL_COMMAND","text":"{{command}}"}', '{"type":"TERMINAL_COMMAND","text":"\\r"}'],
+    command_allow: ['tail', 'head', 'ls', 'cat', 'grep', 'pwd'], datasources: [], sql_defaults: {} } };
 }
 const lines = a => (a || []).join('\n');
 function editMW(id, type) {
@@ -1150,19 +1186,27 @@ function editMW(id, type) {
 function openMWEditor(m) {
   const id = m.id || 0;
   const c = m.config, t = m.type;
-  const defs = MW.perm_defs[t] || [];
-  const kindName = t === 'mysql' ? '数据库' : t === 'redis' ? ' Redis' : t === 'websocket' ? ' WebSocket' : '消息队列';
+  const sql = t === 'websocket' && c.ws_mode === 'sql_console';
+  const defs = sql ? (MW.perm_defs_sql_console || []) : (MW.perm_defs[t] || []);
+  const kindName = t === 'mysql' ? '数据库' : t === 'redis' ? ' Redis' : t === 'websocket' ? (sql ? ' SQL 控制台' : ' WebSocket') : '消息队列';
+  const sd = c.sql_defaults || {};
   openModal(`
   <h2>${id ? '编辑' : '添加'}${kindName}</h2>
   <input type="hidden" id="mw-type" value="${esc(t)}">
+  <input type="hidden" id="mw-id" value="${id}">
   <div class="form-grid">
-    <label>名称 *</label><input id="mw-name" value="${esc(m.name)}" placeholder="${t === 'websocket' ? '如：Phoenix终端（AI 用这个名字指定中间件）' : '如：订单库、缓存、订单MQ（AI 用这个名字指定中间件）'}">
+    <label>名称 *</label><input id="mw-name" value="${esc(m.name)}" placeholder="${t === 'websocket' ? '如：Phoenix终端 或 数据平台SQL（AI 用这个名字指定中间件）' : '如：订单库、缓存、订单MQ（AI 用这个名字指定中间件）'}">
     ${t === 'websocket' ? `
     ${m.fromRecording ? '<input type="hidden" id="mw-from-rec" value="1">' : ''}
+    <label>连接类型</label><div class="row"><label class="chk"><input type="radio" name="mw-wsmode" value="terminal" ${sql ? '' : 'checked'} onchange="mwFormUI()"> 终端</label><label class="chk"><input type="radio" name="mw-wsmode" value="sql_console" ${sql ? 'checked' : ''} onchange="mwFormUI()"> SQL 控制台</label></div>
     <label>WebSocket 地址 *</label><textarea id="mw-url" class="mono" style="min-height:68px" placeholder="wss://example.com/ws/ssh?appCode={{app_code}}&podName={{pod_name}}&namespace={{namespace}}&serviceName={{service_name}}">${esc(c.url || '')}</textarea>
-    <label>发送的文本帧</label><textarea id="mw-msgs" class="mono" style="min-height:68px" placeholder="${m.fromRecording ? '写一条模板，例如 {&quot;type&quot;:&quot;TERMINAL_COMMAND&quot;,&quot;text&quot;:&quot;{{command}}&quot;}' : '一行一条，{{command}} 会换成要执行的命令'}">${esc((c.ws_messages || []).join('\n'))}</textarea>
-    ${m.fromRecording ? `<div class="full"><label>录到的帧（只读，不会发送）</label><pre class="mono" style="max-height:160px;overflow:auto">${wsRender(m.recordedBody || '', '→')}</pre></div>
-    <div class="full"><div class="notice">保存的是终端式的文本帧模板。请另写一条模板，把命令的位置写成 <code>{{command}}</code>。上面录到的帧只作对照，不会写入模板，测试连接和以后的调用也都不会自动发出这些帧。查询参数如果每次不同，写成 <code>{{参数名}}</code>。登录用「登录中心」的 Cookie。二进制帧、子协议和按响应决定的初始化不在这个连接里重放。</div></div>` : `<div class="full"><p class="muted small" style="margin:0">认证用这个地址对应网站在「登录中心」里的 Cookie，不在这里填密码。默认的两行帧是：先发命令，再发一个回车。</p></div>`}` : ''}
+    <label>发送的文本帧</label><textarea id="mw-msgs" class="mono" style="min-height:68px" placeholder="${m.fromRecording ? '写一条模板，把命令或 SQL 的位置写成占位符' : '一行一条'}">${esc((c.ws_messages || []).join('\n'))}</textarea>
+    ${m.fromRecording ? `<div class="full f-term"><label>录到的帧（只读，不会发送）</label><pre class="mono" style="max-height:160px;overflow:auto">${wsRender(m.recordedBody || '', '→')}</pre></div>
+    <div class="full f-term"><div class="notice">保存的是终端式的文本帧模板。请另写一条模板，把命令的位置写成 <code>{{command}}</code>。上面录到的帧只作对照，不会写入模板，测试连接和以后的调用也都不会自动发出这些帧。查询参数如果每次不同，写成 <code>{{参数名}}</code>。登录用「登录中心」的 Cookie。二进制帧、子协议和按响应决定的初始化不在这个连接里重放。</div></div>` : `<div class="full f-term"><p class="muted small" style="margin:0">认证用这个地址对应网站在「登录中心」里的 Cookie，不在这里填密码。默认的两行帧是：先发命令，再发一个回车。</p></div>`}
+    <div class="full f-sql"><p class="muted small" style="margin:0">在消息里用 <code>{{sql}}</code> 表示要执行的语句。spaceCode、dsId、envId、envType、dbType 写成 <code>{{ds.space_code}}</code>、<code>{{ds.ds_id}}</code> 等，保存时按所选数据源自动填入，不会成为 AI 参数。登录令牌用 <code>{{header.sso-epctoken}}</code>，不要写入字面值。测试连接只做握手，不会执行 SQL。</p></div>
+    <div class="full f-sql"><h3 style="margin:10px 0 4px">默认环境参数</h3><p class="muted small" style="margin:0 0 8px">各数据源共用。某一行需要不同值时，点该行「高级」覆盖。</p>
+      <div class="row ds-defaults"><label>spaceCode <input id="mw-space" class="mono" value="${esc(sd.space_code || '')}"></label><label>envId <input id="mw-envid" class="mono" value="${esc(asNumOrStr(sd.env_id))}"></label><label>envType <input id="mw-envtype" class="mono" value="${esc(sd.env_type || '')}"></label><label>dbType <input id="mw-dbtype" class="mono" value="${esc(sd.db_type || '')}"></label></div></div>
+    ${dsTableHTML(c.datasources)}` : ''}
     ${t === 'mysql' ? `<label>类型</label><div class="muted small">MySQL / OceanBase（MySQL 模式）/ MariaDB / TiDB 等兼容 MySQL 协议的数据库</div>` : ''}
     ${t === 'mq' ? `<label>消息队列</label><select id="mw-mqkind" onchange="mwFormUI()">${Object.entries(MW.mq_kinds).map(([k, v]) => `<option value="${k}" ${c.mq_kind === k ? 'selected' : ''}>${v}</option>`).join('')}</select>` : ''}
     ${t === 'redis' ? `<label>部署方式</label><select id="mw-rmode" onchange="mwFormUI()"><option value="standalone" ${c.redis_mode !== 'cluster' && c.redis_mode !== 'sentinel' ? 'selected' : ''}>单机 / 主从</option><option value="cluster" ${c.redis_mode === 'cluster' ? 'selected' : ''}>Cluster 集群</option><option value="sentinel" ${c.redis_mode === 'sentinel' ? 'selected' : ''}>Sentinel 哨兵</option></select>` : ''}
@@ -1178,7 +1222,7 @@ function openMWEditor(m) {
     <label class="f-tls">TLS</label><div class="row f-tls"><label><input type="checkbox" id="mw-tls" ${c.tls ? 'checked' : ''}> 使用 TLS 加密连接</label><label><input type="checkbox" id="mw-tlsskip" ${c.tls_skip_verify ? 'checked' : ''}> 不校验证书</label></div>
     <label>说明</label><input id="mw-desc" value="${esc(c.description)}" placeholder="可选，会展示给 AI，如：订单相关表都在这里">
     <div class="full"><h3 style="margin:10px 0 4px">权限 <span class="muted small" style="font-weight:400">没开启的操作，AI 调用时会收到「无权限」错误</span></h3>
-      <div class="perms">${defs.map(d => `<label class="perm-sw"><label class="switch"><input type="checkbox" data-perm="${d.key}" ${c.perms[d.key] ? 'checked' : ''}><span></span></label><div><b>${esc(d.label)}</b><div class="muted small">${esc(d.hint)}</div></div></label>`).join('')}</div></div>
+      <div class="perms" id="mw-perms">${defs.map(d => permSwitchHTML(d, !!(c.perms && c.perms[d.key]))).join('')}</div></div>
     <div class="full"><h3 style="margin:10px 0 4px">范围与限制</h3></div>
     ${t === 'mysql' ? `
     <label>允许的库</label><textarea id="mw-dbs" class="mono" style="min-height:50px" placeholder="每行一个，留空 = 不限制（mysql 系统库始终禁止；设置后 information_schema 等系统库也禁止）">${esc(lines(c.allowed_dbs))}</textarea>
@@ -1187,14 +1231,79 @@ function openMWEditor(m) {
     <label>WHERE 保护</label><label><input type="checkbox" id="mw-where" ${c.require_where !== false ? 'checked' : ''}> UPDATE / DELETE 必须带 WHERE 条件，禁止 TRUNCATE（推荐）</label>` : ''}
     ${t === 'redis' ? `<label>允许的 key 前缀</label><textarea id="mw-prefixes" class="mono" style="min-height:50px" placeholder="每行一个，如 order:，留空 = 不限制">${esc(lines(c.key_prefixes))}</textarea>` : ''}
     ${t === 'mq' ? `<label>允许的 Topic / 队列</label><textarea id="mw-topics" class="mono" style="min-height:50px" placeholder="每行一个，支持 order_* 这样的前缀通配，留空 = 不限制">${esc(lines(c.topics))}</textarea>` : ''}
-    ${t === 'websocket' ? `<label>允许的命令</label><textarea id="mw-allow" class="mono" style="min-height:50px" placeholder="每行一个，如 tail。只约束 pod_exec，管道的每一段也要在这里。留空 = 开启「执行命令」后不限制">${esc(lines(c.command_allow))}</textarea>` : ''}
+    ${t === 'websocket' ? `<label class="f-term">允许的命令</label><textarea id="mw-allow" class="mono f-term" style="min-height:50px" placeholder="每行一个，如 tail。只约束 pod_exec，管道的每一段也要在这里。留空 = 开启「执行命令」后不限制">${esc(lines(c.command_allow))}</textarea>
+    <label class="f-sql">最多返回行数</label><div class="row f-sql"><input id="mw-maxrows" type="number" min="1" max="200" value="${c.max_rows || 200}" style="width:120px"><span class="muted small">行，最多 200，必须写 LIMIT 且走索引</span></div>` : ''}
     <label>结果大小上限</label><div class="row"><input id="mw-maxkb" type="number" value="${c.max_result_kb}" style="width:120px"><span class="muted small">KB，超出会截断</span></div>
     <label>超时</label><div class="row"><input id="mw-timeout" type="number" value="${c.timeout_sec}" style="width:120px"><span class="muted small">秒</span></div>
   </div>
   <div id="mw-test-res" style="margin-top:12px"></div>
   <div class="row" style="margin-top:18px;justify-content:flex-end"><button onclick="testMWForm(${id},this)">测试连接</button><span class="grow"></span><button onclick="closeModal()">取消</button><button class="pri big" onclick="saveMW(${id})">保存</button></div>`);
+  lastWSMode = null;
   mwFormUI();
 }
+function permSwitchHTML(d, on) {
+  return `<label class="perm-sw"><label class="switch"><input type="checkbox" data-perm="${esc(d.key)}" ${on ? 'checked' : ''}><span></span></label><div><b>${esc(d.label)}</b><div class="muted small">${esc(d.hint)}</div></div></label>`;
+}
+function dsTableHTML(rows) {
+  const list = (rows && rows.length) ? rows : [{ alias: '', ds_id: '', description: '' }];
+  return `<div class="full f-sql"><div class="row" style="margin:10px 0 6px"><h3 style="margin:0">数据源</h3><span class="muted small grow">填写「名称」「数据源ID」「说明（给AI看）」。名称和说明会列在工具描述里，供 AI 选择数据库；数据源 ID 只保存在本机。</span><button type="button" class="sm" onclick="addDSRow()">添加</button></div>
+    <table class="ds-table"><thead><tr><th>名称</th><th>数据源ID</th><th>说明（给AI看）</th><th></th></tr></thead>
+    <tbody id="mw-ds-body">${list.map(dsRowHTML).join('')}</tbody></table></div>`;
+}
+function dsRowHTML(d) {
+  d = d || {};
+  const adv = !!(d.space_code || d.env_id || d.env_type || d.db_type);
+  return `<tr class="ds-row${adv ? ' adv-on' : ''}">
+    <td><input class="ds-alias" placeholder="如 orders" value="${esc(d.alias || '')}"></td>
+    <td><input class="ds-id mono" placeholder="数据源 ID" value="${esc(asNumOrStr(d.ds_id))}"></td>
+    <td><input class="ds-desc" placeholder="例如：订单相关表" value="${esc(d.description || '')}"></td>
+    <td class="ds-actions"><button type="button" class="sm" onclick="toggleDSAdv(this)">高级</button> <button type="button" class="danger sm" onclick="delDSRow(this)">删除</button>
+      <div class="ds-adv"><div class="row" style="margin-top:6px">
+        <input class="ds-space" placeholder="spaceCode 覆盖" value="${esc(d.space_code || '')}">
+        <input class="ds-envid mono" placeholder="envId 覆盖" value="${esc(asNumOrStr(d.env_id))}">
+        <input class="ds-envtype" placeholder="envType 覆盖" value="${esc(d.env_type || '')}">
+        <input class="ds-dbtype" placeholder="dbType 覆盖" value="${esc(d.db_type || '')}">
+      </div></div></td></tr>`;
+}
+function addDSRow() {
+  const tb = $('#mw-ds-body');
+  if (!tb) return;
+  tb.insertAdjacentHTML('beforeend', dsRowHTML({}));
+}
+function delDSRow(btn) {
+  const tr = btn.closest('tr');
+  if (tr) tr.remove();
+  const tb = $('#mw-ds-body');
+  if (tb && !tb.children.length) addDSRow();
+}
+function toggleDSAdv(btn) {
+  const tr = btn.closest('tr');
+  if (tr) tr.classList.toggle('adv-on');
+}
+function collectDatasources() {
+  return [...document.querySelectorAll('#mw-ds-body tr')].map(tr => {
+    const d = {
+      alias: ($('.ds-alias', tr).value || '').trim(),
+      ds_id: maybeJSONNum($('.ds-id', tr).value),
+      description: ($('.ds-desc', tr).value || '').trim(),
+    };
+    if (d.ds_id === '') delete d.ds_id;
+    if (tr.classList.contains('adv-on')) {
+      const sc = ($('.ds-space', tr).value || '').trim();
+      const ei = maybeJSONNum($('.ds-envid', tr).value);
+      const et = ($('.ds-envtype', tr).value || '').trim();
+      const dt = ($('.ds-dbtype', tr).value || '').trim();
+      if (sc) d.space_code = sc;
+      if (ei !== '') d.env_id = ei;
+      if (et) d.env_type = et;
+      if (dt) d.db_type = dt;
+    }
+    return d;
+  }).filter(d => d.alias || d.ds_id || d.description);
+}
+function looksLikeTermMsgs(s) { return s.includes('{{command}}') && !s.includes('{{sql}}'); }
+function looksLikeDefaultSQLMsgs(s) { return s.trim() === DEFAULT_WS_SQL_MSG; }
+let lastWSMode = null;
 function mwFormUI() {
   const t = $('#mw-type').value;
   const kind = $('#mw-mqkind') ? $('#mw-mqkind').value : '';
@@ -1205,10 +1314,41 @@ function mwFormUI() {
   show('f-host', !ws && !useAddrs); show('f-addrs', useAddrs); show('f-master', !ws && t === 'redis' && rmode === 'sentinel');
   show('f-db', !ws && (t !== 'mq' || kind === 'rabbitmq')); show('f-sasl', !ws && kind === 'kafka'); show('f-broker', !ws && kind === 'rocketmq');
   show('f-tls', !ws && kind !== 'rocketmq'); show('f-user', !ws); show('f-pw', !ws);
+  const sql = ws && currentWSMode() === 'sql_console';
+  show('f-term', ws && !sql); show('f-sql', sql);
+  if (ws) {
+    const ta = $('#mw-msgs');
+    if (ta && lastWSMode && lastWSMode !== currentWSMode()) {
+      const v = ta.value || '';
+      if (sql && looksLikeTermMsgs(v)) ta.value = DEFAULT_WS_SQL_MSG;
+      if (!sql && looksLikeDefaultSQLMsgs(v)) ta.value = DEFAULT_WS_TERM_MSGS.join('\n');
+    }
+    lastWSMode = currentWSMode();
+    syncMWPerms(sql);
+    if (ta) ta.placeholder = sql ? '一行一条，{{sql}} 会换成要执行的语句' : '一行一条，{{command}} 会换成要执行的命令';
+  } else {
+    lastWSMode = null;
+  }
   const ul = document.querySelector('#modal-body label.f-user'); if (ul) ul.textContent = kind === 'rocketmq' ? 'AccessKey' : '用户名';
   const pl = document.querySelector('#modal-body label.f-pw'); if (pl) pl.textContent = kind === 'rocketmq' ? 'SecretKey' : '密码';
   const ap = $('#mw-addrs'); if (ap) ap.placeholder = kind === 'rocketmq' ? 'NameServer，如 10.0.0.1:9876;10.0.0.2:9876 用逗号分隔' : kind === 'kafka' ? 'Broker，如 10.0.0.1:9092,10.0.0.2:9092' : '节点，如 10.0.0.1:7000,10.0.0.2:7000';
   const port = $('#mw-port'); if (port && t === 'mq' && kind === 'rabbitmq' && (!port.value || port.value === '9876')) port.value = 5672;
+}
+function syncMWPerms(sql) {
+  const box = $('#mw-perms');
+  if (!box) return;
+  const t = $('#mw-type').value;
+  const defs = sql ? (MW.perm_defs_sql_console || []) : (MW.perm_defs[t] || []);
+  const prev = {};
+  box.querySelectorAll('[data-perm]').forEach(el => { prev[el.dataset.perm] = el.checked; });
+  const id = +($('#mw-id') && $('#mw-id').value || 0);
+  const old = id ? (MW.items || []).find(x => x.id === id) : null;
+  box.innerHTML = defs.map(d => {
+    let on = d.default;
+    if (Object.prototype.hasOwnProperty.call(prev, d.key)) on = prev[d.key];
+    else if (old && old.config && old.config.perms && Object.prototype.hasOwnProperty.call(old.config.perms, d.key)) on = !!old.config.perms[d.key];
+    return permSwitchHTML(d, on);
+  }).join('');
 }
 function mwCollect(id) {
   const t = $('#mw-type').value;
@@ -1227,26 +1367,52 @@ function mwCollect(id) {
   if (t === 'websocket') {
     cfg.url = $('#mw-url').value.trim();
     cfg.ws_messages = $('#mw-msgs').value.split('\n').map(s => s.trim()).filter(Boolean);
-    cfg.command_allow = list('#mw-allow');
+    cfg.ws_mode = currentWSMode();
     cfg.host = ''; cfg.port = 0;
+    if (old && old.config) {
+      if (old.config.ws_headers) cfg.ws_headers = old.config.ws_headers;
+      if (old.config.sql_path) cfg.sql_path = old.config.sql_path;
+      if (old.config.ds_field_paths) cfg.ds_field_paths = old.config.ds_field_paths;
+      if (old.config.ws_auth) cfg.ws_auth = old.config.ws_auth;
+      if (old.config.ws_collect) cfg.ws_collect = old.config.ws_collect;
+    }
+    if (cfg.ws_mode === 'sql_console') {
+      const defaults = {
+        space_code: ($('#mw-space') && $('#mw-space').value || '').trim(),
+        env_id: maybeJSONNum($('#mw-envid') && $('#mw-envid').value),
+        env_type: ($('#mw-envtype') && $('#mw-envtype').value || '').trim(),
+        db_type: ($('#mw-dbtype') && $('#mw-dbtype').value || '').trim(),
+      };
+      if (defaults.env_id === '') delete defaults.env_id;
+      cfg.sql_defaults = defaults;
+      cfg.datasources = collectDatasources();
+      cfg.command_allow = [];
+    } else {
+      cfg.command_allow = list('#mw-allow');
+    }
   }
   const useAddrs = (t === 'mq' && cfg.mq_kind !== 'rabbitmq') || (t === 'redis' && cfg.redis_mode !== 'standalone');
   if (useAddrs && !cfg.addrs && cfg.host) cfg.addrs = cfg.host + ':' + (cfg.port || MW_PORTS[cfg.mq_kind] || 6379);
   return { id, name: $('#mw-name').value.trim(), type: t, config: cfg, password: $('#mw-pw').value, clear_password: !!($('#mw-pwclear') && $('#mw-pwclear').checked) };
 }
 function wsTemplateReady() {
+  if (currentWSMode() === 'sql_console') return ($('#mw-msgs') && $('#mw-msgs').value || '').includes('{{sql}}');
   const flag = $('#mw-from-rec');
   if (!flag || flag.value !== '1') return true;
   return ($('#mw-msgs').value || '').includes('{{command}}');
 }
+function wsTemplateHint() {
+  if (currentWSMode() === 'sql_console') return '请先在文本帧里写上 {{sql}}。测试连接只做握手，不会执行 SQL。';
+  return '请先写一条包含 {{command}} 的文本帧。录到的历史帧不会代发。';
+}
 async function saveMW(id) {
-  if (!wsTemplateReady()) { toast('请先写一条包含 {{command}} 的文本帧。录到的历史帧不会代发。'); return; }
+  if (!wsTemplateReady()) { toast(wsTemplateHint()); return; }
   const body = mwCollect(id);
   try { id ? await api('PUT', '/api/middleware/' + id, body) : await api('POST', '/api/middleware', body); closeModal(); toast('已保存'); render(); }
   catch (e) { toast('保存失败：' + e.message, 5000); }
 }
 async function testMWForm(id, btn) {
-  if (!wsTemplateReady()) { $('#mw-test-res').innerHTML = '<div class="notice">请先写一条包含 {{command}} 的文本帧。录到的历史帧不会发送，测试连接也不会代发。</div>'; return; }
+  if (!wsTemplateReady()) { $('#mw-test-res').innerHTML = '<div class="notice">' + esc(wsTemplateHint()) + '</div>'; return; }
   const body = mwCollect(id); btn.disabled = true; $('#mw-test-res').innerHTML = '<span class="muted">正在连接…</span>';
   try { const r = await api('POST', '/api/middleware/test', body);
     $('#mw-test-res').innerHTML = r.ok ? `<div class="ok-notice">✔ ${esc(r.msg)}（${r.ms}ms）</div>` : `<div class="notice">✘ 连接失败：${esc(r.error)}</div>`; }

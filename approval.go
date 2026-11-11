@@ -339,6 +339,27 @@ func (a *App) ListApprovals(status string, limit int) ([]ApprovalRecord, error) 
 }
 
 func (a *App) approvalCommitValid(p *pendingApproval) bool {
+	if p.tool != nil && p.tool.mwID != 0 {
+		m, err := a.store.GetMiddleware(p.tool.mwID)
+		if err != nil || !m.Config.isSQLConsole() {
+			return false
+		}
+		exposed, _ := a.store.ExposedMiddleware()
+		found := false
+		for _, x := range exposed {
+			if x.ID == m.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+		if p.tool.mwFingerprint != m.sqlConsoleFingerprint() {
+			return false
+		}
+		return p.prepared.fingerprint() == p.confirmedHash
+	}
 	var rev int64
 	err := a.store.db.QueryRow(`SELECT rev FROM tools WHERE id=? AND EXISTS (SELECT 1 FROM pack_tools pt JOIN packs p ON p.id=pt.pack_id WHERE pt.tool_id=tools.id AND p.enabled=1)`, p.tool.ID).Scan(&rev)
 	return err == nil && rev == p.record.ToolRev && p.prepared.fingerprint() == p.confirmedHash

@@ -19,32 +19,40 @@ import (
 // ---------- model ----------
 
 type MWConfig struct {
-	Host          string          `json:"host"`
-	Port          int             `json:"port"`
-	User          string          `json:"user"`
-	PasswordRef   string          `json:"password_ref"` // name of a secret in 配置管理 (never the value)
-	Database      string          `json:"database"`     // MySQL default db / Redis db index / RabbitMQ vhost
-	Addrs         string          `json:"addrs"`        // Kafka brokers / RocketMQ namesrv / Redis cluster nodes / sentinels (comma separated)
-	MQKind        string          `json:"mq_kind"`      // rocketmq | kafka | rabbitmq
-	RedisMode     string          `json:"redis_mode"`   // standalone | cluster | sentinel
-	MasterName    string          `json:"master_name"`
-	TLS           bool            `json:"tls"`
-	TLSSkipVerify bool            `json:"tls_skip_verify"`
-	SASL          string          `json:"sasl"`        // Kafka: PLAIN | SCRAM-SHA-256 | SCRAM-SHA-512
-	BrokerAddr    string          `json:"broker_addr"` // RocketMQ broker used for creating topics
-	Perms         map[string]bool `json:"perms"`
-	AllowedDBs    []string        `json:"allowed_dbs"`
-	AllowedTables []string        `json:"allowed_tables"`
-	KeyPrefixes   []string        `json:"key_prefixes"`
-	Topics        []string        `json:"topics"`
-	URL           string          `json:"url,omitempty"`         // WebSocket address template, wss://…
-	WSMessages    []string        `json:"ws_messages,omitempty"` // text frames; {{command}} is the command
-	CommandAllow  []string        `json:"command_allow"`         // pod_exec allowlist, applied to each pipeline stage; empty = unrestricted. No omitempty: [] must survive a save.
-	MaxRows       int             `json:"max_rows"`
-	MaxResultKB   int             `json:"max_result_kb"`
-	TimeoutSec    int             `json:"timeout_sec"`
-	RequireWhere  *bool           `json:"require_where,omitempty"`
-	Description   string          `json:"description"`
+	Host          string            `json:"host"`
+	Port          int               `json:"port"`
+	User          string            `json:"user"`
+	PasswordRef   string            `json:"password_ref"` // name of a secret in 配置管理 (never the value)
+	Database      string            `json:"database"`     // MySQL default db / Redis db index / RabbitMQ vhost
+	Addrs         string            `json:"addrs"`        // Kafka brokers / RocketMQ namesrv / Redis cluster nodes / sentinels (comma separated)
+	MQKind        string            `json:"mq_kind"`      // rocketmq | kafka | rabbitmq
+	RedisMode     string            `json:"redis_mode"`   // standalone | cluster | sentinel
+	MasterName    string            `json:"master_name"`
+	TLS           bool              `json:"tls"`
+	TLSSkipVerify bool              `json:"tls_skip_verify"`
+	SASL          string            `json:"sasl"`        // Kafka: PLAIN | SCRAM-SHA-256 | SCRAM-SHA-512
+	BrokerAddr    string            `json:"broker_addr"` // RocketMQ broker used for creating topics
+	Perms         map[string]bool   `json:"perms"`
+	AllowedDBs    []string          `json:"allowed_dbs"`
+	AllowedTables []string          `json:"allowed_tables"`
+	KeyPrefixes   []string          `json:"key_prefixes"`
+	Topics        []string          `json:"topics"`
+	URL           string            `json:"url,omitempty"`         // WebSocket address template, wss://…
+	WSMessages    []string          `json:"ws_messages,omitempty"` // text frames; {{command}} or {{sql}}
+	CommandAllow  []string          `json:"command_allow"`         // pod_exec allowlist, applied to each pipeline stage; empty = unrestricted. No omitempty: [] must survive a save.
+	MaxRows       int               `json:"max_rows"`
+	MaxResultKB   int               `json:"max_result_kb"`
+	TimeoutSec    int               `json:"timeout_sec"`
+	RequireWhere  *bool             `json:"require_where,omitempty"`
+	Description   string            `json:"description"`
+	WSMode        string            `json:"ws_mode,omitempty"` // terminal (default) | sql_console
+	SQLPath       string            `json:"sql_path,omitempty"`
+	WSHeaders     map[string]string `json:"ws_headers,omitempty"`
+	Datasources   []MWDatasource    `json:"datasources,omitempty"`
+	DSFieldPaths  map[string]string `json:"ds_field_paths,omitempty"`
+	SQLDefaults   MWSQLDefaults     `json:"sql_defaults"`
+	WSCollect     *WSCollectConfig  `json:"ws_collect,omitempty"`
+	WSAuth        *WSAuthConfig     `json:"ws_auth,omitempty"`
 }
 
 type Middleware struct {
@@ -90,11 +98,30 @@ var mwPermDefs = map[string][]permDef{
 	},
 }
 
+var mwSQLConsolePerms = []permDef{
+	{"select", "查", true, "只读 SELECT：必须带 LIMIT、必须走索引、最多 200 行，每次执行都要审批"},
+}
+
+func mwPermsOf(m *Middleware) []permDef {
+	if m != nil && m.Type == "websocket" && m.Config.isSQLConsole() {
+		return mwSQLConsolePerms
+	}
+	if m != nil {
+		return mwPermDefs[m.Type]
+	}
+	return nil
+}
+
 var mwTypeLabel = map[string]string{"mysql": "MySQL / OceanBase", "redis": "Redis", "mq": "消息队列", "websocket": "WebSocket"}
 var mqKindLabel = map[string]string{"rocketmq": "RocketMQ", "kafka": "Kafka", "rabbitmq": "RabbitMQ"}
 
 func permLabel(typ, key string) string {
 	for _, d := range mwPermDefs[typ] {
+		if d.Key == key {
+			return d.Label
+		}
+	}
+	for _, d := range mwSQLConsolePerms {
 		if d.Key == key {
 			return d.Label
 		}
@@ -132,6 +159,9 @@ func (c *MWConfig) timeoutSec() int {
 func (c *MWConfig) requireWhere() bool { return c.RequireWhere == nil || *c.RequireWhere }
 
 func (m *Middleware) kindLabel() string {
+	if m.Type == "websocket" && m.Config.isSQLConsole() {
+		return "WebSocket · SQL 控制台"
+	}
 	if m.Type == "mq" {
 		return mqKindLabel[m.Config.MQKind]
 	}
@@ -170,6 +200,12 @@ func (m *Middleware) normalize() error {
 	if _, ok := mwPermDefs[m.Type]; !ok {
 		return errors.New("中间件类型必须是 mysql、redis、mq 或 websocket")
 	}
+	if m.Type == "websocket" {
+		mode := strings.TrimSpace(m.Config.WSMode)
+		if mode != "" && mode != wsModeTerminal && mode != wsModeSQLConsole {
+			return errors.New("WebSocket 模式只能是 terminal（终端）或 sql_console（SQL 控制台）")
+		}
+	}
 	c := &m.Config
 	c.Host = strings.TrimSpace(c.Host)
 	c.User = strings.TrimSpace(c.User)
@@ -186,7 +222,7 @@ func (m *Middleware) normalize() error {
 		c.Perms = map[string]bool{}
 	}
 	clean := map[string]bool{}
-	for _, d := range mwPermDefs[m.Type] {
+	for _, d := range mwPermsOf(m) {
 		v, ok := c.Perms[d.Key]
 		if !ok {
 			v = d.Default
@@ -255,6 +291,9 @@ func (m *Middleware) normalize() error {
 			}
 		}
 	case "websocket":
+		if c.isSQLConsole() {
+			return normalizeSQLConsole(m)
+		}
 		c.URL = strings.TrimSpace(c.URL)
 		if c.URL == "" {
 			return errors.New("请填写 WebSocket 地址")
@@ -309,7 +348,11 @@ func (s *Store) ListMiddleware() ([]*Middleware, error) {
 		var m Middleware
 		var cfg string
 		rows.Scan(&m.ID, &m.Name, &m.Type, &cfg, &m.CreatedAt, &m.UpdatedAt)
-		json.Unmarshal([]byte(cfg), &m.Config)
+		if decoded, err := decodeMWConfig(cfg); err == nil {
+			m.Config = decoded
+		} else {
+			json.Unmarshal([]byte(cfg), &m.Config)
+		}
 		m.normalize()
 		out = append(out, &m)
 	}
@@ -562,7 +605,7 @@ func (a *App) testMySQL(ctx context.Context, m *Middleware) (string, error) {
 
 func (a *App) mwSummary(m *Middleware) string {
 	on := []string{}
-	for _, d := range mwPermDefs[m.Type] {
+	for _, d := range mwPermsOf(m) {
 		if m.Config.Perms[d.Key] {
 			on = append(on, d.Label)
 		}
@@ -593,7 +636,12 @@ func (a *App) mwSummary(m *Middleware) string {
 			s += "；只允许：" + strings.Join(c.Topics, "、")
 		}
 	case "websocket":
-		if len(c.CommandAllow) > 0 {
+		if c.isSQLConsole() {
+			if list := m.datasourceListForAI(); list != "" {
+				s += "；数据源：" + list
+			}
+			s += fmt.Sprintf("；只读查询，必须写 LIMIT 且走索引，最多 %d 行，每次执行都要审批", c.maxRows())
+		} else if len(c.CommandAllow) > 0 {
 			s += "；pod_exec 只允许：" + strings.Join(c.CommandAllow, "、")
 		} else {
 			s += "；pod_exec 不限制命令"
@@ -618,32 +666,35 @@ type mwToolDef struct {
 	Name, Type, Desc string
 	Props            map[string]any
 	Required         []string
+	Mode             string
 }
 
 func mwToolDefs() []mwToolDef {
 	str := func(d string) map[string]any { return map[string]any{"type": "string", "description": d} }
 	return []mwToolDef{
 		{"db_query", "mysql", "在 MySQL / OceanBase 中间件上执行一条 SQL（一次只能一条）。服务端会解析 SQL 并按权限检查：SELECT/SHOW/DESCRIBE/EXPLAIN 需要「查」，INSERT 需要「增」，UPDATE 需要「改」，DELETE/TRUNCATE 需要「删」，CREATE/ALTER/DROP 需要「DDL」；未开启的权限会返回「无权限」。SELECT 会自动限制返回行数。UPDATE/DELETE 默认必须带 WHERE 条件。值请尽量用 ? 占位符配合 params 传入。",
-			map[string]any{"sql": str("一条 SQL 语句"), "params": map[string]any{"type": "array", "description": "按顺序替换 SQL 里的 ? 占位符（可选）", "items": map[string]any{}}}, []string{"sql"}},
+			map[string]any{"sql": str("一条 SQL 语句"), "params": map[string]any{"type": "array", "description": "按顺序替换 SQL 里的 ? 占位符（可选）", "items": map[string]any{}}}, []string{"sql"}, ""},
 		{"db_list_tables", "mysql", "列出 MySQL / OceanBase 中间件里的表（需要「查」权限）。",
-			map[string]any{"database": str("库名（可选，默认用中间件的默认库）")}, nil},
+			map[string]any{"database": str("库名（可选，默认用中间件的默认库）")}, nil, ""},
 		{"db_describe_table", "mysql", "查看一张表的列定义（需要「查」权限）。",
-			map[string]any{"table": str("表名，可以写成 库名.表名")}, []string{"table"}},
+			map[string]any{"table": str("表名，可以写成 库名.表名")}, []string{"table"}, ""},
 		{"redis_command", "redis", "在 Redis 中间件上执行一条命令。读命令需要「读」，写命令需要「写」，DEL/HDEL/LPOP 等需要「删」，EVAL 需要「脚本」。FLUSHALL/FLUSHDB/CONFIG/SHUTDOWN/DEBUG/KEYS 等危险命令一律禁止（找 key 请用 redis_scan）。",
-			map[string]any{"args": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": `命令和参数，例如 ["HGETALL","user:1"]`}, "command": str("也可以直接写成一行命令，例如 GET user:1（有 args 时忽略）")}, nil},
+			map[string]any{"args": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": `命令和参数，例如 ["HGETALL","user:1"]`}, "command": str("也可以直接写成一行命令，例如 GET user:1（有 args 时忽略）")}, nil, ""},
 		{"redis_scan", "redis", "用 SCAN 按模式查找 key（需要「读」权限），不会阻塞 Redis。",
-			map[string]any{"match": str("匹配模式，例如 user:*（可选）"), "max": map[string]any{"type": "integer", "description": "最多返回多少个 key，默认 100"}}, nil},
+			map[string]any{"match": str("匹配模式，例如 user:*（可选）"), "max": map[string]any{"type": "integer", "description": "最多返回多少个 key，默认 100"}}, nil, ""},
 		{"mq_send", "mq", "向消息队列发送一条消息（需要「发送」权限）。Kafka / RocketMQ：topic 是 Topic，key 是消息 key，tag 是 RocketMQ 的 Tag。RabbitMQ：只填 topic 时发到同名队列；同时填 key 时 topic 当作 exchange、key 当作 routing key。",
-			map[string]any{"topic": str("Topic / 队列 / exchange"), "body": str("消息内容"), "key": str("消息 key / routing key（可选）"), "tag": str("RocketMQ Tag（可选）")}, []string{"topic", "body"}},
+			map[string]any{"topic": str("Topic / 队列 / exchange"), "body": str("消息内容"), "key": str("消息 key / routing key（可选）"), "tag": str("RocketMQ Tag（可选）")}, []string{"topic", "body"}, ""},
 		{"mq_peek", "mq", "查看 Topic / 队列里最近的几条消息（需要「查看消息」权限）。只查看，不提交消费位点；RabbitMQ 会把取出的消息放回队列（会标记为 redelivered）。",
-			map[string]any{"topic": str("Topic / 队列名"), "max": map[string]any{"type": "integer", "description": "最多返回几条，默认 10"}}, []string{"topic"}},
-		{"mq_list_topics", "mq", "列出消息队列里的 Topic（需要「查看消息」权限；RabbitMQ 不支持列出队列）。", map[string]any{}, nil},
+			map[string]any{"topic": str("Topic / 队列名"), "max": map[string]any{"type": "integer", "description": "最多返回几条，默认 10"}}, []string{"topic"}, ""},
+		{"mq_list_topics", "mq", "列出消息队列里的 Topic（需要「查看消息」权限；RabbitMQ 不支持列出队列）。", map[string]any{}, nil, ""},
 		{"mq_create_topic", "mq", "创建 Topic / 队列（需要「管理」权限）。",
-			map[string]any{"topic": str("Topic / 队列名"), "partitions": map[string]any{"type": "integer", "description": "Kafka 分区数 / RocketMQ 队列数（可选）"}}, []string{"topic"}},
+			map[string]any{"topic": str("Topic / 队列名"), "partitions": map[string]any{"type": "integer", "description": "Kafka 分区数 / RocketMQ 队列数（可选）"}}, []string{"topic"}, ""},
 		{"pod_read_log", "websocket", "在 WebSocket 终端里查看日志文件末尾（需要「查日志」权限）。服务端固定执行 tail，不会运行其他命令。lines 不填默认 100，最大 2000。连接参数（如 app_code、pod_name）填这个中间件地址里要求的那些。",
-			map[string]any{"file": str("日志文件路径，例如 BusinessException.log 或 /var/log/app.log"), "lines": map[string]any{"type": "integer", "description": "末尾行数，默认 100，最大 2000"}}, []string{"file"}},
+			map[string]any{"file": str("日志文件路径，例如 BusinessException.log 或 /var/log/app.log"), "lines": map[string]any{"type": "integer", "description": "末尾行数，默认 100，最大 2000"}}, []string{"file"}, wsModeTerminal},
 		{"pod_exec", "websocket", "在 WebSocket 终端里执行一条命令（需要「执行命令」权限，默认关闭）。配置了允许的命令时，管道可以用 | 连接，但每一段的命令都要在允许列表中，不能使用重定向或命令替换。允许列表为空时，命令会原样发到远端 shell。列表里缺的命令请在中间件配置里追加。find 只允许 -name、-mmin、-mtime、-type、-size、-maxdepth；cut 只允许 -c；rg 不能使用 --pre。",
-			map[string]any{"command": str("要执行的命令，例如 ls /app/logs"), "timeout": map[string]any{"type": "integer", "description": "超时秒数（可选，不能超过中间件里配置的超时）"}}, []string{"command"}},
+			map[string]any{"command": str("要执行的命令，例如 ls /app/logs"), "timeout": map[string]any{"type": "integer", "description": "超时秒数（可选，不能超过中间件里配置的超时）"}}, []string{"command"}, wsModeTerminal},
+		{wsSQLQueryTool, "websocket", "在 WebSocket SQL 控制台中间件上执行一条只读查询。必须是单条 SELECT，必须写 LIMIT（不超过允许的行数，最多 200 行），必须走索引。每次调用都要在控制台审批。参数 database 填写该中间件已配置的数据源别名；请根据用户的问题，对照工具说明里列出的数据源及其说明，选择最匹配的一项。",
+			map[string]any{"sql": str("一条只读 SELECT，必须带 LIMIT"), "database": str("数据源别名（见工具说明中的数据源列表）")}, []string{"sql", "database"}, wsModeSQLConsole},
 	}
 }
 
@@ -662,6 +713,15 @@ func (a *App) mwToolListFor(ms []*Middleware, packs map[int64][]string) []map[st
 	out := []map[string]any{}
 	for _, d := range mwToolDefs() {
 		list := byType[d.Type]
+		if d.Mode != "" {
+			filtered := []*Middleware{}
+			for _, m := range list {
+				if m.Config.wsMode() == d.Mode {
+					filtered = append(filtered, m)
+				}
+			}
+			list = filtered
+		}
 		if len(list) == 0 {
 			continue
 		}
@@ -674,8 +734,16 @@ func (a *App) mwToolListFor(ms []*Middleware, packs map[int64][]string) []map[st
 			props[k] = v
 		}
 		req := append([]string{"middleware"}, d.Required...)
-		if d.Type == "websocket" {
+		if d.Name == wsSQLQueryTool {
+			aliases := sqlConsoleAliases(list)
+			if len(aliases) > 0 {
+				props["database"] = map[string]any{"type": "string", "enum": aliases, "description": "数据源别名。请根据用户的问题，对照下面列出的数据源说明选择最匹配的一项"}
+			}
+		} else if d.Type == "websocket" {
 			for _, n := range wsPlaceholders(list) {
+				if isWSInternalPlaceholder(n) {
+					continue
+				}
 				if _, ok := props[n]; ok {
 					continue
 				}
@@ -806,11 +874,15 @@ func (a *App) callMWTool(ctx context.Context, client, tool string, args map[stri
 	var m *Middleware
 	avail := []string{}
 	for _, x := range ms {
-		if x.Type == def.Type {
-			avail = append(avail, x.Name)
-			if x.Name == name {
-				m = x
-			}
+		if x.Type != def.Type {
+			continue
+		}
+		if def.Mode != "" && x.Config.wsMode() != def.Mode {
+			continue
+		}
+		avail = append(avail, x.Name)
+		if x.Name == name {
+			m = x
 		}
 	}
 	if m == nil {
@@ -830,6 +902,9 @@ func (a *App) callMWTool(ctx context.Context, client, tool string, args map[stri
 	case "mq":
 		return a.callMQ(ctx, c, args)
 	case "websocket":
+		if def.Name == wsSQLQueryTool {
+			return a.callWSSQL(ctx, c, args)
+		}
 		return a.callWS(ctx, c, args)
 	}
 	return "未知工具", true

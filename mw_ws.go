@@ -39,7 +39,7 @@ func wsPlaceholders(ms []*Middleware) []string {
 		for _, blob := range blobs {
 			for _, g := range wsPlaceholderRe.FindAllStringSubmatch(blob, -1) {
 				n := g[1]
-				if n == "command" || seen[n] {
+				if isWSInternalPlaceholder(n) || seen[n] {
 					continue
 				}
 				seen[n] = true
@@ -668,6 +668,9 @@ func wsVars(args map[string]any, command string) map[string]string {
 }
 
 func (a *App) callWS(ctx context.Context, c *mwCall, args map[string]any) (string, bool) {
+	if c.m.Config.isSQLConsole() {
+		return c.blocked("该中间件是 SQL 控制台，请使用 ws_sql_query"), true
+	}
 	var command string
 	var err error
 	switch c.tool {
@@ -747,6 +750,9 @@ func (a *App) execWS(ctx context.Context, m *Middleware, vars map[string]string,
 }
 
 func (a *App) testWS(ctx context.Context, m *Middleware) (string, error) {
+	if m.Config.isSQLConsole() {
+		return a.testWSSQLConsole(ctx, m)
+	}
 	if strings.Contains(m.Config.URL, "{{") {
 		dummy := map[string]string{}
 		for _, n := range wsPlaceholders([]*Middleware{m}) {

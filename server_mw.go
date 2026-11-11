@@ -100,7 +100,8 @@ func (a *App) prepareMW(in *mwInput, id int64) (*Middleware, error) {
 func (a *App) registerMW(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/middleware", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{
-			"items": a.mwViews(), "perm_defs": mwPermDefs, "type_labels": mwTypeLabel, "mq_kinds": mqKindLabel,
+			"items": a.mwViews(), "perm_defs": mwPermDefs, "perm_defs_sql_console": mwSQLConsolePerms,
+			"type_labels": mwTypeLabel, "mq_kinds": mqKindLabel,
 		})
 	})
 	save := func(w http.ResponseWriter, r *http.Request, id int64) {
