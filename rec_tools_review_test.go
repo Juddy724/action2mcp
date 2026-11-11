@@ -62,8 +62,10 @@ func TestReview051Finding01FailClosedStructured(t *testing.T) {
 	seedRecRequest(t, app, cmd)
 	cmdText := mustTool(t, c, "rec_get_request", map[string]any{"request_id": cmd.ID, "max_body": 100000})
 	forbidText(t, "command prefix", cmdText, "tok-FAKE", "eyJhbGci", fakeToken, fakeJWT)
-	if strings.Contains(cmdText, "…[已截断]") {
-		t.Fatalf("truncation tail returned: %s", cmdText)
+	// Our own trailing marker is expected exactly once; the raw text after the
+	// capture marker (the JWT) is already rejected by forbidText above.
+	if strings.Count(cmdText, "…[已截断]") != 1 {
+		t.Fatalf("expected exactly one truncation marker: %s", cmdText)
 	}
 
 	// Valid outer JSON whose inner string is incomplete JSON.
