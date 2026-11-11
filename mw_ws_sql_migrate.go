@@ -8,7 +8,10 @@ import (
 	"strings"
 )
 
-const schemaVersionSQLConsole = 8
+const (
+	schemaVersionSQLConsole    = 8
+	schemaVersionSQLConsoleEnv = 9
+)
 
 func sqlConsoleNameFromTool(name string) string {
 	name = strings.TrimSpace(name)
@@ -240,10 +243,11 @@ func lookupOrReserveSQLConsoleName(tx *sql.Tx, want, rawURL string) (id int64, r
 	return 0, false, want, fmt.Errorf("无法为中间件分配名称（%s 已被占用）", want)
 }
 
-// extractDatasourceFromMessages copies literal fixed fields: dsId onto one
-// datasource (alias "default", description left empty for the user to fill),
-// and spaceCode/envId/envType/dbType onto middleware-level defaults. Those JSON
-// paths are rewritten to {{ds.*}} placeholders.
+// extractDatasourceFromMessages copies literal fixed fields onto one
+// datasource (alias "default", description left empty for the user to fill):
+// dsId, envId and envType go on the row; spaceCode and dbType go to
+// middleware-level defaults. Those JSON paths are rewritten to {{ds.*}}
+// placeholders. A missing envType becomes PROD.
 func extractDatasourceFromMessages(messages []string, sqlPath string) (MWDatasource, MWSQLDefaults, []string, error) {
 	ds := MWDatasource{Alias: "default"}
 	var defaults MWSQLDefaults
@@ -278,6 +282,9 @@ func extractDatasourceFromMessages(messages []string, sqlPath string) (MWDatasou
 			}
 		}
 		out = append(out, strings.TrimRight(prefix, " ")+" "+string(compactJSON(v)))
+	}
+	if strings.TrimSpace(ds.EnvType) == "" {
+		ds.EnvType = "PROD"
 	}
 	return ds, defaults, out, nil
 }
@@ -319,9 +326,9 @@ func assignHarvestedField(ds *MWDatasource, defaults *MWSQLDefaults, path string
 		case "ds_id":
 			ds.DSID = val
 		case "env_id":
-			defaults.EnvID = val
+			ds.EnvID = val
 		case "env_type":
-			defaults.EnvType = fmt.Sprint(val)
+			ds.EnvType = strings.TrimSpace(fmt.Sprint(val))
 		case "db_type":
 			defaults.DBType = fmt.Sprint(val)
 		}
@@ -349,4 +356,73 @@ func (s *Store) ConvertToolToSQLMiddleware(id int64) (*Middleware, error) {
 		return nil, errors.New("这个工具不是带 SQL 护栏的 WebSocket 工具，或已经转换过了")
 	}
 	return s.GetMiddleware(ids[0])
+}
+
+func (s *Store) migrateV9SQLConsoleRowEnv() error {
+	var ver int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil {
+		return err
+	}
+	if ver >= schemaVersionSQLConsoleEnv {
+		return nil
+	}
+	return s.promoteAllSQLConsoleRowEnv()
+}
+
+// promoteAllSQLConsoleRowEnv copies leftover middleware-level env_id / env_type
+// onto datasource rows that are missing them, then drops those default keys.
+// Idempotent and transactional.
+func (s *Store) promoteAllSQLConsoleRowEnv() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := promoteSQLConsoleRowEnvTx(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func promoteSQLConsoleRowEnvTx(tx *sql.Tx) error {
+	rows, err := tx.Query(`SELECT id,type,config FROM middleware`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type row struct {
+		id     int64
+		typ    string
+		config string
+	}
+	var list []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.typ, &r.config); err != nil {
+			return err
+		}
+		list = append(list, r)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	ts := now()
+	for _, r := range list {
+		if r.typ != "websocket" {
+			continue
+		}
+		c, err := decodeMWConfig(r.config)
+		if err != nil || !c.isSQLConsole() || !sqlConsoleEnvNeedsPromote(c) {
+			continue
+		}
+		applySQLConsoleEnvPromotion(&c)
+		b, err := json.Marshal(c)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE middleware SET config=?,updated_at=? WHERE id=?`, string(b), ts, r.id); err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -9,16 +9,31 @@ import (
 	"testing"
 )
 
+func withRowEnv(sources []MWDatasource) []MWDatasource {
+	out := make([]MWDatasource, len(sources))
+	copy(out, sources)
+	for i := range out {
+		if isEmptyJSONValue(out[i].EnvID) {
+			out[i].EnvID = json.Number("70007")
+		}
+		if strings.TrimSpace(out[i].EnvType) == "" {
+			out[i].EnvType = "TEST"
+		}
+	}
+	return out
+}
+
 func sqlConsoleTestMW(name, url string, sources ...MWDatasource) *Middleware {
 	if len(sources) == 0 {
 		sources = []MWDatasource{{Alias: "orders", DSID: json.Number("90001"), Description: "订单测试库"}}
 	}
+	sources = withRowEnv(sources)
 	return &Middleware{Name: name, Type: "websocket", Config: MWConfig{
 		WSMode:      wsModeSQLConsole,
 		URL:         url,
 		WSMessages:  []string{`execute {"data":{"sql":"{{sql}}","spaceCode":"{{ds.space_code}}","dsId":"{{ds.ds_id}}","envId":"{{ds.env_id}}","envType":"{{ds.env_type}}","dbType":"{{ds.db_type}}"},"token":"{{header.sso-epctoken}}"}`},
 		SQLPath:     "data.sql",
-		SQLDefaults: MWSQLDefaults{SpaceCode: "spc_alpha", EnvID: json.Number("70007"), EnvType: "TEST", DBType: "mysql"},
+		SQLDefaults: MWSQLDefaults{SpaceCode: "spc_alpha", DBType: "mysql"},
 		Datasources: sources,
 		MaxRows:     200,
 		TimeoutSec:  15,
@@ -148,7 +163,7 @@ func TestSQLConsoleTokenAbsentFailClosed(t *testing.T) {
 	if !isErr || (!strings.Contains(text, "请求头") && !strings.Contains(text, "登录")) {
 		t.Fatalf("AI path should fail closed before approval, got isErr=%v text=%q", isErr, text)
 	}
-	assertHiddenFromAI(t, text, fake.token, "90001", "spc_alpha")
+	assertHiddenFromAI(t, text, fake.token, "90001", "spc_alpha", "70007")
 	pending, _ := a.store.listApprovals("pending", 20)
 	if len(pending) != 0 {
 		t.Fatalf("missing token should not create an approval card: %+v", pending)
@@ -179,9 +194,7 @@ func TestSQLConsoleUnknownAlias(t *testing.T) {
 	if !isErr || !strings.Contains(text, "missing") || !strings.Contains(text, "orders") || !strings.Contains(text, "tasks") {
 		t.Fatalf("unknown alias error should list allowed names: %s", text)
 	}
-	if strings.Contains(text, "90001") || strings.Contains(text, "90002") {
-		t.Fatalf("error leaked datasource ids: %s", text)
-	}
+	assertHiddenFromAI(t, text, fake.token, "90001", "90002", "70007")
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 	if fake.conns != 0 {
@@ -248,7 +261,7 @@ func TestSQLConsoleSchemaListsAliasesNotIDs(t *testing.T) {
 	}
 	blob, _ := json.Marshal(found)
 	text := string(blob) + fake.wsURL(s.URL)
-	assertHiddenFromAI(t, string(blob), fake.token, "90001", "90002", "spc_alpha", m.Config.URL)
+	assertHiddenFromAI(t, string(blob), fake.token, "90001", "90002", "spc_alpha", "70007", m.Config.URL)
 	schema := found["inputSchema"].(map[string]any)
 	props := schema["properties"].(map[string]any)
 	db := props["database"].(map[string]any)
@@ -307,7 +320,7 @@ func TestSQLConsoleApprovalPreviewHidesIDs(t *testing.T) {
 	if reply.isError {
 		t.Fatalf("approved call failed: %s", reply.text)
 	}
-	assertHiddenFromAI(t, reply.text, fake.token, "90001", "spc_alpha")
+	assertHiddenFromAI(t, reply.text, fake.token, "90001", "spc_alpha", "70007")
 }
 
 func TestSQLConsoleTestConnectionNeverRunsSQL(t *testing.T) {
@@ -340,7 +353,7 @@ func TestSQLConsoleAuditHasNoIDs(t *testing.T) {
 		t.Fatal("expected audit row")
 	}
 	b, _ := json.Marshal(rows)
-	assertHiddenFromAI(t, string(b), fake.token, "90001", "spc_alpha")
+	assertHiddenFromAI(t, string(b), fake.token, "90001", "spc_alpha", "70007")
 }
 
 func TestMigrateWSToolToSQLMiddleware(t *testing.T) {
@@ -370,7 +383,7 @@ PRAGMA user_version=7;`)
 			t.Fatal(err)
 		}
 		var ver int
-		if err := st.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil || ver != 8 {
+		if err := st.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil || ver != 9 {
 			t.Fatalf("version=%d err=%v", ver, err)
 		}
 		if _, err := st.GetToolByName("demo_sql_query"); err == nil {
@@ -386,11 +399,40 @@ PRAGMA user_version=7;`)
 		if len(mw.Config.Datasources) != 1 || mw.Config.Datasources[0].Alias != "default" {
 			t.Fatalf("datasources=%+v", mw.Config.Datasources)
 		}
-		if fmtSprint(mw.Config.Datasources[0].DSID) != "90001" {
-			t.Fatalf("dsid=%v", mw.Config.Datasources[0].DSID)
+		ds := mw.Config.Datasources[0]
+		if fmtSprint(ds.DSID) != "90001" {
+			t.Fatalf("dsid=%v", ds.DSID)
 		}
-		if mw.Config.SQLDefaults.SpaceCode != "spc_alpha" || fmtSprint(mw.Config.SQLDefaults.EnvID) != "70007" {
+		if fmtSprint(ds.EnvID) != "70007" {
+			t.Fatalf("row envId=%v", ds.EnvID)
+		}
+		if ds.EnvType != "TEST" {
+			t.Fatalf("row envType=%q", ds.EnvType)
+		}
+		if mw.Config.SQLDefaults.SpaceCode != "spc_alpha" || mw.Config.SQLDefaults.DBType != "mysql" {
 			t.Fatalf("defaults=%+v", mw.Config.SQLDefaults)
+		}
+		if !isEmptyJSONValue(mw.Config.SQLDefaults.legacyEnvID) || mw.Config.SQLDefaults.legacyEnvType != "" {
+			t.Fatalf("legacy default env keys should have been dropped: %+v", mw.Config.SQLDefaults)
+		}
+		raw, err := middlewareRawConfig(st, mw.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(raw, `"env_id"`) && strings.Contains(raw, `"sql_defaults"`) {
+			// env_id must live under datasources, not sql_defaults
+			var parsed map[string]any
+			if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+				t.Fatal(err)
+			}
+			if defs, _ := parsed["sql_defaults"].(map[string]any); defs != nil {
+				if _, ok := defs["env_id"]; ok {
+					t.Fatalf("sql_defaults still has env_id: %s", raw)
+				}
+				if _, ok := defs["env_type"]; ok {
+					t.Fatalf("sql_defaults still has env_type: %s", raw)
+				}
+			}
 		}
 		packs, _ := st.ListPacks()
 		if len(packs) != 1 || len(packs[0].ToolIDs) != 0 || len(packs[0].MiddlewareIDs) != 1 || packs[0].MiddlewareIDs[0] != mw.ID {
@@ -406,5 +448,202 @@ func TestSQLConsoleNameFromTool(t *testing.T) {
 	}
 	if sqlConsoleNameFromTool("other") != "other" {
 		t.Fatal(sqlConsoleNameFromTool("other"))
+	}
+}
+
+func middlewareRawConfig(st *Store, id int64) (string, error) {
+	var raw string
+	err := st.db.QueryRow(`SELECT config FROM middleware WHERE id=?`, id).Scan(&raw)
+	return raw, err
+}
+
+func TestSQLConsolePerRowEnvRouting(t *testing.T) {
+	fake := newCountingWS(1)
+	s := fake.start(t)
+	a := approvalTestApp(t)
+	m := saveSQLConsole(t, a, fake, s.URL,
+		MWDatasource{Alias: "orders", DSID: json.Number("90001"), EnvID: json.Number("71001"), EnvType: "TEST", Description: "订单测试库"},
+		MWDatasource{Alias: "tasks", DSID: json.Number("90002"), EnvID: json.Number("72002"), EnvType: "PROD", Description: "任务库"},
+	)
+	tool, err := m.sqlConsoleTool(mustDS(t, m, "tasks"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Execute(tool, map[string]any{"sql": "SELECT id FROM t WHERE id=1 LIMIT 1", "database": "tasks"}); err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	joined := strings.Join(fake.all, "\n")
+	fake.mu.Unlock()
+	if !strings.Contains(joined, `"dsId":90002`) && !strings.Contains(joined, `"dsId":"90002"`) {
+		t.Fatalf("expected tasks dsId=90002, got %s", joined)
+	}
+	if !strings.Contains(joined, `"envId":72002`) && !strings.Contains(joined, `"envId":"72002"`) {
+		t.Fatalf("expected tasks envId=72002, got %s", joined)
+	}
+	if !strings.Contains(joined, `"envType":"PROD"`) {
+		t.Fatalf("expected tasks envType=PROD, got %s", joined)
+	}
+	if strings.Contains(joined, `"dsId":90001`) || strings.Contains(joined, `"dsId":"90001"`) || strings.Contains(joined, `"envId":71001`) || strings.Contains(joined, `"envId":"71001"`) || strings.Contains(joined, `"envType":"TEST"`) {
+		t.Fatalf("sent the other datasource env: %s", joined)
+	}
+}
+
+func TestSQLConsoleValidateDatasourceUniqueness(t *testing.T) {
+	dup := sqlConsoleTestMW("sqlconsole", "ws://127.0.0.1:9/ws",
+		MWDatasource{Alias: "orders", DSID: json.Number("90001"), EnvID: json.Number("8"), EnvType: "PROD"},
+		MWDatasource{Alias: "tasks", DSID: json.Number("90001"), EnvID: json.Number("8"), EnvType: "prod"},
+	)
+	err := dup.normalize()
+	if err == nil || !strings.Contains(err.Error(), "完全相同") {
+		t.Fatalf("expected unique triple error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "90001") || strings.Contains(err.Error(), "8") {
+		t.Fatalf("uniqueness error leaked ids: %v", err)
+	}
+
+	alias := sqlConsoleTestMW("sqlconsole", "ws://127.0.0.1:9/ws",
+		MWDatasource{Alias: "Orders", DSID: json.Number("1"), EnvID: json.Number("8"), EnvType: "PROD"},
+		MWDatasource{Alias: "orders", DSID: json.Number("2"), EnvID: json.Number("9"), EnvType: "TEST"},
+	)
+	if err := alias.normalize(); err == nil || !strings.Contains(err.Error(), "重复") {
+		t.Fatalf("expected alias unique error, got %v", err)
+	}
+
+	missing := sqlConsoleTestMW("sqlconsole", "ws://127.0.0.1:9/ws",
+		MWDatasource{Alias: "orders", DSID: json.Number("90001"), EnvType: "PROD"},
+	)
+	missing.Config.Datasources[0].EnvID = nil
+	if err := missing.normalize(); err == nil || !strings.Contains(err.Error(), "envId") {
+		t.Fatalf("expected missing envId error, got %v", err)
+	}
+
+	// Same dsId + envId but different envType is allowed.
+	ok := sqlConsoleTestMW("sqlconsole", "ws://127.0.0.1:9/ws",
+		MWDatasource{Alias: "orders_test", DSID: json.Number("90001"), EnvID: json.Number("8"), EnvType: "TEST"},
+		MWDatasource{Alias: "orders_prod", DSID: json.Number("90001"), EnvID: json.Number("8"), EnvType: "PROD"},
+	)
+	if err := ok.normalize(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLConsoleEnvTypeDefaultsToPROD(t *testing.T) {
+	m := sqlConsoleTestMW("sqlconsole", "ws://127.0.0.1:9/ws",
+		MWDatasource{Alias: "orders", DSID: json.Number("90001"), EnvID: json.Number("70007")},
+	)
+	m.Config.Datasources[0].EnvType = ""
+	if err := m.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if m.Config.Datasources[0].EnvType != "PROD" {
+		t.Fatalf("envType=%q", m.Config.Datasources[0].EnvType)
+	}
+	vals := m.Config.Datasources[0].fieldValues(&m.Config)
+	if fmtSprint(vals["env_type"]) != "PROD" {
+		t.Fatalf("fieldValues env_type=%v", vals["env_type"])
+	}
+}
+
+func TestMigrateV8SQLConsoleEnvToRows(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "v8env.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := `{"url":"ws://127.0.0.1:9/ws","ws_mode":"sql_console","ws_messages":["execute {\"data\":{\"sql\":\"{{sql}}\",\"spaceCode\":\"{{ds.space_code}}\",\"dsId\":\"{{ds.ds_id}}\",\"envId\":\"{{ds.env_id}}\",\"envType\":\"{{ds.env_type}}\",\"dbType\":\"{{ds.db_type}}\"}}"],"sql_path":"data.sql","sql_defaults":{"space_code":"spc_alpha","env_id":70007,"env_type":"TEST","db_type":"mysql"},"datasources":[{"alias":"default","ds_id":90001}],"max_rows":200,"timeout_sec":15,"perms":{"select":true}}`
+	_, err = db.Exec(`CREATE TABLE tools(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, title TEXT, description TEXT, method TEXT, url TEXT, headers TEXT, body TEXT, params TEXT, cred_headers TEXT, source_request_id INTEGER, created_at TEXT, updated_at TEXT, approval TEXT NOT NULL DEFAULT 'off', rev INTEGER NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}');
+CREATE TABLE packs(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, description TEXT, enabled INTEGER, created_at TEXT);
+CREATE TABLE pack_tools(pack_id INTEGER REFERENCES packs(id) ON DELETE CASCADE, tool_id INTEGER REFERENCES tools(id) ON DELETE CASCADE, PRIMARY KEY(pack_id, tool_id));
+CREATE TABLE middleware(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, type TEXT, config TEXT, created_at TEXT, updated_at TEXT);
+CREATE TABLE pack_middleware(pack_id INTEGER REFERENCES packs(id) ON DELETE CASCADE, mw_id INTEGER REFERENCES middleware(id) ON DELETE CASCADE, PRIMARY KEY(pack_id, mw_id));
+CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT);
+INSERT INTO middleware(name,type,config,created_at,updated_at) VALUES('demo_sql','websocket',?, '', '');
+PRAGMA user_version=8;`, cfg)
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		st, err := OpenStore(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ver int
+		if err := st.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil || ver != 9 {
+			t.Fatalf("version=%d err=%v", ver, err)
+		}
+		mw, err := st.GetMiddlewareByName("demo_sql")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(mw.Config.Datasources) != 1 || mw.Config.Datasources[0].Alias != "default" {
+			t.Fatalf("datasources=%+v", mw.Config.Datasources)
+		}
+		ds := mw.Config.Datasources[0]
+		if fmtSprint(ds.DSID) != "90001" || fmtSprint(ds.EnvID) != "70007" || ds.EnvType != "TEST" {
+			t.Fatalf("row not promoted: %+v", ds)
+		}
+		if !isEmptyJSONValue(mw.Config.SQLDefaults.legacyEnvID) || mw.Config.SQLDefaults.legacyEnvType != "" {
+			t.Fatalf("legacy keys still present: %+v", mw.Config.SQLDefaults)
+		}
+		raw, err := middlewareRawConfig(st, mw.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var parsed map[string]any
+		if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+			t.Fatal(err)
+		}
+		if defs, _ := parsed["sql_defaults"].(map[string]any); defs != nil {
+			if _, ok := defs["env_id"]; ok {
+				t.Fatalf("stored sql_defaults still has env_id: %s", raw)
+			}
+			if _, ok := defs["env_type"]; ok {
+				t.Fatalf("stored sql_defaults still has env_type: %s", raw)
+			}
+		}
+		st.db.Close()
+	}
+}
+
+func TestSQLConsoleSavePromotesLegacyDefaults(t *testing.T) {
+	a := approvalTestApp(t)
+	raw := `{"url":"ws://127.0.0.1:9/ws","ws_mode":"sql_console","ws_messages":["execute {\"data\":{\"sql\":\"{{sql}}\"}}"],"sql_defaults":{"space_code":"spc_alpha","env_id":70007,"env_type":"TEST","db_type":"mysql"},"datasources":[{"alias":"default","ds_id":90001}],"max_rows":200,"timeout_sec":15,"perms":{"select":true}}`
+	c, err := decodeMWConfig(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isEmptyJSONValue(c.SQLDefaults.legacyEnvID) || c.SQLDefaults.legacyEnvType != "TEST" {
+		t.Fatalf("expected to capture legacy defaults, got %+v", c.SQLDefaults)
+	}
+	m := &Middleware{Name: "legacy_sql", Type: "websocket", Config: c}
+	if err := a.store.SaveMiddleware(m); err != nil {
+		t.Fatal(err)
+	}
+	got, err := a.store.GetMiddleware(m.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ds := got.Config.Datasources[0]
+	if fmtSprint(ds.EnvID) != "70007" || ds.EnvType != "TEST" {
+		t.Fatalf("saved row missing env: %+v", ds)
+	}
+	rawSaved, err := middlewareRawConfig(a.store, m.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(rawSaved), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if defs, _ := parsed["sql_defaults"].(map[string]any); defs != nil {
+		if _, ok := defs["env_id"]; ok {
+			t.Fatalf("saved sql_defaults still has env_id: %s", rawSaved)
+		}
+		if _, ok := defs["env_type"]; ok {
+			t.Fatalf("saved sql_defaults still has env_type: %s", rawSaved)
+		}
 	}
 }

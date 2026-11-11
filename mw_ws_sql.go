@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -8,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -19,16 +21,21 @@ const (
 )
 
 // MWSQLDefaults are connection fields shared by every datasource in a SQL 控制台
-// middleware. A datasource row may override them (advanced).
+// middleware. Only spaceCode and dbType are middleware-level defaults; envId
+// and envType live on each datasource row. A row may override spaceCode/dbType
+// (advanced). Legacy env_id / env_type keys in old stored defaults are captured
+// during decode so they can be copied onto rows, then dropped on save.
 type MWSQLDefaults struct {
 	SpaceCode string `json:"space_code,omitempty"`
-	EnvID     any    `json:"env_id,omitempty"`
-	EnvType   string `json:"env_type,omitempty"`
 	DBType    string `json:"db_type,omitempty"`
+
+	legacyEnvID   any
+	legacyEnvType string
 }
 
 // MWDatasource is one AI-visible database alias. The user fills in a name, the
-// datasource id, and an optional description shown to the AI. Identifiers
+// datasource id, envId, envType, and an optional description shown to the AI.
+// (dsId, envId, envType) together uniquely identify a database. Identifiers
 // themselves never appear in MCP schemas, approval previews, or audit text.
 type MWDatasource struct {
 	Alias       string         `json:"alias"`
@@ -39,8 +46,123 @@ type MWDatasource struct {
 	SpaceCode   string         `json:"space_code,omitempty"` // advanced override
 	EnvID       any            `json:"env_id,omitempty"`
 	EnvType     string         `json:"env_type,omitempty"`
-	DBType      string         `json:"db_type,omitempty"`
+	DBType      string         `json:"db_type,omitempty"` // advanced override
 	Fields      map[string]any `json:"fields,omitempty"`
+}
+
+func (d *MWSQLDefaults) UnmarshalJSON(b []byte) error {
+	b = bytes.TrimSpace(b)
+	if len(b) == 0 || bytes.Equal(b, []byte("null")) {
+		*d = MWSQLDefaults{}
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	var raw map[string]any
+	if err := dec.Decode(&raw); err != nil {
+		return err
+	}
+	out := MWSQLDefaults{}
+	if v, ok := raw["space_code"]; ok && !isEmptyJSONValue(v) {
+		out.SpaceCode = strings.TrimSpace(fmt.Sprint(v))
+	}
+	if v, ok := raw["db_type"]; ok && !isEmptyJSONValue(v) {
+		out.DBType = strings.TrimSpace(fmt.Sprint(v))
+	}
+	if v, ok := raw["env_id"]; ok && !isEmptyJSONValue(v) {
+		out.legacyEnvID = v
+	}
+	if v, ok := raw["env_type"]; ok && !isEmptyJSONValue(v) {
+		out.legacyEnvType = strings.TrimSpace(fmt.Sprint(v))
+	}
+	*d = out
+	return nil
+}
+
+func envTypeOrPROD(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "PROD"
+	}
+	return s
+}
+
+func jsonScalarKey(v any) string {
+	if isEmptyJSONValue(v) {
+		return ""
+	}
+	switch x := v.(type) {
+	case json.Number:
+		return strings.TrimSpace(x.String())
+	case float64:
+		if x == float64(int64(x)) && x >= -1e15 && x <= 1e15 {
+			return strconv.FormatInt(int64(x), 10)
+		}
+		return strconv.FormatFloat(x, 'f', -1, 64)
+	case float32:
+		return jsonScalarKey(float64(x))
+	case int:
+		return strconv.Itoa(x)
+	case int32:
+		return strconv.FormatInt(int64(x), 10)
+	case int64:
+		return strconv.FormatInt(x, 10)
+	case uint64:
+		return strconv.FormatUint(x, 10)
+	case string:
+		return strings.TrimSpace(x)
+	default:
+		return strings.TrimSpace(fmt.Sprint(v))
+	}
+}
+
+func datasourceTripleKey(d MWDatasource) string {
+	return jsonScalarKey(d.DSID) + "\x00" + jsonScalarKey(d.EnvID) + "\x00" + strings.ToLower(envTypeOrPROD(d.EnvType))
+}
+
+// applySQLConsoleEnvPromotion copies env_id / env_type from leftover
+// middleware-level defaults onto any row that is missing them, then drops the
+// old default keys. Empty envType becomes PROD. Idempotent.
+func applySQLConsoleEnvPromotion(c *MWConfig) {
+	if c == nil {
+		return
+	}
+	legacyID := c.SQLDefaults.legacyEnvID
+	legacyType := strings.TrimSpace(c.SQLDefaults.legacyEnvType)
+	for i := range c.Datasources {
+		if isEmptyJSONValue(c.Datasources[i].EnvID) && !isEmptyJSONValue(legacyID) {
+			c.Datasources[i].EnvID = legacyID
+		}
+		if strings.TrimSpace(c.Datasources[i].EnvType) == "" && legacyType != "" {
+			c.Datasources[i].EnvType = legacyType
+		}
+		if strings.TrimSpace(c.Datasources[i].Alias) == "" && isEmptyJSONValue(c.Datasources[i].DSID) {
+			continue
+		}
+		if strings.TrimSpace(c.Datasources[i].EnvType) == "" {
+			c.Datasources[i].EnvType = "PROD"
+		}
+	}
+	c.SQLDefaults.legacyEnvID = nil
+	c.SQLDefaults.legacyEnvType = ""
+}
+
+func sqlConsoleEnvNeedsPromote(c MWConfig) bool {
+	if !c.isSQLConsole() {
+		return false
+	}
+	if !isEmptyJSONValue(c.SQLDefaults.legacyEnvID) || strings.TrimSpace(c.SQLDefaults.legacyEnvType) != "" {
+		return true
+	}
+	for _, d := range c.Datasources {
+		if strings.TrimSpace(d.Alias) == "" && isEmptyJSONValue(d.DSID) {
+			continue
+		}
+		if isEmptyJSONValue(d.EnvID) || strings.TrimSpace(d.EnvType) == "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *MWConfig) wsMode() string {
@@ -110,15 +232,13 @@ func (d MWDatasource) fieldValues(c *MWConfig) map[string]any {
 	}
 	if c != nil {
 		put("space_code", c.SQLDefaults.SpaceCode)
-		put("env_id", c.SQLDefaults.EnvID)
-		put("env_type", c.SQLDefaults.EnvType)
 		put("db_type", c.SQLDefaults.DBType)
 	}
 	put("space_code", d.SpaceCode)
-	put("env_id", d.EnvID)
-	put("env_type", d.EnvType)
 	put("db_type", d.DBType)
 	put("ds_id", d.DSID)
+	put("env_id", d.EnvID)
+	put("env_type", envTypeOrPROD(d.EnvType))
 	for k, v := range d.Fields {
 		k = strings.TrimSpace(k)
 		if k == "" || isEmptyJSONValue(v) {
@@ -249,6 +369,7 @@ func normalizeSQLConsole(m *Middleware) error {
 	if !strings.HasPrefix(c.URL, "ws://") && !strings.HasPrefix(c.URL, "wss://") {
 		return errors.New("WebSocket 地址必须以 ws:// 或 wss:// 开头")
 	}
+	applySQLConsoleEnvPromotion(c)
 	c.SQLPath = c.sqlPath()
 	c.WSMessages = cleanLines(c.WSMessages)
 	if len(c.WSMessages) == 0 {
@@ -290,14 +411,26 @@ func normalizeSQLConsole(m *Middleware) error {
 		if isEmptyJSONValue(d.DSID) {
 			return fmt.Errorf("数据源「%s」请填写数据源 ID", d.Alias)
 		}
+		if isEmptyJSONValue(d.EnvID) {
+			return fmt.Errorf("数据源「%s」请填写 envId", d.Alias)
+		}
+		d.EnvType = envTypeOrPROD(d.EnvType)
 		d.Description = strings.TrimSpace(d.Description)
 		if d.MaxRows < 0 || d.MaxRows > sqlGuardMaxRowsCap {
 			return fmt.Errorf("数据源「%s」的最多行数必须在 1–%d 之间", d.Alias, sqlGuardMaxRowsCap)
 		}
 		clean = append(clean, d)
 	}
+	triples := map[string]string{}
+	for _, d := range clean {
+		key := datasourceTripleKey(d)
+		if prev, ok := triples[key]; ok {
+			return fmt.Errorf("数据源「%s」与「%s」的数据源 ID、envId、envType 完全相同；这三个值必须一起唯一确定一个库", d.Alias, prev)
+		}
+		triples[key] = d.Alias
+	}
 	if len(clean) == 0 {
-		return errors.New("请至少添加一个数据源：填写名称、数据源 ID，以及给 AI 看的说明")
+		return errors.New("请至少添加一个数据源：填写名称、数据源 ID、envId，以及给 AI 看的说明")
 	}
 	c.Datasources = clean
 	if c.WSHeaders == nil {
