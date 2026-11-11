@@ -130,6 +130,7 @@ func (s *Store) convertOneWSToolTx(tx *sql.Tx, toolID int64, name, title, desc, 
 			return 0, fmt.Errorf("工具 %s 的请求头无法解析", name)
 		}
 	}
+	normalizeCookieHeaderBinding(headers)
 	wantName := sqlConsoleNameFromTool(name)
 	mwID, reused, wantName, err := lookupOrReserveSQLConsoleName(tx, wantName, rawURL)
 	if err != nil {

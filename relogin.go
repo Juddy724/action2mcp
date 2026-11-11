@@ -775,8 +775,11 @@ func (a *App) requiredSiteHeaders(site *Site) []string {
 	addRefs := func(parts ...string) {
 		for _, s := range parts {
 			for _, g := range placeholderRe.FindAllStringSubmatch(s, -1) {
-				if strings.HasPrefix(g[1], "header.") {
-					add(strings.TrimPrefix(g[1], "header."))
+				if isCookieJarRef(g[1]) {
+					continue
+				}
+				if name, ok := headerBindingName(g[1]); ok {
+					add(name)
 				}
 			}
 		}

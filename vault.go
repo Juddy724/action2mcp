@@ -432,8 +432,47 @@ func isRefName(n string) bool {
 	return strings.HasPrefix(n, "cfg.") || strings.HasPrefix(n, "secret.")
 }
 
+// headerBindingName reports the header name in a "header.X" server-side
+// reference. The "header." prefix is matched case-insensitively.
+func headerBindingName(ref string) (string, bool) {
+	ref = strings.TrimSpace(ref)
+	if len(ref) < 8 || !strings.EqualFold(ref[:7], "header.") {
+		return "", false
+	}
+	name := strings.TrimSpace(ref[7:])
+	if name == "" {
+		return "", false
+	}
+	return name, true
+}
+
+// cookieBindingName reports the cookie name in a "cookie.X" server-side
+// reference. The "cookie." prefix is matched case-insensitively.
+func cookieBindingName(ref string) (string, bool) {
+	ref = strings.TrimSpace(ref)
+	if len(ref) < 8 || !strings.EqualFold(ref[:7], "cookie.") {
+		return "", false
+	}
+	name := strings.TrimSpace(ref[7:])
+	if name == "" {
+		return "", false
+	}
+	return name, true
+}
+
+// isCookieJarRef reports whether ref is header.cookie (any case), which
+// resolves to the login-center cookie jar for the request URL, not site_headers.
+func isCookieJarRef(ref string) bool {
+	name, ok := headerBindingName(ref)
+	return ok && headerNameKey(name) == "cookie"
+}
+
 func isHeaderCookieRef(n string) bool {
-	return strings.HasPrefix(n, "header.") || strings.HasPrefix(n, "cookie.")
+	if _, ok := headerBindingName(n); ok {
+		return true
+	}
+	_, ok := cookieBindingName(n)
+	return ok
 }
 
 func isServerRef(n string, ws bool) bool {

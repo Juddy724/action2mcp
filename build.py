@@ -5,7 +5,7 @@ import os, shutil, subprocess, zipfile, stat
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.join(ROOT, "packaging")
 DIST = os.path.join(ROOT, "dist")
-VERSION = "0.5.7"
+VERSION = "0.5.8"
 
 TARGETS = [
     ("windows", "amd64", "Windows-x64"),
