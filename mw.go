@@ -45,7 +45,8 @@ type MWConfig struct {
 	TimeoutSec    int               `json:"timeout_sec"`
 	RequireWhere  *bool             `json:"require_where,omitempty"`
 	Description   string            `json:"description"`
-	WSMode        string            `json:"ws_mode,omitempty"` // terminal (default) | sql_console
+	WSMode        string            `json:"ws_mode,omitempty"`  // terminal (default) | sql_console
+	Approval      string            `json:"approval,omitempty"` // sql_console only: off | always (default always)
 	SQLPath       string            `json:"sql_path,omitempty"`
 	WSHeaders     map[string]string `json:"ws_headers,omitempty"`
 	Datasources   []MWDatasource    `json:"datasources,omitempty"`
@@ -99,7 +100,7 @@ var mwPermDefs = map[string][]permDef{
 }
 
 var mwSQLConsolePerms = []permDef{
-	{"select", "查", true, "只读 SELECT：必须带 LIMIT、必须走索引、最多 200 行，每次执行都要审批"},
+	{"select", "查", true, "只读 SELECT：必须带 LIMIT、必须走索引、最多 200 行"},
 }
 
 func mwPermsOf(m *Middleware) []permDef {
@@ -205,6 +206,9 @@ func (m *Middleware) normalize() error {
 		if mode != "" && mode != wsModeTerminal && mode != wsModeSQLConsole {
 			return errors.New("WebSocket 模式只能是 terminal（终端）或 sql_console（SQL 控制台）")
 		}
+	}
+	if m.Type != "websocket" || !m.Config.isSQLConsole() {
+		m.Config.Approval = ""
 	}
 	c := &m.Config
 	c.Host = strings.TrimSpace(c.Host)
@@ -640,7 +644,7 @@ func (a *App) mwSummary(m *Middleware) string {
 			if list := m.datasourceListForAI(); list != "" {
 				s += "；数据源：" + list
 			}
-			s += fmt.Sprintf("；只读查询，必须写 LIMIT 且走索引，最多 %d 行，每次执行都要审批", c.maxRows())
+			s += fmt.Sprintf("；只读查询，必须写 LIMIT 且走索引，最多 %d 行", c.maxRows())
 		} else if len(c.CommandAllow) > 0 {
 			s += "；pod_exec 只允许：" + strings.Join(c.CommandAllow, "、")
 		} else {
@@ -693,7 +697,7 @@ func mwToolDefs() []mwToolDef {
 			map[string]any{"file": str("日志文件路径，例如 BusinessException.log 或 /var/log/app.log"), "lines": map[string]any{"type": "integer", "description": "末尾行数，默认 100，最大 2000"}}, []string{"file"}, wsModeTerminal},
 		{"pod_exec", "websocket", "在 WebSocket 终端里执行一条命令（需要「执行命令」权限，默认关闭）。配置了允许的命令时，管道可以用 | 连接，但每一段的命令都要在允许列表中，不能使用重定向或命令替换。允许列表为空时，命令会原样发到远端 shell。列表里缺的命令请在中间件配置里追加。find 只允许 -name、-mmin、-mtime、-type、-size、-maxdepth；cut 只允许 -c；rg 不能使用 --pre。",
 			map[string]any{"command": str("要执行的命令，例如 ls /app/logs"), "timeout": map[string]any{"type": "integer", "description": "超时秒数（可选，不能超过中间件里配置的超时）"}}, []string{"command"}, wsModeTerminal},
-		{wsSQLQueryTool, "websocket", "在 WebSocket SQL 控制台中间件上执行一条只读查询。必须是单条 SELECT，必须写 LIMIT（不超过允许的行数，最多 200 行），必须走索引。每次调用都要在控制台审批。参数 database 填写该中间件已配置的数据源别名；请根据用户的问题，对照工具说明里列出的数据源及其说明，选择最匹配的一项。",
+		{wsSQLQueryTool, "websocket", "在 WebSocket SQL 控制台中间件上执行一条只读查询。必须是单条 SELECT，必须写 LIMIT（不超过允许的行数，最多 200 行），必须走索引。参数 database 填写该中间件已配置的数据源别名；请根据用户的问题，对照工具说明里列出的数据源及其说明，选择最匹配的一项。",
 			map[string]any{"sql": str("一条只读 SELECT，必须带 LIMIT"), "database": str("数据源别名（见工具说明中的数据源列表）")}, []string{"sql", "database"}, wsModeSQLConsole},
 	}
 }
@@ -771,13 +775,14 @@ func isMWTool(name string) (mwToolDef, bool) {
 }
 
 type mwCall struct {
-	a      *App
-	m      *Middleware
-	tool   string
-	client string
-	action string
-	perm   string
-	start  time.Time
+	a         *App
+	m         *Middleware
+	tool      string
+	client    string
+	action    string
+	perm      string
+	auditNote string
+	start     time.Time
 }
 
 func (c *mwCall) deny(perm string) string {
@@ -808,10 +813,17 @@ func (c *mwCall) done(result string, err error) (string, bool) {
 	if err != nil {
 		pw, _ := c.a.mwPassword(c.m)
 		msg := "执行失败：" + c.a.scrubErr(err, pw)
+		if c.auditNote != "" {
+			msg = msg + "（" + c.auditNote + "）"
+		}
 		c.a.audit(AuditEntry{Client: c.client, MW: c.m.Name, Tool: c.tool, Action: c.action, Perm: c.perm, Allowed: true, Result: msg, MS: ms})
 		return msg, true
 	}
-	c.a.audit(AuditEntry{Client: c.client, MW: c.m.Name, Tool: c.tool, Action: c.action, Perm: c.perm, Allowed: true, Result: "成功", MS: ms})
+	resMsg := "成功"
+	if c.auditNote != "" {
+		resMsg = "成功（" + c.auditNote + "）"
+	}
+	c.a.audit(AuditEntry{Client: c.client, MW: c.m.Name, Tool: c.tool, Action: c.action, Perm: c.perm, Allowed: true, Result: resMsg, MS: ms})
 	pw, _ := c.a.mwPassword(c.m)
 	if pw != "" {
 		result = strings.ReplaceAll(result, pw, secretMask)

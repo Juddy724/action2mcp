@@ -9,8 +9,11 @@ import (
 )
 
 const (
-	schemaVersionSQLConsole    = 8
-	schemaVersionSQLConsoleEnv = 9
+	schemaVersionSQLConsole         = 8
+	schemaVersionSQLConsoleEnv      = 9
+	schemaVersionResultFull         = 10 // 0.5.9: approvals.result_full
+	schemaVersionSQLConsoleApproval = 11
+	schemaUserVersion               = schemaVersionSQLConsoleApproval
 )
 
 func sqlConsoleNameFromTool(name string) string {
@@ -417,6 +420,78 @@ func promoteSQLConsoleRowEnvTx(tx *sql.Tx) error {
 			continue
 		}
 		applySQLConsoleEnvPromotion(&c)
+		b, err := json.Marshal(c)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE middleware SET config=?,updated_at=? WHERE id=?`, string(b), ts, r.id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) migrateV11SQLConsoleApproval() error {
+	var ver int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil {
+		return err
+	}
+	if ver >= schemaVersionSQLConsoleApproval {
+		return nil
+	}
+	return s.applySQLConsoleApprovalDefault()
+}
+
+// applySQLConsoleApprovalDefault writes approval=always onto existing SQL
+// console middleware that have no mode set yet. Already-set off/always are
+// left alone. Other middleware types are not touched. Idempotent and transactional.
+func (s *Store) applySQLConsoleApprovalDefault() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := applySQLConsoleApprovalDefaultTx(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func applySQLConsoleApprovalDefaultTx(tx *sql.Tx) error {
+	rows, err := tx.Query(`SELECT id,type,config FROM middleware`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type row struct {
+		id     int64
+		typ    string
+		config string
+	}
+	var list []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.typ, &r.config); err != nil {
+			return err
+		}
+		list = append(list, r)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	ts := now()
+	for _, r := range list {
+		if r.typ != "websocket" {
+			continue
+		}
+		c, err := decodeMWConfig(r.config)
+		if err != nil || !c.isSQLConsole() {
+			continue
+		}
+		if strings.TrimSpace(c.Approval) != "" {
+			continue
+		}
+		c.Approval = "always"
 		b, err := json.Marshal(c)
 		if err != nil {
 			return err

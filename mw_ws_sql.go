@@ -176,6 +176,27 @@ func (c *MWConfig) wsMode() string {
 
 func (c *MWConfig) isSQLConsole() bool { return c.wsMode() == wsModeSQLConsole }
 
+// sqlConsoleApproval returns the per-middleware approval mode. Unknown or
+// empty values fail closed to "always". Only "off" skips the console card.
+func (c *MWConfig) sqlConsoleApproval() string {
+	if c != nil && strings.TrimSpace(c.Approval) == "off" {
+		return "off"
+	}
+	return "always"
+}
+
+func normalizeSQLConsoleApproval(c *MWConfig) {
+	if c == nil {
+		return
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Approval)) {
+	case "off":
+		c.Approval = "off"
+	default:
+		c.Approval = "always"
+	}
+}
+
 func (c *MWConfig) sqlPath() string {
 	if p := strings.TrimSpace(c.SQLPath); p != "" {
 		return p
@@ -407,6 +428,7 @@ func canonicalCookieBinding(v string) string {
 func normalizeSQLConsole(m *Middleware) error {
 	c := &m.Config
 	c.WSMode = wsModeSQLConsole
+	normalizeSQLConsoleApproval(c)
 	c.URL = strings.TrimSpace(c.URL)
 	if c.WSHeaders == nil {
 		c.WSHeaders = map[string]string{}
@@ -592,8 +614,9 @@ func (m *Middleware) sqlConsoleFingerprint() string {
 		Timeout         int
 		Collect         *WSCollectConfig
 		Auth            *WSAuthConfig
+		Approval        string
 		Updated         string
-	}{m.Config.URL, m.Config.wsMode(), m.Config.sqlPath(), m.Config.WSMessages, m.Config.WSHeaders, m.Config.Datasources, m.Config.DSFieldPaths, m.Config.MaxRows, m.Config.TimeoutSec, m.Config.WSCollect, m.Config.WSAuth, m.UpdatedAt})
+	}{m.Config.URL, m.Config.wsMode(), m.Config.sqlPath(), m.Config.WSMessages, m.Config.WSHeaders, m.Config.Datasources, m.Config.DSFieldPaths, m.Config.MaxRows, m.Config.TimeoutSec, m.Config.WSCollect, m.Config.WSAuth, m.Config.sqlConsoleApproval(), m.UpdatedAt})
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
 }
@@ -648,7 +671,7 @@ func (m *Middleware) sqlConsoleTool(ds MWDatasource) (*Tool, error) {
 		Method:      "WS",
 		URL:         m.Config.URL,
 		Headers:     headers,
-		Approval:    "always",
+		Approval:    m.Config.sqlConsoleApproval(),
 		Rev:         1,
 		Params: []Param{
 			{Name: "database", Type: "string", Required: true, Description: "数据源别名"},
@@ -790,16 +813,22 @@ func (a *App) callWSSQL(ctx context.Context, c *mwCall, args map[string]any) (st
 		return c.blocked(a.scrubSQLConsoleText(err.Error(), nil, cfgVals, true)), true
 	}
 	redactSQLConsolePreview(prepared, c.m, ds.Alias, cfgVals)
-	pending, err := a.waitApproval(ctx, tool, callArgs, prepared, c.client)
-	if err != nil {
-		return c.blocked(a.scrubSQLConsoleText(err.Error(), prepared.secretValues, prepared.configValues, true)), true
+	var pending *pendingApproval
+	prefix := ""
+	if c.m.Config.sqlConsoleApproval() != "off" {
+		pending, err = a.waitApproval(ctx, tool, callArgs, prepared, c.client)
+		if err != nil {
+			return c.blocked(a.scrubSQLConsoleText(err.Error(), prepared.secretValues, prepared.configValues, true)), true
+		}
+		if !a.approvalCommitValid(pending) {
+			a.approvalResult(pending.record.ID, "未执行：中间件在审批期间被修改或已移出已开启的流程包")
+			return c.blocked("中间件或请求内容在审批期间变化，未执行，请重新调用"), true
+		}
+		prepared = pending.prepared
+		prefix = a.approvalEditPrefix(pending)
+	} else {
+		c.auditNote = "未审批，直接执行"
 	}
-	if !a.approvalCommitValid(pending) {
-		a.approvalResult(pending.record.ID, "未执行：中间件在审批期间被修改或已移出已开启的流程包")
-		return c.blocked("中间件或请求内容在审批期间变化，未执行，请重新调用"), true
-	}
-	prepared = pending.prepared
-	prefix := a.approvalEditPrefix(pending)
 	res, err := a.Send(prepared)
 	text, isErr := formatWSSQLResult(res, err)
 	text = prefix + text
