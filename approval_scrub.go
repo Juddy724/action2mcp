@@ -8,7 +8,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // A decoded byte keeps its source range. Matching decoded views avoids an
@@ -25,6 +27,27 @@ const (
 	approvalHTMLEncoding
 )
 
+// minSecretScrubLen is the minimum length at which a passed value (cookie,
+// harvested header, prepared secret) is used for substring scrubbing.
+// Shorter strings collide with ordinary data — digits inside IDs, "LIMIT 10",
+// one-character cookie flags — and are not useful as credentials.
+// Vault secrets keep their own threshold (>= 3) because the user explicitly
+// marked them; they travel through Vault.secretVariants, not this path.
+const minSecretScrubLen = 8
+
+// minExplicitSecretLen is used when scrubbing values the program itself
+// classified as secrets (approval secret parameters, template literals).
+// It matches Vault's conservative floor so a 5-character parameter such as
+// "token" is still masked in the approval preview, while 1–2 character
+// incidental values are not. Result-row scrubbing uses minSecretScrubLen.
+const minExplicitSecretLen = 3
+
+// minConfigTokenLen is the minimum length for configuration-hide values
+// (ds_id, env_id, env_type, space_code, db_type) to be token-boundary
+// masked in error, preview, and audit text. Three-character datasource
+// ids must still be hidden there; 1–2 character values are skipped.
+const minConfigTokenLen = 3
+
 func (a *App) scrubApprovalText(text string, values []string) string {
 	var vault *Vault
 	if a != nil {
@@ -33,12 +56,34 @@ func (a *App) scrubApprovalText(text string, values []string) string {
 	return scrubSecretText(text, vault, values)
 }
 
+// scrubApprovalTextExplicit uses the lower floor for values the program
+// classified as secrets (secret parameters, template literals), so a short
+// parameter such as "token" is still masked in the approval preview.
+func (a *App) scrubApprovalTextExplicit(text string, values []string) string {
+	var vault *Vault
+	if a != nil {
+		vault = a.vault
+	}
+	return scrubExplicitSecretText(text, vault, values)
+}
+
 func scrubSecretText(text string, vault *Vault, values []string) string {
+	return scrubSecretTextMin(text, vault, values, minSecretScrubLen)
+}
+
+func scrubExplicitSecretText(text string, vault *Vault, values []string) string {
+	return scrubSecretTextMin(text, vault, values, minExplicitSecretLen)
+}
+
+func scrubSecretTextMin(text string, vault *Vault, values []string, minLen int) string {
 	if text == "" {
 		return text
 	}
 	if len(text) > maxApprovalContainerBytes {
 		return secretMask
+	}
+	if minLen < 1 {
+		minLen = 1
 	}
 	variants := map[string]bool{}
 	addBase64 := func(value string) {
@@ -53,7 +98,7 @@ func scrubSecretText(text string, vault *Vault, values []string) string {
 		}
 	}
 	for _, value := range values {
-		if value == "" || value == secretMask {
+		if value == "" || value == secretMask || len(value) < minLen {
 			continue
 		}
 		variants[value] = true
@@ -213,4 +258,100 @@ func decodeApprovalText(text string, spans []approvalTextSpan, encoding approval
 		i += consumed
 	}
 	return out.String(), positions
+}
+
+func isConfigTokenChar(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsNumber(r) || r == '_'
+}
+
+func configTokenBoundary(text string, start, end int) bool {
+	if start > 0 {
+		r, _ := utf8.DecodeLastRuneInString(text[:start])
+		if r != utf8.RuneError && isConfigTokenChar(r) {
+			return false
+		}
+	}
+	if end < len(text) {
+		r, _ := utf8.DecodeRuneInString(text[end:])
+		if r != utf8.RuneError && isConfigTokenChar(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// scrubConfigTokens masks configuration identifiers (datasource ids, env
+// values, space codes, db types) using token-boundary matching: a value is
+// replaced only when it is not inside a longer alphanumeric or underscore
+// run. This is for error messages, request echoes, approval previews and
+// audit text — not for successful result rows, where these values may
+// legitimately appear inside ordinary data.
+func scrubConfigTokens(text string, values []string) string {
+	if text == "" || len(values) == 0 {
+		return text
+	}
+	seen := map[string]bool{}
+	list := make([]string, 0, len(values))
+	for _, v := range values {
+		v = strings.TrimSpace(v)
+		if v == "" || v == secretMask || len(v) < minConfigTokenLen || seen[v] {
+			continue
+		}
+		seen[v] = true
+		list = append(list, v)
+	}
+	if len(list) == 0 {
+		return text
+	}
+	sort.Slice(list, func(i, j int) bool { return len(list[i]) > len(list[j]) })
+	type span struct{ start, end int }
+	var matches []span
+	for _, v := range list {
+		for start := 0; start <= len(text)-len(v); {
+			i := strings.Index(text[start:], v)
+			if i < 0 {
+				break
+			}
+			i += start
+			end := i + len(v)
+			if configTokenBoundary(text, i, end) {
+				matches = append(matches, span{i, end})
+				start = end
+				continue
+			}
+			start = i + 1
+		}
+	}
+	if len(matches) == 0 {
+		return text
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].start == matches[j].start {
+			return matches[i].end > matches[j].end
+		}
+		return matches[i].start < matches[j].start
+	})
+	var out strings.Builder
+	last := 0
+	for i := 0; i < len(matches); {
+		sp := matches[i]
+		i++
+		for i < len(matches) && matches[i].start < sp.end {
+			if matches[i].end > sp.end {
+				sp.end = matches[i].end
+			}
+			i++
+		}
+		if sp.start < last {
+			if sp.end > last {
+				// overlapping after a previous write: already covered
+			}
+			continue
+		}
+		out.WriteString(text[last:sp.start])
+		out.WriteString(secretMask)
+		last = sp.end
+	}
+	out.WriteString(text[last:])
+	return out.String()
 }

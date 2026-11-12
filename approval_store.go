@@ -123,6 +123,8 @@ type ApprovalRecord struct {
 	Feedback         string            `json:"feedback"`
 	DecidedAt        string            `json:"decided_at"`
 	Result           string            `json:"result"`
+	ResultFull       string            `json:"-"`
+	HasFullResult    bool              `json:"has_full_result,omitempty"`
 	Preview          RequestPreview    `json:"preview"`
 	PreviewHash      string            `json:"preview_hash"`
 	Params           []Param           `json:"params"`
@@ -222,7 +224,7 @@ func (s *Store) CancelPendingApprovals() error {
 }
 
 func (s *Store) listApprovals(status string, limit int) ([]ApprovalRecord, error) {
-	rows, err := s.db.Query(`SELECT id,ts,tool,tool_id,tool_rev,client,args_display,final_args_display,status,feedback,decided_at,result,title,preview_display,params_json FROM approvals WHERE (?='all' OR status='pending') ORDER BY id DESC LIMIT ?`, status, limit)
+	rows, err := s.db.Query(`SELECT id,ts,tool,tool_id,tool_rev,client,args_display,final_args_display,status,feedback,decided_at,result,COALESCE(result_full,''),title,preview_display,params_json FROM approvals WHERE (?='all' OR status='pending') ORDER BY id DESC LIMIT ?`, status, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -231,9 +233,11 @@ func (s *Store) listApprovals(status string, limit int) ([]ApprovalRecord, error
 	for rows.Next() {
 		var r ApprovalRecord
 		var args, final, preview, params string
-		if err := rows.Scan(&r.ID, &r.TS, &r.Tool, &r.ToolID, &r.ToolRev, &r.Client, &args, &final, &r.Status, &r.Feedback, &r.DecidedAt, &r.Result, &r.Title, &preview, &params); err != nil {
+		if err := rows.Scan(&r.ID, &r.TS, &r.Tool, &r.ToolID, &r.ToolRev, &r.Client, &args, &final, &r.Status, &r.Feedback, &r.DecidedAt, &r.Result, &r.ResultFull, &r.Title, &preview, &params); err != nil {
 			return nil, err
 		}
+		r.HasFullResult = r.ResultFull != "" && r.ResultFull != r.Result
+		r.ResultFull = ""
 		json.Unmarshal([]byte(args), &r.ArgsDisplay)
 		json.Unmarshal([]byte(final), &r.FinalArgsDisplay)
 		var p ApprovalPreview

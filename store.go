@@ -174,7 +174,7 @@ CREATE TABLE IF NOT EXISTS middleware(id INTEGER PRIMARY KEY AUTOINCREMENT, name
 CREATE TABLE IF NOT EXISTS pack_middleware(pack_id INTEGER REFERENCES packs(id) ON DELETE CASCADE, mw_id INTEGER REFERENCES middleware(id) ON DELETE CASCADE, PRIMARY KEY(pack_id, mw_id));
 CREATE TABLE IF NOT EXISTS mw_audit(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, client TEXT, mw TEXT, tool TEXT, action TEXT, perm TEXT, allowed INTEGER, result TEXT, ms INTEGER);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
-CREATE TABLE IF NOT EXISTS approvals(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, tool TEXT, tool_id INTEGER, tool_rev INTEGER, client TEXT, args_display TEXT, final_args_display TEXT, status TEXT, feedback TEXT, decided_at TEXT, result TEXT, title TEXT, preview_display TEXT, params_json TEXT);
+CREATE TABLE IF NOT EXISTS approvals(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, tool TEXT, tool_id INTEGER, tool_rev INTEGER, client TEXT, args_display TEXT, final_args_display TEXT, status TEXT, feedback TEXT, decided_at TEXT, result TEXT, result_full TEXT NOT NULL DEFAULT '', title TEXT, preview_display TEXT, params_json TEXT);
 
 `
 	if _, err := db.Exec(schema); err != nil {
@@ -270,7 +270,12 @@ WHEN source_approval_floor.approval='always' OR excluded.approval='always' THEN 
 	if err := s.migrateV9SQLConsoleRowEnv(); err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec(`PRAGMA user_version=9`); err != nil {
+	if !s.hasColumn("approvals", "result_full") {
+		if _, err := db.Exec(`ALTER TABLE approvals ADD COLUMN result_full TEXT NOT NULL DEFAULT ''`); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := db.Exec(`PRAGMA user_version=10`); err != nil {
 		return nil, err
 	}
 	if runtime.GOOS != "windows" && path != "" && !strings.Contains(path, "mode=memory") && !strings.HasPrefix(path, ":") {

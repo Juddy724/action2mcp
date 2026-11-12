@@ -360,8 +360,41 @@ async function pageApprovals(app) {
       return `<tr><td class="small approval-time">${esc(item.ts)}${item.decided_at ? `<div class="muted small">决定于 ${esc(item.decided_at)}</div>` : ''}</td>
         <td><b class="mono">${esc(item.tool)}</b><div>${esc(item.title)}</div><div class="muted small">${esc(item.client)}</div></td>
         <td><span class="pill ${known ? 'approval-status-' + esc(item.status) : ''}">${esc(known ? APPROVAL_STATUS_LABELS[item.status] : item.status)}</span></td>
-        <td class="approval-wrap">${esc(item.feedback || '—')}</td><td><pre>${esc(JSON.stringify(args, null, 2))}</pre></td><td class="approval-wrap">${esc(item.result || '—')}</td></tr>`;
+        <td class="approval-wrap">${esc(item.feedback || '—')}</td><td><pre>${esc(JSON.stringify(args, null, 2))}</pre></td>${approvalResultCell(item)}</tr>`;
     }).join('')}</tbody></table></div>` : '<div class="empty">还没有审批记录</div>'}</div>`;
+}
+function approvalResultCell(item) {
+  const preview = item.result ? `<pre class="approval-result-preview">${esc(item.result)}</pre>` : '<span class="muted">—</span>';
+  const btn = item.has_full_result ? `<button type="button" class="sm" onclick="viewApprovalResult(${Number(item.id)})">查看全部</button>` : '';
+  return `<td class="approval-wrap approval-result-cell">${preview}${btn}</td>`;
+}
+async function viewApprovalResult(id) {
+  try {
+    const data = await api('POST', `/api/approvals/${encodeURIComponent(id)}/result`, {});
+    const text = data.result || '';
+    const note = data.truncated ? '<p class="muted small">结果超过 1MB，已截断保存。</p>' : '';
+    openModal(`<div class="approval-result-modal"><h3>执行结果</h3>${note}<div class="row approval-result-actions"><button type="button" class="sm" id="approval-result-copy">复制</button></div><pre class="approval-result-full" id="approval-result-full">${esc(text)}</pre></div>`);
+    const copy = $('#approval-result-copy');
+    if (copy) copy.addEventListener('click', copyApprovalResult);
+  } catch (e) {
+    toast(e.message || '无法加载执行结果');
+  }
+}
+async function copyApprovalResult() {
+  const node = $('#approval-result-full');
+  const text = node ? node.textContent : '';
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = text; document.body.appendChild(ta); ta.select();
+      document.execCommand('copy'); ta.remove();
+    }
+    toast('已复制执行结果');
+  } catch {
+    toast('复制失败，请手动选择文本');
+  }
 }
 updateApprovalSoundButton();
 if (window.ResizeObserver) new ResizeObserver(() => {

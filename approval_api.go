@@ -85,6 +85,19 @@ func (a *App) registerApprovals(mux *http.ServeMux) {
 		}
 		writeJSON(w, 200, preview)
 	}))
+	mux.Handle("POST /api/approvals/{id}/result", a.approvalOnly(func(w http.ResponseWriter, r *http.Request) {
+		var in struct{}
+		if err := readJSON(r, &in); err != nil {
+			writeErr(w, 400, err)
+			return
+		}
+		full, truncated, err := a.GetApprovalResult(pathID(r))
+		if err != nil {
+			writeApprovalErr(w, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"id": pathID(r), "result": full, "truncated": truncated})
+	}))
 	mux.Handle("POST /api/approvals/{id}/decide", a.approvalOnly(func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
 			Action      string         `json:"action"`

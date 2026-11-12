@@ -6,12 +6,12 @@
 
 最新版本：[Releases 页面](https://github.com/Juddy724/action2mcp/releases/latest)
 
-| 平台 | 安装包 (v0.5.8) |
+| 平台 | 安装包 (v0.5.9) |
 |---|---|
-| macOS (Apple 芯片) | [Action2MCP-0.5.8-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.8/Action2MCP-0.5.8-macOS-AppleSilicon.zip) |
-| macOS (Intel) | [Action2MCP-0.5.8-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.8/Action2MCP-0.5.8-macOS-Intel.zip) |
-| Windows x64 | [Action2MCP-0.5.8-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.8/Action2MCP-0.5.8-Windows-x64.zip) |
-| Linux x64 | [Action2MCP-0.5.8-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.8/Action2MCP-0.5.8-Linux-x64.zip) |
+| macOS (Apple 芯片) | [Action2MCP-0.5.9-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.9/Action2MCP-0.5.9-macOS-AppleSilicon.zip) |
+| macOS (Intel) | [Action2MCP-0.5.9-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.9/Action2MCP-0.5.9-macOS-Intel.zip) |
+| Windows x64 | [Action2MCP-0.5.9-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.9/Action2MCP-0.5.9-Windows-x64.zip) |
+| Linux x64 | [Action2MCP-0.5.9-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.9/Action2MCP-0.5.9-Linux-x64.zip) |
 
 解压后运行 `start.command`（macOS）、`start.bat`（Windows）或 `start.sh`（Linux），然后打开 http://localhost:7788 。详细说明见安装包里的 README.md。
 
@@ -63,6 +63,14 @@
 ### WebSocket Cookie 绑定（0.5.8）
 
 工具或 SQL 控制台中间件里的 `{{header.cookie}}`（大小写不敏感）会从登录中心该网站的 Cookie 罐组装 Cookie 请求头，而不是去查已收获的自定义请求头。登录只要其他必要请求头（例如 `sso-epctoken`）已经收获即可完成；不会因为缺少名叫 cookie 的收获项而一直视为未登录。测试连接和真实调用在罐里没有该网站的 Cookie 时，会提示缺少 Cookie，而不会说「站点缺少请求头 cookie」。Cookie 值会作为密钥脱敏，不会出现在工具说明、审批预览、审计或报错里。从 0.5.4 的护栏 `WS` 工具迁过来的 Cookie 绑定会被规范化为 `{{header.cookie}}`。
+
+
+### 审批记录与结果脱敏（0.5.9）
+
+- 审批记录里的「执行结果」默认只显示前面大约 20 行或 2KB，旁边有「查看全部」按钮，点开后可滚动查看完整结果并复制。完整结果按 AI 当时看到的同样规则脱敏后保存，最长 1MB，超出部分会注明「…[已截断]」。
+- 真正的登录令牌、较长的 Cookie 值和配置里的密钥仍会从返回给 AI 的结果里遮掉。太短、不足以当作密钥的值（例如只有 1 个字符的 Cookie 标志）不再用于子串替换，避免把结果里的普通数字、「LIMIT 10」、较长 ID 误遮成 `******`。
+- 数据源 ID、envId、envType、spaceCode、dbType 是对本机配置的隐藏，不是密钥：它们不会出现在工具说明、审批预览、审计和报错里（报错按完整标识匹配，不会从更长的数字中间挖掉），但成功的结果行里如果碰巧出现相同的数字或单词，会原样保留。
+
 
 ## 从源码构建
 

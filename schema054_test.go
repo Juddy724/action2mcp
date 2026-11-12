@@ -38,7 +38,7 @@ PRAGMA user_version=6;`)
 			t.Fatal("HTTP tool should not have sql guard after migration")
 		}
 		var version int
-		if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 9 {
+		if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 10 {
 			t.Fatalf("version=%d err=%v", version, err)
 		}
 		s.db.Close()

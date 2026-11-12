@@ -202,6 +202,22 @@ textarea.approval-arg{min-height:50px;resize:vertical}
 .approval-history pre{min-width:190px;max-width:380px;max-height:180px;margin:0}
 .approval-time{min-width:165px}
 .approval-wrap{min-width:150px;max-width:280px;white-space:pre-wrap}
+.approval-result-cell{min-width:180px;max-width:320px}
+.approval-result-preview{max-height:160px;max-width:320px;min-width:160px;overflow:auto;margin:0 0 8px;white-space:pre-wrap;word-break:break-word}
+.approval-result-cell button.sm{margin-top:2px}
+.approval-result-actions{margin:0 0 10px}
+.approval-result-full{max-height:min(70vh,640px);overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0}
+.approval-result-modal h3{margin-right:32px}
+.approval-history .pill{white-space:nowrap}
+.approval-result-cell button.sm{white-space:nowrap}
+@media (max-width:900px){
+  .approval-history{min-width:100%}
+  .approval-time{min-width:110px}
+  .approval-wrap{min-width:80px;max-width:200px}
+  .approval-history pre{min-width:140px;max-width:200px}
+  .approval-result-cell{min-width:150px;max-width:200px}
+  .approval-result-preview{max-width:200px;min-width:130px}
+}
 .approval-status-pending{background:#fef3c7;color:#92400e;font-weight:600}
 .approval-status-approved,.approval-status-edited{background:#dcfce7;color:#15803d}
 .approval-status-rejected{background:#fee2e2;color:#b91c1c}

@@ -650,6 +650,6 @@ func (a *App) scrubApprovalPreview(p RequestPreview, values []string) RequestPre
 	// as substrings, including base64 followed by padding, punctuation or junk.
 	return replaceRequest(p, func(text string) string {
 		text = approvalEmbeddedURLRe.ReplaceAllStringFunc(text, (approvalPreviewRedactor{}).urlUserinfo)
-		return a.scrubApprovalText(text, values)
+		return a.scrubApprovalTextExplicit(text, values)
 	})
 }

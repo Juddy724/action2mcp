@@ -312,26 +312,18 @@ func (a *App) invokeTool(ctx context.Context, mc *mcpCtx, name string, args map[
 		prefix = a.approvalEditPrefix(pending)
 	}
 	res, err := a.Send(prepared)
+	out, isErr := formatMCPCallResult(prefix, res, err)
 	if pending != nil {
-		result := ""
-		if err != nil {
-			result = "调用失败：" + err.Error()
-		} else if res.Outcome != "" && res.Outcome != outcomeSuccess {
-			result = res.Outcome + "：" + firstNonEmpty(res.Error, res.Body)
-		} else if res.Error != "" {
-			result = "请求失败：" + res.Error
-		} else if res.Outcome != "" {
-			result = res.Outcome
-		} else {
-			result = fmt.Sprintf("HTTP %d", res.Status)
-		}
-		result = strings.SplitN(result, "\n", 2)[0]
-		a.approvalResult(pending.record.ID, truncate(result, 500))
+		a.approvalResult(pending.record.ID, out)
 	}
+	return textResult(out, isErr), nil
+}
+
+func formatMCPCallResult(prefix string, res *CallResult, err error) (string, bool) {
 	if err != nil {
-		return textResult(prefix+"调用失败："+err.Error(), true), nil
+		return prefix + "调用失败：" + err.Error(), true
 	}
-	if res.Outcome != "" {
+	if res != nil && res.Outcome != "" {
 		text := res.Body
 		if res.Error != "" && res.Outcome != outcomeSuccess {
 			text = firstNonEmpty(res.Error, res.Body)
@@ -339,21 +331,29 @@ func (a *App) invokeTool(ctx context.Context, mc *mcpCtx, name string, args map[
 		if res.Relogged {
 			text = "（登录已过期，已自动重新登录并重试）\n" + text
 		}
-		return textResult(prefix+text, res.Outcome != outcomeSuccess), nil
+		return prefix + text, res.Outcome != outcomeSuccess
 	}
-	if res.Error != "" {
-		return textResult(prefix+"请求失败："+res.Error, true), nil
+	if res != nil && res.Error != "" {
+		return prefix + "请求失败：" + res.Error, true
 	}
-	text := fmt.Sprintf("HTTP %d\n%s", res.Status, res.Body)
-	if res.Relogged {
+	status := 0
+	body := ""
+	relogged := false
+	if res != nil {
+		status = res.Status
+		body = res.Body
+		relogged = res.Relogged
+	}
+	text := fmt.Sprintf("HTTP %d\n%s", status, body)
+	if relogged {
 		text = "（登录已过期，已自动重新登录并重试）\n" + text
 	}
-	if res.Status == 401 {
+	if status == 401 {
 		text += "\n\n[提示] 目标网站返回未登录，自动登录也没有成功。请让用户在 Action2MCP 控制台「登录中心」检查登录配置或点击「打开浏览器登录」后再试。"
-	} else if res.Status == 403 {
+	} else if status == 403 {
 		text += "\n\n[提示] 目标网站返回无权限（403）。已经尝试过重新登录，可能是当前账号没有这个操作的权限。"
 	}
-	return textResult(prefix+text, res.Status >= 400), nil
+	return prefix + text, status >= 400
 }
 
 // ---------- tool lists ----------

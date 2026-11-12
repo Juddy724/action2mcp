@@ -26,6 +26,9 @@ type countingWS struct {
 	rows            int
 	typeALL         bool
 	handshakeCookie string
+	businessCols    []any
+	businessRows    []any
+	failBusiness    string
 }
 
 func newCountingWS(rows int) *countingWS {
@@ -106,15 +109,28 @@ func (c *countingWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	c.mu.Lock()
 	c.business++
-	c.mu.Unlock()
-	cols := []any{map[string]any{"field": "C_1", "title": "id"}, map[string]any{"field": "C_2", "title": "name"}}
+	fail := c.failBusiness
+	cols := c.businessCols
+	rows := c.businessRows
 	n := c.rows
+	c.mu.Unlock()
+	if fail != "" {
+		writeExec(conn, false, fail, nil, nil, 0)
+		return
+	}
+	if len(cols) == 0 {
+		cols = []any{map[string]any{"field": "C_1", "title": "id"}, map[string]any{"field": "C_2", "title": "name"}}
+	}
 	if n == 0 {
 		n = 2
 	}
-	var rows []any
-	for i := 0; i < n; i++ {
-		rows = append(rows, map[string]any{"C_1": i + 1, "C_2": "r"})
+	if rows == nil {
+		rows = []any{}
+		for i := 0; i < n; i++ {
+			rows = append(rows, map[string]any{"C_1": i + 1, "C_2": "r"})
+		}
+	} else {
+		n = len(rows)
 	}
 	writeExec(conn, true, "", cols, rows, n)
 }
