@@ -275,7 +275,10 @@ WHEN source_approval_floor.approval='always' OR excluded.approval='always' THEN 
 			return nil, err
 		}
 	}
-	if _, err := db.Exec(`PRAGMA user_version=10`); err != nil {
+	if err := s.migrateV11SQLConsoleApproval(); err != nil {
+		return nil, err
+	}
+	if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version=%d`, schemaUserVersion)); err != nil {
 		return nil, err
 	}
 	if runtime.GOOS != "windows" && path != "" && !strings.Contains(path, "mode=memory") && !strings.HasPrefix(path, ":") {

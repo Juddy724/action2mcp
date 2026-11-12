@@ -1198,7 +1198,7 @@ async function pageMiddleware(app) {
       <td><b>${esc(m.name)}</b><div class="muted small">${esc(m.config.description || '')}</div></td>
       <td class="mw-addr"><span class="mw-type t-${esc(m.type)}">${esc(m.kind_label)}</span><div class="mono small">${esc(mwAddr(m))}${m.config.database ? ' / ' + esc(m.config.database) : ''}</div>
         <div class="small">${m.type === 'websocket' ? (mwIsSQL(m) ? '<span class="muted">登录中心 Cookie + 已收获的请求头令牌</span>' : '<span class="muted">使用登录中心的 Cookie</span>') : (m.config.password_ref ? (m.password_set ? '🔒 密码已保存' : '<span class="st-bad">密码待填写</span>') : '<span class="muted">无密码</span>')}</div></td>
-      <td>${mwPermDefsFor(m).map(d => `<span class="perm ${m.config.perms[d.key] ? 'on' : ''}">${esc(d.label)}</span>`).join('')}${mwIsSQL(m) ? ' <span class="perm on">最多 ' + esc(m.config.max_rows || 200) + ' 行</span> <span class="perm on">必须索引</span>' : ''}</td>
+      <td>${mwPermDefsFor(m).map(d => `<span class="perm ${m.config.perms[d.key] ? 'on' : ''}">${esc(d.label)}</span>`).join('')}${mwIsSQL(m) ? ' <span class="perm on">最多 ' + esc(m.config.max_rows || 200) + ' 行</span> <span class="perm on">必须索引</span>' + (m.config.approval === 'off' ? ' <span class="perm">审批已关闭</span>' : ' <span class="perm on">每次审批</span>') : ''}</td>
       <td class="small">${esc(mwScope(m))}</td>
       <td class="small mw-packs">${m.packs.length ? m.packs.map(esc).join('、') : '<span class="muted">未加入</span>'}</td>
       <td style="text-align:right;white-space:nowrap"><button onclick="testMWSaved(${m.id},this)">测试连接</button> <button onclick="editMW(${m.id})">编辑</button> <button class="danger" onclick="delMW(${m.id})">删除</button></td></tr>`).join('')}
@@ -1267,6 +1267,7 @@ function openMWEditor(m) {
     ${m.fromRecording ? `<div class="full f-term"><label>录到的帧（只读，不会发送）</label><pre class="mono" style="max-height:160px;overflow:auto">${wsRender(m.recordedBody || '', '→')}</pre></div>
     <div class="full f-term"><div class="notice">保存的是终端式的文本帧模板。请另写一条模板，把命令的位置写成 <code>{{command}}</code>。上面录到的帧只作对照，不会写入模板，测试连接和以后的调用也都不会自动发出这些帧。查询参数如果每次不同，写成 <code>{{参数名}}</code>。登录用「登录中心」的 Cookie。二进制帧、子协议和按响应决定的初始化不在这个连接里重放。</div></div>` : `<div class="full f-term"><p class="muted small" style="margin:0">认证用这个地址对应网站在「登录中心」里的 Cookie，不在这里填密码。默认的两行帧是：先发命令，再发一个回车。</p></div>`}
     <div class="full f-sql"><p class="muted small" style="margin:0">在消息里用 <code>{{sql}}</code> 表示要执行的语句。spaceCode、dsId、envId、envType、dbType 写成 <code>{{ds.space_code}}</code>、<code>{{ds.ds_id}}</code> 等，保存时按所选数据源自动填入，不会成为 AI 参数。登录令牌用 <code>{{header.sso-epctoken}}</code>，不要写入字面值。测试连接只做握手，不会执行 SQL。</p></div>
+    <label class="f-sql" for="mw-approval">审批模式</label><div class="f-sql"><select id="mw-approval" onchange="mwApprovalHint()"><option value="always" ${c.approval !== 'off' ? 'selected' : ''}>每次审批</option><option value="off" ${c.approval === 'off' ? 'selected' : ''}>关闭</option></select><p id="mw-approval-hint" class="notice" style="margin:8px 0 0"${c.approval === 'off' ? '' : ' hidden'}>关闭后 AI 可直接执行查询，只读/LIMIT/索引等守卫仍生效。</p></div>
     <div class="full f-sql"><h3 style="margin:10px 0 4px">默认环境参数</h3><p class="muted small" style="margin:0 0 8px">各数据源共用的 spaceCode、dbType。某一行需要不同值时，点该行「高级」覆盖。envId 和 envType 按行填写，三个值一起确定一个库。</p>
       <div class="row ds-defaults"><label>spaceCode <input id="mw-space" class="mono" value="${esc(sd.space_code || '')}"></label><label>dbType <input id="mw-dbtype" class="mono" value="${esc(sd.db_type || '')}"></label></div></div>
     ${dsTableHTML(c.datasources)}` : ''}
@@ -1368,6 +1369,12 @@ function collectDatasources() {
 function looksLikeTermMsgs(s) { return s.includes('{{command}}') && !s.includes('{{sql}}'); }
 function looksLikeDefaultSQLMsgs(s) { return s.trim() === DEFAULT_WS_SQL_MSG; }
 let lastWSMode = null;
+function mwApprovalHint() {
+  const hint = $('#mw-approval-hint');
+  const sel = $('#mw-approval');
+  if (!hint || !sel) return;
+  hint.hidden = sel.value !== 'off';
+}
 function mwFormUI() {
   const t = $('#mw-type').value;
   const kind = $('#mw-mqkind') ? $('#mw-mqkind').value : '';
@@ -1389,6 +1396,7 @@ function mwFormUI() {
     }
     lastWSMode = currentWSMode();
     syncMWPerms(sql);
+    mwApprovalHint();
     if (ta) ta.placeholder = sql ? '一行一条，{{sql}} 会换成要执行的语句' : '一行一条，{{command}} 会换成要执行的命令';
   } else {
     lastWSMode = null;
@@ -1448,8 +1456,10 @@ function mwCollect(id) {
       cfg.sql_defaults = defaults;
       cfg.datasources = collectDatasources();
       cfg.command_allow = [];
+      cfg.approval = ($('#mw-approval') && $('#mw-approval').value) || 'always';
     } else {
       cfg.command_allow = list('#mw-allow');
+      delete cfg.approval;
     }
   }
   const useAddrs = (t === 'mq' && cfg.mq_kind !== 'rabbitmq') || (t === 'redis' && cfg.redis_mode !== 'standalone');

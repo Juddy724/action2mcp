@@ -6,12 +6,12 @@
 
 最新版本：[Releases 页面](https://github.com/Juddy724/action2mcp/releases/latest)
 
-| 平台 | 安装包 (v0.5.9) |
+| 平台 | 安装包 (v0.5.10) |
 |---|---|
-| macOS (Apple 芯片) | [Action2MCP-0.5.9-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.9/Action2MCP-0.5.9-macOS-AppleSilicon.zip) |
-| macOS (Intel) | [Action2MCP-0.5.9-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.9/Action2MCP-0.5.9-macOS-Intel.zip) |
-| Windows x64 | [Action2MCP-0.5.9-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.9/Action2MCP-0.5.9-Windows-x64.zip) |
-| Linux x64 | [Action2MCP-0.5.9-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.9/Action2MCP-0.5.9-Linux-x64.zip) |
+| macOS (Apple 芯片) | [Action2MCP-0.5.10-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.10/Action2MCP-0.5.10-macOS-AppleSilicon.zip) |
+| macOS (Intel) | [Action2MCP-0.5.10-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.10/Action2MCP-0.5.10-macOS-Intel.zip) |
+| Windows x64 | [Action2MCP-0.5.10-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.10/Action2MCP-0.5.10-Windows-x64.zip) |
+| Linux x64 | [Action2MCP-0.5.10-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.10/Action2MCP-0.5.10-Linux-x64.zip) |
 
 解压后运行 `start.command`（macOS）、`start.bat`（Windows）或 `start.sh`（Linux），然后打开 http://localhost:7788 。详细说明见安装包里的 README.md。
 
@@ -24,7 +24,7 @@
 - 配置管理：账号密码等加密保存，对 AI 不可见
 - 中间件管理：MySQL/OceanBase、Redis、MQ、WebSocket（终端或 SQL 控制台），按操作开关权限
 - MCP 接入：Streamable HTTP（http://localhost:7788/mcp）或 stdio（`a2m mcp`）
-- 工具审批：在工具编辑页的「审批模式」选择不审批（off）或每次都审批（always）；写入工具默认每次都审批。WebSocket SQL 控制台每次执行都要审批。AI 调用时，控制台会出现待审批卡片，可以通过、修改参数后通过或拒绝；等待超时可在「接入 AI / 设置」调整
+- 工具审批：在工具编辑页的「审批模式」选择不审批（off）或每次都审批（always）；写入工具默认每次都审批。WebSocket SQL 控制台的审批模式可在中间件里配置为每次审批（默认）或关闭；关闭后守卫仍然生效。AI 调用时，控制台会出现待审批卡片，可以通过、修改参数后通过或拒绝；等待超时可在「接入 AI / 设置」调整
 - WebSocket SQL 控制台：在「中间件管理」里把数据平台的 SQL 查询登记为中间件，AI 通过 `ws_sql_query` 按数据源别名查询；只读 SELECT、显式 LIMIT、EXPLAIN 预检、200 行封顶，令牌从本机收获的请求头注入。一个库由数据源 ID、envId、envType 三个值确定（0.5.7）。`{{header.cookie}}` 从登录中心的 Cookie 罐取值，不当作需要单独收获的请求头（0.5.8）
 
 ### 工具审批的范围与限制
@@ -42,7 +42,7 @@
 
 升级到 0.5.5 时，若本地还有 0.5.4 那样带 SQL 护栏的 `WS` 工具，启动时会自动转成 SQL 控制台中间件（例如 `demo_sql_query` 会变成中间件 `demo_sql`），并把它从所属流程包里改挂到新中间件上，原工具删除。迁移是事务性的、可重复执行。也可在「工具」页对尚未迁移的护栏工具点「转为 SQL 控制台」。
 
-- 每次执行都要在控制台审批，不能关掉。审批预览只显示中间件名、数据源别名和即将执行的 SQL，不会出现数据源 ID、环境参数或登录令牌；批准前不会向目标发送业务消息。
+- 审批模式可在中间件编辑页配置为「每次审批」（always，默认）或「关闭」（off）。新的和升级过来的中间件都是每次审批。关闭后 AI 可直接执行查询，不必再等批准，但只读 SELECT、显式 LIMIT、函数白名单、EXPLAIN 全表扫描拒绝、200 行封顶这些守卫仍然生效。审批模式只能在控制台改，不会出现在 MCP 工具说明里，AI 不能查看或修改。审批预览只显示中间件名、数据源别名和即将执行的 SQL，不会出现数据源 ID、环境参数或登录令牌；批准前不会向目标发送业务消息。
 - 只允许单条只读 SELECT（含 WITH），必须带显式 `LIMIT`（最多 200 行）。执行前会另开连接做 `EXPLAIN` 索引预检；预检失败或护栏拒绝时不会发送业务 SQL。结果若超过上限会截断并注明。
 - 登录令牌不要写进配置。调用时从本机已收获的自定义请求头注入，例如 `{{header.sso-epctoken}}`（不会误用同名 Cookie）。若尚未收获到令牌，测试连接和调用都会失败，不会发出 SQL。「测试连接」只做握手，不会执行任何用户 SQL。
 - `EXPLAIN` 只是执行前预检，不保证第二次连接的实际计划与预检完全一致，也不提供远端只读事务。
@@ -64,6 +64,11 @@
 
 工具或 SQL 控制台中间件里的 `{{header.cookie}}`（大小写不敏感）会从登录中心该网站的 Cookie 罐组装 Cookie 请求头，而不是去查已收获的自定义请求头。登录只要其他必要请求头（例如 `sso-epctoken`）已经收获即可完成；不会因为缺少名叫 cookie 的收获项而一直视为未登录。测试连接和真实调用在罐里没有该网站的 Cookie 时，会提示缺少 Cookie，而不会说「站点缺少请求头 cookie」。Cookie 值会作为密钥脱敏，不会出现在工具说明、审批预览、审计或报错里。从 0.5.4 的护栏 `WS` 工具迁过来的 Cookie 绑定会被规范化为 `{{header.cookie}}`。
 
+
+### SQL 控制台审批模式与审批记录对齐（0.5.10）
+
+- SQL 控制台中间件增加「审批模式」，可选每次审批（默认）或关闭，与工具的 off / always 用词一致。关闭后调用不再弹出审批，审计会记下「未审批，直接执行」；守卫、脱敏、安全拨号不变。升级时已有中间件保持每次审批。
+- 审批记录表格的单元格改为顶端对齐，「最终参数」和「执行结果」里的代码块从同一行开始；「查看全部」按钮仍在结果预览下方。
 
 ### 审批记录与结果脱敏（0.5.9）
 

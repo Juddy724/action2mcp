@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-const Version = "0.5.9"
+const Version = "0.5.10"
 
 type Config struct {
 	Port        int      `json:"port"`

@@ -152,7 +152,7 @@ func TestApprovalResultFullCapAndMigration(t *testing.T) {
 		t.Fatal("result_full column missing after migration")
 	}
 	var ver int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&ver); err != nil || ver != 10 {
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&ver); err != nil || ver != schemaUserVersion {
 		t.Fatalf("version=%d err=%v", ver, err)
 	}
 	got, err := s.listApprovals("all", 10)

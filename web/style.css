@@ -197,7 +197,8 @@ textarea.approval-arg{min-height:50px;resize:vertical}
 .approval-actions{position:sticky;bottom:0;background:var(--card);padding:12px 0;margin-top:10px;border-top:1px solid var(--line)}
 .approval-history-scroll{overflow-x:auto}
 .approval-history{min-width:1000px}
-.approval-history td{vertical-align:top;overflow-wrap:anywhere}
+.approval-history th,.approval-history td{vertical-align:top;overflow-wrap:anywhere}
+.approval-result-cell{vertical-align:top}
 .approval-history-heading h2{margin:0}
 .approval-history pre{min-width:190px;max-width:380px;max-height:180px;margin:0}
 .approval-time{min-width:165px}

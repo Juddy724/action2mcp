@@ -383,7 +383,7 @@ PRAGMA user_version=7;`)
 			t.Fatal(err)
 		}
 		var ver int
-		if err := st.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil || ver != 10 {
+		if err := st.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil || ver != schemaUserVersion {
 			t.Fatalf("version=%d err=%v", ver, err)
 		}
 		if _, err := st.GetToolByName("demo_sql_query"); err == nil {
@@ -395,6 +395,9 @@ PRAGMA user_version=7;`)
 		}
 		if !mw.Config.isSQLConsole() {
 			t.Fatalf("mode=%s", mw.Config.wsMode())
+		}
+		if mw.Config.sqlConsoleApproval() != "always" {
+			t.Fatalf("migrated approval=%q, want always", mw.Config.Approval)
 		}
 		if len(mw.Config.Datasources) != 1 || mw.Config.Datasources[0].Alias != "default" {
 			t.Fatalf("datasources=%+v", mw.Config.Datasources)
@@ -571,7 +574,7 @@ PRAGMA user_version=8;`, cfg)
 			t.Fatal(err)
 		}
 		var ver int
-		if err := st.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil || ver != 10 {
+		if err := st.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil || ver != schemaUserVersion {
 			t.Fatalf("version=%d err=%v", ver, err)
 		}
 		mw, err := st.GetMiddlewareByName("demo_sql")
@@ -580,6 +583,9 @@ PRAGMA user_version=8;`, cfg)
 		}
 		if len(mw.Config.Datasources) != 1 || mw.Config.Datasources[0].Alias != "default" {
 			t.Fatalf("datasources=%+v", mw.Config.Datasources)
+		}
+		if mw.Config.sqlConsoleApproval() != "always" {
+			t.Fatalf("v8 upgrade approval=%q, want always", mw.Config.Approval)
 		}
 		ds := mw.Config.Datasources[0]
 		if fmtSprint(ds.DSID) != "90001" || fmtSprint(ds.EnvID) != "70007" || ds.EnvType != "TEST" {

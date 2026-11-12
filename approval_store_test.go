@@ -39,7 +39,7 @@ PRAGMA user_version=5;`)
 			t.Fatal("migration changed old tool policy or revision")
 		}
 		var version int
-		if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 10 {
+		if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != schemaUserVersion {
 			t.Fatal("wrong schema version")
 		}
 		s.db.Close()
