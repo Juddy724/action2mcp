@@ -264,7 +264,11 @@ func isEmptyJSONValue(v any) bool {
 	return false
 }
 
-func (d MWDatasource) secretValues(c *MWConfig) []string {
+// configHideValues lists datasource identifiers that must stay out of MCP
+// schemas, approval previews, audit text and error messages, but must not be
+// substring-scrubbed out of successful result rows. They are configuration,
+// not credentials.
+func (d MWDatasource) configHideValues(c *MWConfig) []string {
 	var out []string
 	seen := map[string]bool{}
 	add := func(v any) {
@@ -663,11 +667,11 @@ func (m *Middleware) sqlConsoleTool(ds MWDatasource) (*Tool, error) {
 	}, nil
 }
 
-func redactSQLConsolePreview(p *PreparedCall, m *Middleware, alias string, extraSecrets []string) {
+func redactSQLConsolePreview(p *PreparedCall, m *Middleware, alias string, configValues []string) {
 	if p == nil {
 		return
 	}
-	p.secretValues = append(p.secretValues, extraSecrets...)
+	p.configValues = append(p.configValues, configValues...)
 	p.Preview.URL = fmt.Sprintf("WebSocket SQL 控制台「%s」 / %s", m.Name, alias)
 	p.Preview.Method = "WS"
 	if p.wsSQL != "" {
@@ -680,23 +684,49 @@ func redactSQLConsolePreview(p *PreparedCall, m *Middleware, alias string, extra
 		p.Preview.Headers[k] = secretMask
 	}
 	p.Preview = scrubPreviewSecrets(p.Preview, p.secretValues)
+	p.Preview = scrubPreviewConfigTokens(p.Preview, p.configValues)
 }
 
 func scrubPreviewSecrets(prev RequestPreview, secrets []string) RequestPreview {
-	// Reuse the approval scrubber when an App is not in hand: mask exact secrets.
-	mask := func(s string) string {
-		for _, sec := range secrets {
-			if sec != "" {
-				s = strings.ReplaceAll(s, sec, secretMask)
-			}
-		}
-		return s
-	}
+	return mapPreviewText(prev, func(s string) string { return scrubSecretText(s, nil, secrets) })
+}
+
+func scrubPreviewConfigTokens(prev RequestPreview, values []string) RequestPreview {
+	return mapPreviewText(prev, func(s string) string { return scrubConfigTokens(s, values) })
+}
+
+func mapPreviewText(prev RequestPreview, mask func(string) string) RequestPreview {
 	h := map[string]string{}
 	for k, v := range prev.Headers {
 		h[k] = mask(v)
 	}
 	return RequestPreview{Method: prev.Method, URL: mask(prev.URL), Headers: h, Body: mask(prev.Body)}
+}
+
+func (a *App) scrubSQLConsoleText(text string, secrets, config []string, isErr bool) string {
+	text = a.scrubApprovalText(text, secrets)
+	if isErr {
+		text = scrubConfigTokens(text, config)
+	}
+	return text
+}
+
+func (m *Middleware) allConfigHideValues() []string {
+	if m == nil {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, d := range m.Config.Datasources {
+		for _, v := range d.configHideValues(&m.Config) {
+			if v == "" || seen[v] {
+				continue
+			}
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func (a *App) refreshSQLConsoleTool(t *Tool, args map[string]any) (*Tool, *Middleware, MWDatasource, error) {
@@ -738,29 +768,31 @@ func (a *App) callWSSQL(ctx context.Context, c *mwCall, args map[string]any) (st
 	if sqlText == "" {
 		return c.blocked("请提供 sql"), true
 	}
+	cfgAll := c.m.allConfigHideValues()
 	ds, err := c.m.lookupDatasource(alias)
 	if err != nil {
-		return c.blocked(err.Error()), true
+		return c.blocked(a.scrubSQLConsoleText(err.Error(), nil, cfgAll, true)), true
 	}
+	cfgVals := ds.configHideValues(&c.m.Config)
 	if err := checkGuardedSQL(sqlText, ds.maxRows(&c.m.Config)); err != nil {
-		return c.blocked(err.Error()), true
+		return c.blocked(a.scrubSQLConsoleText(err.Error(), nil, cfgVals, true)), true
 	}
 	if err := a.ensureSQLConsoleCredentials(c.m, nil); err != nil {
-		return c.blocked(err.Error()), true
+		return c.blocked(a.scrubSQLConsoleText(err.Error(), nil, cfgVals, true)), true
 	}
 	tool, err := c.m.sqlConsoleTool(ds)
 	if err != nil {
-		return c.blocked(err.Error()), true
+		return c.blocked(a.scrubSQLConsoleText(err.Error(), nil, cfgVals, true)), true
 	}
 	callArgs := map[string]any{"sql": sqlText, "database": ds.Alias}
 	prepared, err := a.Prepare(tool, callArgs)
 	if err != nil {
-		return c.blocked(err.Error()), true
+		return c.blocked(a.scrubSQLConsoleText(err.Error(), nil, cfgVals, true)), true
 	}
-	redactSQLConsolePreview(prepared, c.m, ds.Alias, ds.secretValues(&c.m.Config))
+	redactSQLConsolePreview(prepared, c.m, ds.Alias, cfgVals)
 	pending, err := a.waitApproval(ctx, tool, callArgs, prepared, c.client)
 	if err != nil {
-		return c.blocked(err.Error()), true
+		return c.blocked(a.scrubSQLConsoleText(err.Error(), prepared.secretValues, prepared.configValues, true)), true
 	}
 	if !a.approvalCommitValid(pending) {
 		a.approvalResult(pending.record.ID, "未执行：中间件在审批期间被修改或已移出已开启的流程包")
@@ -771,11 +803,11 @@ func (a *App) callWSSQL(ctx context.Context, c *mwCall, args map[string]any) (st
 	res, err := a.Send(prepared)
 	text, isErr := formatWSSQLResult(res, err)
 	text = prefix + text
+	text = a.scrubSQLConsoleText(text, prepared.secretValues, prepared.configValues, isErr)
 	if pending != nil {
-		result := strings.SplitN(text, "\n", 2)[0]
-		a.approvalResult(pending.record.ID, truncate(a.scrubApprovalText(result, prepared.secretValues), 500))
+		a.approvalResult(pending.record.ID, text)
 	}
-	out, failed := c.done(a.scrubApprovalText(text, prepared.secretValues), nil)
+	out, failed := c.done(text, nil)
 	if isErr {
 		return out, true
 	}
@@ -831,7 +863,7 @@ func (a *App) testWSSQLConsole(ctx context.Context, m *Middleware) (string, erro
 		headers.Set("Cookie", ch)
 		rememberSecret(&secrets, ch)
 		for _, c := range matched {
-			rememberSecret(&secrets, c.Value)
+			rememberCookieValue(&secrets, c.Value)
 		}
 	}
 	cctx, cancel := context.WithTimeout(ctx, 12*time.Second)

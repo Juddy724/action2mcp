@@ -79,6 +79,7 @@ type PreparedCall struct {
 	subs         []credentialSubstitution
 	credHeaders  []string
 	secretValues []string
+	configValues []string // datasource ids / env values: token-boundary hide, not result substring scrub
 	ws           bool
 	wsMessages   []string
 	wsSQL        string
@@ -227,7 +228,7 @@ func (a *App) Prepare(t *Tool, args map[string]any) (*PreparedCall, error) {
 				alias = a
 			}
 			ds, _ := mw.lookupDatasource(alias)
-			redactSQLConsolePreview(p, mw, alias, ds.secretValues(&mw.Config))
+			redactSQLConsolePreview(p, mw, alias, ds.configHideValues(&mw.Config))
 			p.Preview = a.scrubApprovalPreview(p.Preview, p.secretValues)
 		}
 	}

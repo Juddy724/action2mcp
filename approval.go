@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -226,9 +227,10 @@ func (a *App) PreviewApproval(id int64, nonce string, args map[string]any) (*App
 	}
 	prepared, err := a.Prepare(p.tool, edited)
 	if err != nil {
-		return nil, approvalErr(400, a.scrubApprovalText(err.Error(), p.prepared.secretValues))
+		return nil, approvalErr(400, a.scrubSQLConsoleText(err.Error(), p.prepared.secretValues, p.prepared.configValues, true))
 	}
 	prepared.Preview = a.scrubApprovalPreview(prepared.Preview, p.prepared.secretValues)
+	prepared.Preview = scrubPreviewConfigTokens(prepared.Preview, p.prepared.configValues)
 	return &ApprovalPreview{prepared.Preview, prepared.PreviewHash}, nil
 }
 
@@ -264,13 +266,15 @@ func (a *App) DecideApproval(id int64, nonce, action string, args map[string]any
 		}
 		prepared, err = a.Prepare(p.tool, finalArgs)
 		if err != nil {
-			return approvalErr(400, a.scrubApprovalText(err.Error(), p.prepared.secretValues))
+			return approvalErr(400, a.scrubSQLConsoleText(err.Error(), p.prepared.secretValues, p.prepared.configValues, true))
 		}
 		if prepared.PreviewHash != previewHash {
 			return approvalErr(409, "预览已过期，请刷新后重新确认")
 		}
 		prepared.secretValues = append(prepared.secretValues, p.prepared.secretValues...)
+		prepared.configValues = append(prepared.configValues, p.prepared.configValues...)
 		prepared.Preview = a.scrubApprovalPreview(prepared.Preview, prepared.secretValues)
+		prepared.Preview = scrubPreviewConfigTokens(prepared.Preview, prepared.configValues)
 		r.Status = "approved"
 		if action == "edit" {
 			r.Status = "edited"
@@ -365,10 +369,86 @@ func (a *App) approvalCommitValid(p *pendingApproval) bool {
 	return err == nil && rev == p.record.ToolRev && p.prepared.fingerprint() == p.confirmedHash
 }
 
+const (
+	approvalResultPreviewBytes = 2 * 1024
+	approvalResultPreviewLines = 20
+	approvalResultFullMax      = 1 << 20 // 1 MB
+	approvalResultTruncMark    = "…[已截断]"
+	approvalResultFullCapNote  = "…[已截断]（结果超过 1MB，已截断保存）"
+)
+
+func cutUTF8(s string, n int) string {
+	if n >= len(s) {
+		return s
+	}
+	if n < 0 {
+		return ""
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+// previewApprovalResult keeps the first ~20 lines or ~2KB, whichever is
+// shorter, and appends a truncation marker when anything is dropped.
+func previewApprovalResult(s string) string {
+	if s == "" {
+		return s
+	}
+	cut := len(s)
+	lines := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			lines++
+			if lines >= approvalResultPreviewLines {
+				cut = i
+				break
+			}
+		}
+		if i+1 >= approvalResultPreviewBytes && cut == len(s) {
+			cut = i + 1
+			break
+		}
+	}
+	if cut >= len(s) {
+		return s
+	}
+	return strings.TrimRight(cutUTF8(s, cut), "\r\n") + "\n" + approvalResultTruncMark
+}
+
+func capApprovalResultFull(s string) (string, bool) {
+	if len(s) <= approvalResultFullMax {
+		return s, false
+	}
+	return cutUTF8(s, approvalResultFullMax) + "\n" + approvalResultFullCapNote, true
+}
+
 func (a *App) approvalResult(id int64, result string) {
-	if _, err := a.store.db.Exec(`UPDATE approvals SET result=? WHERE id=?`, result, id); err != nil {
+	full, _ := capApprovalResultFull(result)
+	summary := previewApprovalResult(full)
+	if _, err := a.store.db.Exec(`UPDATE approvals SET result=?, result_full=? WHERE id=?`, summary, full, id); err != nil {
 		log.Printf("审批 #%d 执行结果保存失败", id)
 	}
+}
+
+func (a *App) GetApprovalResult(id int64) (string, bool, error) {
+	if id <= 0 {
+		return "", false, approvalErr(404, "审批记录不存在")
+	}
+	var result, full string
+	err := a.store.db.QueryRow(`SELECT result, COALESCE(result_full,'') FROM approvals WHERE id=?`, id).Scan(&result, &full)
+	if err == sql.ErrNoRows {
+		return "", false, approvalErr(404, "审批记录不存在")
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if full == "" {
+		full = result
+	}
+	truncated := strings.Contains(full, approvalResultFullCapNote)
+	return full, truncated, nil
 }
 
 func (a *App) approvalEditPrefix(p *pendingApproval) string {

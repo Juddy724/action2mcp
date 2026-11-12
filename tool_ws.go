@@ -432,6 +432,16 @@ func rememberSecret(secrets *[]string, values ...string) {
 	}
 }
 
+// rememberCookieValue registers a cookie *value* for substring scrubbing,
+// and only when it is long enough to be a meaningful secret. Cookie names
+// are never registered. Short flags (a single "0", "1", "ok") would
+// otherwise corrupt ordinary result data.
+func rememberCookieValue(secrets *[]string, value string) {
+	if len(value) >= minSecretScrubLen {
+		rememberSecret(secrets, value)
+	}
+}
+
 // resolveCookieJar returns the Cookie header the browser would send to rawURL
 // from the login-center jar. The value is registered as a secret for redaction.
 func (a *App) resolveCookieJar(rawURL string, secrets *[]string) (string, error) {
@@ -442,7 +452,7 @@ func (a *App) resolveCookieJar(rawURL string, secrets *[]string) (string, error)
 	}
 	rememberSecret(secrets, ch)
 	for _, c := range matched {
-		rememberSecret(secrets, c.Value)
+		rememberCookieValue(secrets, c.Value)
 	}
 	return ch, nil
 }
@@ -475,7 +485,7 @@ func (a *App) resolveWSRef(ref, rawURL string, secrets *[]string) (string, error
 			if len(hits) > 1 && len(hits[0].Path) == len(hits[1].Path) {
 				return "", fmt.Errorf("Cookie %s 存在多个匹配项，已拒绝", name)
 			}
-			rememberSecret(secrets, hits[0].Value)
+			rememberCookieValue(secrets, hits[0].Value)
 			return hits[0].Value, nil
 		}
 		v, err := a.vault.Resolve(ref)

@@ -383,7 +383,7 @@ PRAGMA user_version=7;`)
 			t.Fatal(err)
 		}
 		var ver int
-		if err := st.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil || ver != 9 {
+		if err := st.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil || ver != 10 {
 			t.Fatalf("version=%d err=%v", ver, err)
 		}
 		if _, err := st.GetToolByName("demo_sql_query"); err == nil {
@@ -571,7 +571,7 @@ PRAGMA user_version=8;`, cfg)
 			t.Fatal(err)
 		}
 		var ver int
-		if err := st.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil || ver != 9 {
+		if err := st.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil || ver != 10 {
 			t.Fatalf("version=%d err=%v", ver, err)
 		}
 		mw, err := st.GetMiddlewareByName("demo_sql")
