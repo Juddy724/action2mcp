@@ -13,6 +13,12 @@ const (
 	maxApprovalContainerBytes = maxApprovalArgs
 	maxApprovalJSONTokens     = 16 * 1024
 	maxApprovalWalkBytes      = 4 * 1024 * 1024
+	// maxSecretScrubWalkBytes caps bytes scanned across decoded views in
+	// scrubSecretTextMin. After switching to Aho–Corasick, each view is
+	// one linear pass, so this equals the bounded graph (128 views × the
+	// 256 KiB container cap). The 4 MiB maxApprovalWalkBytes budget was
+	// sized for a per-variant walk and is left unchanged for other uses.
+	maxSecretScrubWalkBytes = 128 * maxApprovalContainerBytes
 )
 
 var errApprovalStructureLimit = errors.New("approval structure limit")

@@ -6,12 +6,12 @@
 
 最新版本：[Releases 页面](https://github.com/Juddy724/action2mcp/releases/latest)
 
-| 平台 | 安装包 (v0.5.10) |
+| 平台 | 安装包 (v0.5.11) |
 |---|---|
-| macOS (Apple 芯片) | [Action2MCP-0.5.10-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.10/Action2MCP-0.5.10-macOS-AppleSilicon.zip) |
-| macOS (Intel) | [Action2MCP-0.5.10-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.10/Action2MCP-0.5.10-macOS-Intel.zip) |
-| Windows x64 | [Action2MCP-0.5.10-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.10/Action2MCP-0.5.10-Windows-x64.zip) |
-| Linux x64 | [Action2MCP-0.5.10-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.10/Action2MCP-0.5.10-Linux-x64.zip) |
+| macOS (Apple 芯片) | [Action2MCP-0.5.11-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.11/Action2MCP-0.5.11-macOS-AppleSilicon.zip) |
+| macOS (Intel) | [Action2MCP-0.5.11-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.11/Action2MCP-0.5.11-macOS-Intel.zip) |
+| Windows x64 | [Action2MCP-0.5.11-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.11/Action2MCP-0.5.11-Windows-x64.zip) |
+| Linux x64 | [Action2MCP-0.5.11-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.11/Action2MCP-0.5.11-Linux-x64.zip) |
 
 解压后运行 `start.command`（macOS）、`start.bat`（Windows）或 `start.sh`（Linux），然后打开 http://localhost:7788 。详细说明见安装包里的 README.md。
 
@@ -64,6 +64,11 @@
 
 工具或 SQL 控制台中间件里的 `{{header.cookie}}`（大小写不敏感）会从登录中心该网站的 Cookie 罐组装 Cookie 请求头，而不是去查已收获的自定义请求头。登录只要其他必要请求头（例如 `sso-epctoken`）已经收获即可完成；不会因为缺少名叫 cookie 的收获项而一直视为未登录。测试连接和真实调用在罐里没有该网站的 Cookie 时，会提示缺少 Cookie，而不会说「站点缺少请求头 cookie」。Cookie 值会作为密钥脱敏，不会出现在工具说明、审批预览、审计或报错里。从 0.5.4 的护栏 `WS` 工具迁过来的 Cookie 绑定会被规范化为 `{{header.cookie}}`。
 
+
+### 结果脱敏不再把整页打成 ******（0.5.11）
+
+- 修复了返回给 AI 的工具结果在页面较长、Cookie 等密钥较多时，整段被替换成 `******` 的问题。根因是脱敏在每种解码视图里按「每个密钥的每种编码变体」单独扫描，计算量随变体数量成倍增加，超过上限后会把整段文字换成 `******`（失败即封闭）。从 0.5.8 起 `header.cookie` 会把登录中心 Cookie 罐里足够长的值登记为密钥，禅道这类几十 KB 的页面更容易触发。
+- 脱敏语义不变：原文以及 URL、HTML、Base64、JSON 等编码形式中的密钥仍会遮掉，超过体积或解码深度上限时仍然整段封闭。实现改为对每种解码视图做一次多模式匹配（Aho–Corasick），计算量只跟页面长度和解码视图数有关，不再跟密钥变体数量成正比。约 60KB 的页面配上几十个密钥时，正文会原样保留，只遮掉真正出现的密钥。
 
 ### SQL 控制台审批模式与审批记录对齐（0.5.10）
 
