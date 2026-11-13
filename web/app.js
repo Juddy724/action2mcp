@@ -681,6 +681,12 @@ function drawEditor() {
     <label>用途说明</label><input id="t-desc" value="${esc(t.description)}" placeholder="告诉 AI 什么时候用它，例如：按关键字查询 CRM 客户，返回客户列表">
     <label>请求</label><div class="row"><select id="t-method" onchange="toolMethodChanged()">${['GET','HEAD','POST','PUT','PATCH','DELETE','WS'].map(m => `<option ${m === t.method ? 'selected' : ''}>${m}</option>`).join('')}</select><input id="t-url" class="grow mono" value="${esc(t.url)}"></div>
     <label for="t-approval">审批模式</label><select id="t-approval" onchange="EDIT.approvalManual=true;EDIT.tool.approval=this.value"><option value="off" ${t.approval !== 'always' ? 'selected' : ''}>不审批</option><option value="always" ${t.approval === 'always' ? 'selected' : ''}>每次都审批</option></select>
+    <label for="t-result-format">返回格式</label><div><select id="t-result-format" onchange="resultFormatChanged()">${[['auto','自动清洗'],['raw','原始 HTML'],['selector','只取区域']].map(([v,l]) => `<option value="${v}" ${(t.config && t.config.result_format || 'auto') === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <input id="t-result-selector" class="mono" style="margin-top:6px;width:100%;${(t.config && t.config.result_format) === 'selector' ? '' : 'display:none'}" placeholder="CSS 选择器，例如 div#main 或 #bug-content" value="${esc((t.config && t.config.result_selector) || '')}">
+      <div class="muted small">JSON 原样返回。HTML 默认去掉脚本和导航并转成 Markdown；清洗后几乎为空会退回原始 HTML。</div></div>
+    <label for="t-detect-failure">失败检测</label><div><label class="chk"><input type="checkbox" id="t-detect-failure" ${(t.config && t.config.detect_failure === false) ? '' : 'checked'}> 开启后，页面上的错误提示或 JSON 失败码会标成工具错误，而不是成功结果。</label></div>
+    <label for="t-op-kind">操作类型</label><div><select id="t-op-kind">${[['auto','自动（按请求方法）'],['read','只读'],['write','写操作']].map(([v,l]) => `<option value="${v}" ${(t.config && t.config.op_kind || 'auto') === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <div class="muted small">站点用 POST 做查询时应选「只读」，这样不会被标成写操作。</div></div>
     <label>请求头 (JSON)</label><textarea id="t-headers" style="min-height:80px">${esc(JSON.stringify(t.headers || {}, null, 2))}</textarea>
     <label>请求体模板</label><textarea id="t-body" style="min-height:120px">${esc(t.body || '')}</textarea>
     ${String(t.method).toUpperCase() === 'WS' ? `<label>WebSocket 消息</label><textarea id="t-messages" class="mono" style="min-height:120px">${esc((t.config && t.config.messages || []).join('\n'))}</textarea>
@@ -709,11 +715,21 @@ function paramsTable(ps) {
    <td><input class="p-desc" style="width:100%" value="${esc(p.description)}"></td>
    <td><input class="p-def" style="width:110px" value="${esc(p.default || '')}"></td></tr>`).join('')}</table>`;
 }
+function resultFormatChanged() {
+  const sel = $('#t-result-selector');
+  const fmt = $('#t-result-format');
+  if (sel && fmt) sel.style.display = fmt.value === 'selector' ? '' : 'none';
+}
 function collectEditor() {
   const t = EDIT.tool; if (!$('#t-name')) return t;
   t.name = $('#t-name').value.trim(); t.title = $('#t-title').value.trim(); t.description = $('#t-desc').value.trim();
   t.method = $('#t-method').value; t.url = $('#t-url').value.trim(); t.body = $('#t-body').value;
   t.approval = $('#t-approval').value;
+  t.config = t.config || {};
+  if ($('#t-result-format')) t.config.result_format = $('#t-result-format').value || 'auto';
+  if ($('#t-result-selector')) t.config.result_selector = $('#t-result-selector').value.trim();
+  if ($('#t-detect-failure')) t.config.detect_failure = $('#t-detect-failure').checked;
+  if ($('#t-op-kind')) t.config.op_kind = $('#t-op-kind').value || 'auto';
   try { t.headers = JSON.parse($('#t-headers').value || '{}'); } catch { throw new Error('请求头不是合法的 JSON'); }
   if (String(t.method).toUpperCase() === 'WS') {
     t.config = t.config || {};

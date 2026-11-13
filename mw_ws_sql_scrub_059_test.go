@@ -111,9 +111,9 @@ func TestSQLConsoleResultNotOverScrubbed(t *testing.T) {
 		done <- unpackApprovalReply(v, invErr)
 	}()
 	rec := pendingApprovals(t, a, 1)[0]
-	pendingBlob, _ := json.Marshal(rec)
-	assertNoConfigTokens(t, string(pendingBlob), longToken, dsID, envID, envType, spaceCode)
-	if strings.Contains(string(pendingBlob), longCookie) {
+	pendingBlob := approvalVisibleBlob(rec)
+	assertNoConfigTokens(t, pendingBlob, longToken, dsID, envID, envType, spaceCode)
+	if strings.Contains(pendingBlob, longCookie) {
 		t.Fatal("preview leaked cookie")
 	}
 	if rec.Preview.URL != "" && (strings.Contains(rec.Preview.URL, "ws://") || strings.Contains(rec.Preview.URL, "wss://")) {
@@ -231,8 +231,12 @@ func TestSQLConsoleErrorMasksConfigTokens(t *testing.T) {
 		done <- unpackApprovalReply(v, invErr)
 	}()
 	rec := pendingApprovals(t, a, 1)[0]
-	blob, _ := json.Marshal(rec)
-	assertHiddenFromAI(t, string(blob), fake.token, dsID, "707", "PROD", "spc_alpha")
+	blob := approvalVisibleBlob(rec)
+	port := strings.TrimPrefix(s.URL, "http://127.0.0.1:")
+	if strings.Contains(blob, port) || strings.Contains(blob, s.URL) || strings.Contains(blob, "707") || strings.Contains(blob, dsID) {
+		t.Fatalf("leak port=%s url=%s previewURL=%q headers=%v body=%q title=%q args=%v params=%s blob=%s", port, s.URL, rec.Preview.URL, rec.Preview.Headers, rec.Preview.Body, rec.Title, rec.ArgsDisplay, truncate(string(compactJSON(rec.Params)), 300), truncate(blob, 800))
+	}
+	assertHiddenFromAI(t, blob, fake.token, dsID, "707", "PROD", "spc_alpha")
 	approveRecord(t, a, rec)
 	reply := getApprovalReply(t, done)
 	if !reply.isError {

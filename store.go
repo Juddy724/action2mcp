@@ -811,6 +811,9 @@ func saveTool(w *sql.Tx, t *Tool) error {
 	if err := validateToolConfig(t.Method, t.Config, false); err != nil {
 		return err
 	}
+	if err := validatePresentation(t.Config); err != nil {
+		return err
+	}
 	if err := validateWSCredentialBindings(t); err != nil {
 		return err
 	}
