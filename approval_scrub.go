@@ -118,6 +118,13 @@ func scrubSecretTextMin(text string, vault *Vault, values []string, minLen int) 
 	if len(variants) == 0 {
 		return text
 	}
+	patterns := make([]string, 0, len(variants))
+	for value := range variants {
+		if value != "" {
+			patterns = append(patterns, value)
+		}
+	}
+	matcher := newAhoCorasick(patterns)
 	type view struct {
 		text  string
 		spans []approvalTextSpan
@@ -134,28 +141,24 @@ func scrubSecretTextMin(text string, vault *Vault, values []string, minLen int) 
 	// Decode grammars independently: a percent sequence may be literal inside
 	// JSON, and '+' may be literal in a path. Search the bounded decoding graph
 	// so mixed and nested encodings do not require enumerating hex spellings.
+	//
+	// Each view is scanned once with Aho–Corasick (cost independent of the
+	// number of variants). The walk budget counts len(text) once per view,
+	// plus the existing depth / 128-view caps. Pathological inputs still
+	// fail closed.
 	for at := 0; at < len(views); at++ {
 		current := views[at]
-		for value := range variants {
-			work += len(current.text)
-			if work > maxApprovalWalkBytes {
-				return secretMask
+		work += len(current.text)
+		if work > maxSecretScrubWalkBytes {
+			return secretMask
+		}
+		for _, hit := range matcher.find(current.text) {
+			if hit.start < 0 || hit.end > len(current.spans) || hit.start >= hit.end {
+				continue
 			}
-			for start := 0; start < len(current.text); {
-				i := strings.Index(current.text[start:], value)
-				if i < 0 {
-					break
-				}
-				i += start
-				matches = append(matches, approvalTextSpan{current.spans[i].start, current.spans[i+len(value)-1].end})
-				start = i + len(value)
-			}
+			matches = append(matches, approvalTextSpan{current.spans[hit.start].start, current.spans[hit.end-1].end})
 		}
 		for encoding := approvalPathEncoding; encoding <= approvalHTMLEncoding; encoding++ {
-			work += len(current.text)
-			if work > maxApprovalWalkBytes {
-				return secretMask
-			}
 			next, positions := decodeApprovalText(current.text, current.spans, encoding)
 			if seen[next] {
 				continue
@@ -303,24 +306,13 @@ func scrubConfigTokens(text string, values []string) string {
 	if len(list) == 0 {
 		return text
 	}
-	sort.Slice(list, func(i, j int) bool { return len(list[i]) > len(list[j]) })
 	type span struct{ start, end int }
 	var matches []span
-	for _, v := range list {
-		for start := 0; start <= len(text)-len(v); {
-			i := strings.Index(text[start:], v)
-			if i < 0 {
-				break
-			}
-			i += start
-			end := i + len(v)
-			if configTokenBoundary(text, i, end) {
-				matches = append(matches, span{i, end})
-				start = end
-				continue
-			}
-			start = i + 1
+	for _, hit := range newAhoCorasick(list).find(text) {
+		if !configTokenBoundary(text, hit.start, hit.end) {
+			continue
 		}
+		matches = append(matches, span{hit.start, hit.end})
 	}
 	if len(matches) == 0 {
 		return text
