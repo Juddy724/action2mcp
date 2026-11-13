@@ -75,6 +75,15 @@ func assertHiddenFromAI(t *testing.T, blob, token string, ids ...string) {
 	}
 }
 
+// approvalVisibleBlob is the approval record without its preview digest.
+// The digest is random hex, so a short numeric id such as 901 or 707 appears
+// inside it by chance even though that digest is not configuration text.
+func approvalVisibleBlob(rec ApprovalRecord) string {
+	rec.PreviewHash = ""
+	b, _ := json.Marshal(rec)
+	return string(b)
+}
+
 func TestSQLConsoleHappyPath(t *testing.T) {
 	fake := newCountingWS(2)
 	s := fake.start(t)
@@ -297,8 +306,7 @@ func TestSQLConsoleApprovalPreviewHidesIDs(t *testing.T) {
 		done <- unpackApprovalReply(v, err)
 	}()
 	rec := pendingApprovals(t, a, 1)[0]
-	blob, _ := json.Marshal(rec)
-	assertHiddenFromAI(t, string(blob), fake.token, "90001", "spc_alpha", "70007", strings.TrimPrefix(fake.wsURL(s.URL), "ws://"))
+	assertHiddenFromAI(t, approvalVisibleBlob(rec), fake.token, "90001", "spc_alpha", "70007", strings.TrimPrefix(fake.wsURL(s.URL), "ws://"))
 	if rec.Preview.URL != "" && (strings.Contains(rec.Preview.URL, "ws://") || strings.Contains(rec.Preview.URL, "wss://")) {
 		t.Fatalf("preview URL leaked address: %s", rec.Preview.URL)
 	}

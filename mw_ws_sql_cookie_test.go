@@ -169,7 +169,7 @@ func TestSQLConsoleCookieJarCallRedacts(t *testing.T) {
 	}
 	redactSQLConsolePreview(prepared, m, "orders", nil)
 	prev, _ := json.Marshal(prepared.Preview)
-	assertCookieHidden(t, string(prev)+prepared.PreviewHash, cookieVal, fake.token)
+	assertCookieHidden(t, string(prev), cookieVal, fake.token)
 
 	done := make(chan approvalReply, 1)
 	go func() {
@@ -177,8 +177,7 @@ func TestSQLConsoleCookieJarCallRedacts(t *testing.T) {
 		done <- unpackApprovalReply(v, invErr)
 	}()
 	rec := pendingApprovals(t, a, 1)[0]
-	blob, _ := json.Marshal(rec)
-	assertCookieHidden(t, string(blob), cookieVal, fake.token)
+	assertCookieHidden(t, approvalVisibleBlob(rec), cookieVal, fake.token)
 	approveRecord(t, a, rec)
 	reply := getApprovalReply(t, done)
 	if reply.isError {

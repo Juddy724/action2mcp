@@ -381,15 +381,17 @@ func entryToolDefs() []map[string]any {
 		{"name": "list_packs", "title": "列出流程包",
 			"description": "【第一步 Step 1】列出当前可用的流程包（每个包是一组围绕某项业务的工具，例如「禅道记工时」「客服查单」）。拿到任务后先调用它，根据 description / scenarios（适用场景）/ tool_names 选出和任务相关的包，再调用 load_pack 加载。不要一次加载所有包。\nList the available tool packs first; pick the pack(s) that match your current task, then call load_pack.",
 			"inputSchema": obj(map[string]any{}),
-			"annotations": map[string]any{"readOnlyHint": true}},
+			"annotations": mcpAnnotations(true, false, true)},
 		{"name": "load_pack", "title": "加载流程包",
 			"description": "【第二步 Step 2】加载一个流程包：返回 guide（使用说明）、该包所有工具的名称、说明和参数 schema（inputSchema），同时把这些工具加入你的工具列表（服务器会发送 notifications/tools/list_changed）。guide 不是空的时候，先按它确定调用顺序和参数从哪来，再调用工具。如果工具列表没有出现它们，用 call_pack_tool 调用。\nLoad a pack by name or id. The result contains guide plus tools (name, description, inputSchema). When guide is not empty, follow it before calling tools. Tools are added to tools/list; if your client does not refresh, use call_pack_tool.",
-			"inputSchema": obj(map[string]any{"pack": map[string]any{"type": "string", "description": "流程包名称或 id（来自 list_packs）/ pack name or id"}}, "pack")},
+			"inputSchema": obj(map[string]any{"pack": map[string]any{"type": "string", "description": "流程包名称或 id（来自 list_packs）/ pack name or id"}}, "pack"),
+			"annotations": mcpAnnotations(false, false, false)},
 		{"name": "unload_pack", "title": "卸载流程包",
 			"description": "任务完成或换任务时卸载流程包，把它的工具从工具列表中移除，保持上下文干净。不填 pack 表示卸载全部。\nUnload a pack (or all packs when pack is empty) to keep your context small.",
-			"inputSchema": obj(map[string]any{"pack": map[string]any{"type": "string", "description": "流程包名称或 id；留空 = 全部 / empty = all"}})},
+			"inputSchema": obj(map[string]any{"pack": map[string]any{"type": "string", "description": "流程包名称或 id；留空 = 全部 / empty = all"}}),
+			"annotations": mcpAnnotations(false, false, false)},
 		{"name": "call_pack_tool", "title": "调用包内工具（兜底）",
-			"description": "【兜底 Fallback】按工具名调用已开启流程包里的工具（包括 db_query、redis_command 等中间件工具）。当 load_pack 之后你的工具列表里没有出现新工具时使用；arguments 按 load_pack 返回的 inputSchema 填写。权限、自动登录等规则与直接调用完全相同。\nCall a pack tool by name when your client did not refresh its tool list after load_pack. arguments must follow the tool's inputSchema.",
+			"description": "【兜底 Fallback】按工具名调用已开启流程包里的工具（包括 db_query、redis_command 等中间件工具）。当 load_pack 之后你的工具列表里没有出现新工具时使用；arguments 按 load_pack 返回的 inputSchema 填写。权限、自动登录等规则与直接调用完全相同。被调工具若是写操作，仍须用户明确要求才调用。\nCall a pack tool by name when your client did not refresh its tool list after load_pack. arguments must follow the tool's inputSchema.",
 			"inputSchema": obj(map[string]any{
 				"tool":      map[string]any{"type": "string", "description": "工具名（来自 load_pack 的返回）/ tool name"},
 				"arguments": map[string]any{"type": "object", "description": "工具参数 / tool arguments", "additionalProperties": true},
@@ -419,10 +421,14 @@ func (a *App) recordedToolDefs(tools []*Tool, packNames map[int64][]string, skip
 		if ps := packNames[t.ID]; len(ps) > 0 {
 			desc += "（流程包：" + strings.Join(ps, "、") + "）"
 		}
+		write, ann := toolOpKind(t)
+		if write {
+			desc = applyWritePrefix(desc)
+		}
 		secrets := a.mcpToolSecrets(t)
 		desc = a.scrubApprovalText(desc, secrets)
 		title := a.scrubApprovalText(t.Title, secrets)
-		item := map[string]any{"name": t.Name, "description": desc, "inputSchema": a.mcpInputSchema(t)}
+		item := map[string]any{"name": t.Name, "description": desc, "inputSchema": a.mcpInputSchema(t), "annotations": ann}
 		if title != "" {
 			item["title"] = title
 		}
@@ -628,6 +634,7 @@ type toolBrief struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	InputSchema any    `json:"inputSchema"`
+	Annotations any    `json:"annotations,omitempty"`
 }
 
 func (a *App) mcpLoadPack(mc *mcpCtx, args map[string]any) any {
@@ -655,7 +662,7 @@ func (a *App) mcpLoadPack(mc *mcpCtx, args map[string]any) any {
 	defs := a.packToolDefs([]*Pack{p})
 	briefs := []toolBrief{}
 	for _, d := range defs {
-		briefs = append(briefs, toolBrief{Name: d["name"].(string), Description: d["description"].(string), InputSchema: d["inputSchema"]})
+		briefs = append(briefs, toolBrief{Name: d["name"].(string), Description: d["description"].(string), InputSchema: d["inputSchema"], Annotations: d["annotations"]})
 	}
 	loadedNames := a.loadedPackNames(mc.sess)
 	guide := a.packGuideText(p)

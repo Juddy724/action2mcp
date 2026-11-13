@@ -114,7 +114,7 @@ func recSchema(props map[string]any, req ...string) map[string]any {
 }
 
 func recAnn(readOnly bool) map[string]any {
-	return map[string]any{"readOnlyHint": readOnly}
+	return mcpAnnotations(readOnly, false, readOnly)
 }
 
 func recToolNames() []string {
@@ -150,7 +150,7 @@ func recToolDefs() []map[string]any {
 			}, "request_id"),
 			"annotations": recAnn(true)},
 		{"name": "rec_annotate", "title": "标注录制",
-			"description": "【录制分析·写入标注】写 summary，并用 request_id 或 request_ids 批量标注；apply_to_group=true 套用到同一模板路径组，会改数据的请求 category 必须是 write 并告诉用户。按包说明 guide 的顺序使用。",
+			"description": "【写操作，仅在用户明确要求时调用】 【录制分析·写入标注】写 summary，并用 request_id 或 request_ids 批量标注；apply_to_group=true 套用到同一模板路径组，会改数据的请求 category 必须是 write 并告诉用户。按包说明 guide 的顺序使用。",
 			"inputSchema": recSchema(map[string]any{
 				"recording_id": map[string]any{"type": "integer", "description": "录制 id"},
 				"summary":      map[string]any{"type": "string", "description": "这次录制对应的业务流程，一两句话"},
@@ -170,7 +170,7 @@ func recToolDefs() []map[string]any {
 			"inputSchema": recSchema(map[string]any{}),
 			"annotations": recAnn(true)},
 		{"name": "rec_save_tool", "title": "保存为工具",
-			"description": "【录制分析·写入工具】把一条录制请求保存成参数化工具；pack 必填，没明确指定时不要调用，dry_run=true 只返回模板不写入，敏感值不会落盘。按包说明 guide 的顺序使用。",
+			"description": "【写操作，仅在用户明确要求时调用】 【录制分析·写入工具】把一条录制请求保存成参数化工具；pack 必填，没明确指定时不要调用，dry_run=true 只返回模板不写入，敏感值不会落盘。按包说明 guide 的顺序使用。",
 			"inputSchema": recSchema(map[string]any{
 				"request_id":  map[string]any{"type": "integer", "description": "要保存的请求 id"},
 				"pack":        map[string]any{"type": "string", "description": "流程包名称或 id。必填，没有默认值。用户没明确指定时不要调用"},
@@ -266,7 +266,7 @@ func (a *App) mcpLoadRecPack(mc *mcpCtx) any {
 	}
 	briefs := make([]toolBrief, 0, 6)
 	for _, d := range recToolDefs() {
-		briefs = append(briefs, toolBrief{Name: d["name"].(string), Description: d["description"].(string), InputSchema: d["inputSchema"]})
+		briefs = append(briefs, toolBrief{Name: d["name"].(string), Description: d["description"].(string), InputSchema: d["inputSchema"], Annotations: d["annotations"]})
 	}
 	return textResult(string(compactJSON(map[string]any{
 		"loaded":       recPackName,
@@ -1282,6 +1282,7 @@ func (a *App) recSaveTool(mc *mcpCtx, args map[string]any) (string, bool) {
 	}
 	overwrite := argBool(args, "overwrite", false)
 	var existingID int64
+	var existingTool *Tool
 	if name != "" && toolNameRe.MatchString(name) {
 		if isEntryTool(name) {
 			problems = append(problems, "工具名 "+name+" 是阶梯模式的入口工具名，已被保留，请换一个名字")
@@ -1295,6 +1296,7 @@ func (a *App) recSaveTool(mc *mcpCtx, args map[string]any) (string, bool) {
 				problems = append(problems, fmt.Sprintf("工具标识 %q 已存在（id=%d）。不要覆盖，除非用户明确同意。用户同意后才再次调用并设置 overwrite=true。", a.redactEcho(name, saveLits), exist.ID))
 			} else {
 				existingID = exist.ID
+				existingTool = exist
 			}
 		} else if err != nil && err != sql.ErrNoRows {
 			return "读取工具失败：" + a.redactEcho(err.Error(), saveLits), true
@@ -1314,6 +1316,12 @@ func (a *App) recSaveTool(mc *mcpCtx, args map[string]any) (string, bool) {
 	}
 	t.Name = name
 	t.ID = existingID
+	if existingTool != nil {
+		t.Config.ResultFormat = existingTool.Config.ResultFormat
+		t.Config.ResultSelector = existingTool.Config.ResultSelector
+		t.Config.DetectFailure = existingTool.Config.DetectFailure
+		t.Config.OpKind = existingTool.Config.OpKind
+	}
 	if title := strings.TrimSpace(argStr(args, "title")); title != "" {
 		t.Title = title
 	}

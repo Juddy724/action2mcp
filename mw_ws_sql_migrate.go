@@ -13,7 +13,8 @@ const (
 	schemaVersionSQLConsoleEnv      = 9
 	schemaVersionResultFull         = 10 // 0.5.9: approvals.result_full
 	schemaVersionSQLConsoleApproval = 11
-	schemaUserVersion               = schemaVersionSQLConsoleApproval
+	schemaVersionResultPresentation = 12 // 0.5.12: result_format / detect_failure / op_kind in tools.config
+	schemaUserVersion               = schemaVersionResultPresentation
 )
 
 func sqlConsoleNameFromTool(name string) string {

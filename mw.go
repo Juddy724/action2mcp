@@ -755,11 +755,17 @@ func (a *App) mwToolListFor(ms []*Middleware, packs map[int64][]string) []map[st
 				req = append(req, n)
 			}
 		}
+		desc := d.Desc
+		write, destructive, idempotent := mwToolAnnotations(d.Name)
+		if write {
+			desc = applyWritePrefix(desc)
+		}
 		out = append(out, map[string]any{
 			"name":        d.Name,
 			"title":       d.Name,
-			"description": d.Desc + "\n可用的中间件：\n" + strings.Join(lines, "\n"),
+			"description": desc + "\n可用的中间件：\n" + strings.Join(lines, "\n"),
 			"inputSchema": map[string]any{"type": "object", "properties": props, "required": req},
+			"annotations": mcpAnnotations(!write, destructive, idempotent),
 		})
 	}
 	return out

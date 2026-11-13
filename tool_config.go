@@ -44,10 +44,87 @@ type WSAuthConfig struct {
 }
 
 type ToolConfig struct {
-	Messages []string         `json:"messages,omitempty"`
-	SQLGuard *SQLGuardConfig  `json:"sql_guard,omitempty"`
-	Collect  *WSCollectConfig `json:"collect,omitempty"`
-	Auth     *WSAuthConfig    `json:"auth,omitempty"`
+	Messages       []string         `json:"messages,omitempty"`
+	SQLGuard       *SQLGuardConfig  `json:"sql_guard,omitempty"`
+	Collect        *WSCollectConfig `json:"collect,omitempty"`
+	Auth           *WSAuthConfig    `json:"auth,omitempty"`
+	ResultFormat   string           `json:"result_format,omitempty"`   // ""/"auto", "raw", "selector"
+	ResultSelector string           `json:"result_selector,omitempty"` // used when ResultFormat=selector
+	DetectFailure  *bool            `json:"detect_failure,omitempty"`  // nil = enabled; false disables
+	OpKind         string           `json:"op_kind,omitempty"`         // ""/"auto", "read", "write"
+}
+
+const (
+	resultFormatAuto     = "auto"
+	resultFormatRaw      = "raw"
+	resultFormatSelector = "selector"
+	opKindAuto           = "auto"
+	opKindRead           = "read"
+	opKindWrite          = "write"
+)
+
+func (c ToolConfig) resultFormat() string {
+	switch strings.ToLower(strings.TrimSpace(c.ResultFormat)) {
+	case "", resultFormatAuto:
+		return resultFormatAuto
+	case resultFormatRaw:
+		return resultFormatRaw
+	case resultFormatSelector:
+		return resultFormatSelector
+	default:
+		return resultFormatAuto
+	}
+}
+
+func (c ToolConfig) detectFailureEnabled() bool {
+	return c.DetectFailure == nil || *c.DetectFailure
+}
+
+func (c ToolConfig) opKind() string {
+	switch strings.ToLower(strings.TrimSpace(c.OpKind)) {
+	case "", opKindAuto:
+		return opKindAuto
+	case opKindRead:
+		return opKindRead
+	case opKindWrite:
+		return opKindWrite
+	default:
+		return opKindAuto
+	}
+}
+
+func boolPtr(v bool) *bool { return &v }
+
+// validatePresentation is save-time only. Runtime (freezeWSCall) must not
+// fail a call because of these fields; illegal selectors fall back instead.
+func validatePresentation(c ToolConfig) error {
+	f := strings.ToLower(strings.TrimSpace(c.ResultFormat))
+	if f != "" && f != resultFormatAuto && f != resultFormatRaw && f != resultFormatSelector {
+		return fmt.Errorf("返回格式必须是 auto、raw 或 selector，而不是 %q", c.ResultFormat)
+	}
+	k := strings.ToLower(strings.TrimSpace(c.OpKind))
+	if k != "" && k != opKindAuto && k != opKindRead && k != opKindWrite {
+		return fmt.Errorf("操作类型必须是 auto、read 或 write，而不是 %q", c.OpKind)
+	}
+	if f == resultFormatSelector {
+		sel := strings.TrimSpace(c.ResultSelector)
+		if sel == "" {
+			return errors.New("返回格式为「只取区域」时必须填写 CSS 选择器")
+		}
+		if err := validateResultSelector(sel); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func presentationFields(c ToolConfig) ToolConfig {
+	return ToolConfig{
+		ResultFormat:   c.ResultFormat,
+		ResultSelector: c.ResultSelector,
+		DetectFailure:  c.DetectFailure,
+		OpKind:         c.OpKind,
+	}
 }
 
 func isWSMethod(method string) bool {

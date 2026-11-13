@@ -84,6 +84,7 @@ type PreparedCall struct {
 	wsMessages   []string
 	wsSQL        string
 	wsConfig     ToolConfig
+	presentCfg   ToolConfig // result_format / selector / detect_failure snapshot (HTTP and WS)
 	configErr    error
 	wsStats      *wsSessionStats
 }
@@ -170,7 +171,7 @@ func (a *App) Prepare(t *Tool, args map[string]any) (*PreparedCall, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &PreparedCall{request: RequestPreview{method, u, headers, body}, subs: d.subs, credHeaders: append([]string(nil), t.CredHeaders...)}
+	p := &PreparedCall{request: RequestPreview{method, u, headers, body}, subs: d.subs, credHeaders: append([]string(nil), t.CredHeaders...), presentCfg: presentationFields(t.Config)}
 	if err := a.freezeWSCall(t, vals, d, p); err != nil {
 		return nil, fmt.Errorf("%s", a.scrubApprovalText(err.Error(), secrets))
 	}

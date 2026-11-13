@@ -788,6 +788,11 @@ func (a *App) callWSSQL(ctx context.Context, c *mwCall, args map[string]any) (st
 	sqlText := strings.TrimSpace(argStr(args, "sql"))
 	alias := strings.TrimSpace(argStr(args, "database"))
 	c.action = alias + ": " + sqlText
+	allowed := c.m.datasourceAliases()
+	needDB := alias == "" && len(allowed) > 1
+	if sqlText == "" && needDB {
+		return c.blocked("请提供 sql、database（数据源别名）。可用：" + strings.Join(allowed, "、")), true
+	}
 	if sqlText == "" {
 		return c.blocked("请提供 sql"), true
 	}

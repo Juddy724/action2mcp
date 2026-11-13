@@ -6,12 +6,12 @@
 
 最新版本：[Releases 页面](https://github.com/Juddy724/action2mcp/releases/latest)
 
-| 平台 | 安装包 (v0.5.11) |
+| 平台 | 安装包 (v0.5.12) |
 |---|---|
-| macOS (Apple 芯片) | [Action2MCP-0.5.11-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.11/Action2MCP-0.5.11-macOS-AppleSilicon.zip) |
-| macOS (Intel) | [Action2MCP-0.5.11-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.11/Action2MCP-0.5.11-macOS-Intel.zip) |
-| Windows x64 | [Action2MCP-0.5.11-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.11/Action2MCP-0.5.11-Windows-x64.zip) |
-| Linux x64 | [Action2MCP-0.5.11-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.11/Action2MCP-0.5.11-Linux-x64.zip) |
+| macOS (Apple 芯片) | [Action2MCP-0.5.12-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.12/Action2MCP-0.5.12-macOS-AppleSilicon.zip) |
+| macOS (Intel) | [Action2MCP-0.5.12-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.12/Action2MCP-0.5.12-macOS-Intel.zip) |
+| Windows x64 | [Action2MCP-0.5.12-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.12/Action2MCP-0.5.12-Windows-x64.zip) |
+| Linux x64 | [Action2MCP-0.5.12-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.12/Action2MCP-0.5.12-Linux-x64.zip) |
 
 解压后运行 `start.command`（macOS）、`start.bat`（Windows）或 `start.sh`（Linux），然后打开 http://localhost:7788 。详细说明见安装包里的 README.md。
 
@@ -64,6 +64,12 @@
 
 工具或 SQL 控制台中间件里的 `{{header.cookie}}`（大小写不敏感）会从登录中心该网站的 Cookie 罐组装 Cookie 请求头，而不是去查已收获的自定义请求头。登录只要其他必要请求头（例如 `sso-epctoken`）已经收获即可完成；不会因为缺少名叫 cookie 的收获项而一直视为未登录。测试连接和真实调用在罐里没有该网站的 Cookie 时，会提示缺少 Cookie，而不会说「站点缺少请求头 cookie」。Cookie 值会作为密钥脱敏，不会出现在工具说明、审批预览、审计或报错里。从 0.5.4 的护栏 `WS` 工具迁过来的 Cookie 绑定会被规范化为 `{{header.cookie}}`。
 
+
+### HTML 清洗、业务失败检测与写操作标注（0.5.12）
+
+- 工具结果按内容类型处理：JSON 原样返回；HTML 默认去掉脚本、样式和可识别的导航，转成保留结构的紧凑 Markdown。可在工具编辑页选择「返回格式」：自动清洗（默认）、原始 HTML、或只取某个 CSS 选择器区域。清洗在 60KB 截断之前进行，清洗后几乎为空（例如页面全靠脚本渲染）会退回原始 HTML 并附说明。密钥脱敏在最终交给 AI 的文本上进行。
+- 默认会把业务失败标成工具错误（`isError`）：例如页面里只有一条 `alert` 错误提示，或 JSON 顶层明确的 `success: false` / 失败码。可在工具编辑页关闭。缺少多个必填参数时一次报齐。
+- MCP 工具带上只读/写操作标注。写操作工具的说明以「【写操作，仅在用户明确要求时调用】」开头。很多站点用 POST 做查询，可在「操作类型」里改成只读。这些选项只在控制台修改，AI 不能改。
 
 ### 结果脱敏不再把整页打成 ******（0.5.11）
 

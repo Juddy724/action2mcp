@@ -569,6 +569,7 @@ func (t *Tool) bindValues(args map[string]any, resolve func(string) (string, err
 		}
 		vals[r] = v
 	}
+	var missing []string
 	for _, p := range t.Params {
 		v, ok := args[p.Name]
 		if !ok || v == nil || (p.Default == "@today" && v == "") {
@@ -577,12 +578,16 @@ func (t *Tool) bindValues(args map[string]any, resolve func(string) (string, err
 			} else if p.Default != "" && !p.Required {
 				v = p.Default
 			} else if p.Required {
-				return nil, fmt.Errorf("缺少参数: %s", p.Name)
+				missing = append(missing, p.Name)
+				continue
 			} else {
 				v = ""
 			}
 		}
 		vals[p.Name] = coerce(p, v)
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("缺少参数: %s", strings.Join(missing, "、"))
 	}
 	return vals, nil
 }
@@ -851,6 +856,7 @@ func (a *App) Send(p *PreparedCall) (*CallResult, error) {
 	if err != nil {
 		return nil, errors.New(a.scrubApprovalText(err.Error(), secrets))
 	}
+	presentToolResult(p, res)
 	res.Body = a.scrubApprovalText(res.Body, secrets)
 	res.ReqBody = a.scrubApprovalText(res.ReqBody, secrets)
 	res.URL = a.scrubApprovalText(res.URL, secrets)
@@ -1008,6 +1014,6 @@ func (a *App) doCall(t *Tool, method, u string, headers map[string]string, body 
 		}
 		res.Headers[k] = resp.Header.Get(k)
 	}
-	res.Body = truncate(string(data), maxResult)
+	res.Body = string(data)
 	return res, nil
 }
