@@ -1,6 +1,12 @@
 package app
 
 import (
+	"action2mcp/internal/execution"
+	"action2mcp/internal/store"
+
+	"action2mcp/internal/recording"
+	sitecfg "action2mcp/internal/site"
+	"action2mcp/internal/vault"
 	"encoding/base64"
 	"net/url"
 	"os"
@@ -9,13 +15,13 @@ import (
 	"testing"
 )
 
-func testVault(t *testing.T) (*Store, *Vault, string) {
+func testVault(t *testing.T) (*store.Store, *vault.Vault, string) {
 	dir := t.TempDir()
-	st, err := OpenStore(filepath.Join(dir, "a2m.db"))
+	st, err := store.OpenStore(filepath.Join(dir, "a2m.DB()"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	v, err := OpenVault(st.db, filepath.Join(dir, "secret.key"))
+	v, err := vault.OpenVault(st.DB(), filepath.Join(dir, "secret.key"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +41,7 @@ func TestVaultEncryptScrub(t *testing.T) {
 	}
 	// encrypted at rest
 	var enc string
-	st.db.QueryRow(`SELECT value_enc FROM vault WHERE name='b_password'`).Scan(&enc)
+	st.DB().QueryRow(`SELECT value_enc FROM vault WHERE name='b_password'`).Scan(&enc)
 	if strings.Contains(enc, "S3cr3t") || !strings.HasPrefix(enc, "v1:") {
 		t.Fatalf("not encrypted: %s", enc)
 	}
@@ -63,7 +69,7 @@ func TestVaultEncryptScrub(t *testing.T) {
 		t.Fatal(err)
 	}
 	// reopen with same key
-	v2, err := OpenVault(st.db, filepath.Join(dir, "secret.key"))
+	v2, err := vault.OpenVault(st.DB(), filepath.Join(dir, "secret.key"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +82,7 @@ func TestVaultEncryptScrub(t *testing.T) {
 }
 
 func TestNotLoggedIn(t *testing.T) {
-	s := &Site{Origin: "https://zentao.example.com", Method: MethodSSO}
+	s := &sitecfg.Site{Origin: "https://zentao.example.com", Method: sitecfg.MethodSSO}
 	cases := []struct {
 		st   int
 		body string
@@ -104,40 +110,9 @@ func TestNotLoggedIn(t *testing.T) {
 	}
 }
 
-func TestExtractCSRF(t *testing.T) {
-	cases := map[string]string{
-		`<input type="hidden" name="csrf_token" value="abc123">`: "abc123",
-		`<input value='zz9' type=hidden name='csrf_token'>`:      "zz9",
-		`<meta name="csrf-token" content="m3ta">`:                "m3ta",
-		`<script>window.csrf_token = "js7788aa";</script>`:       "js7788aa",
-	}
-	for html, want := range cases {
-		if _, got := extractCSRF(html, ""); got != want {
-			t.Errorf("%s: got %q want %q", html, got, want)
-		}
-	}
-}
-
-func TestMaskAndParseLogin(t *testing.T) {
-	q := &ReqRecord{Method: "POST", URL: "http://b.local/login", ReqBody: "account=alice&password=p%40ss&csrf_token=t1"}
-	lf := parseLogin(q)
-	if lf == nil || lf.userVal != "alice" || lf.passVal != "p@ss" || lf.csrfKey != "csrf_token" {
-		t.Fatalf("%+v", lf)
-	}
-	if m := MaskSecrets(q.ReqBody); strings.Contains(m, "p%40ss") || !strings.Contains(m, "account=alice") {
-		t.Fatal(m)
-	}
-	if m := MaskSecrets(`{"userName":"a","passWord":"xyz"}`); strings.Contains(m, "xyz") {
-		t.Fatal(m)
-	}
-	if isLoginRequest(&ReqRecord{Method: "POST", ReqBody: `{"q":"x"}`}) {
-		t.Fatal("not login")
-	}
-}
-
 func TestBuildDraftRefs(t *testing.T) {
-	q := &ReqRecord{Method: "POST", URL: "http://b.local/api/do?x=1", ReqHeaders: map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, ReqBody: "keyword=abc&pwd=hunter2"}
-	cs := SuggestParams(q)
+	q := &recording.Request{Method: "POST", URL: "http://b.local/api/do?x=1", ReqHeaders: map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, ReqBody: "keyword=abc&pwd=hunter2"}
+	cs := execution.SuggestParams(q)
 	var chosen []Candidate
 	for _, c := range cs {
 		if c.Path == "pwd" {
@@ -145,7 +120,7 @@ func TestBuildDraftRefs(t *testing.T) {
 		}
 		chosen = append(chosen, c)
 	}
-	tl, err := BuildDraft(q, chosen)
+	tl, err := execution.BuildDraft(q, chosen)
 	if err != nil {
 		t.Fatal(err)
 	}

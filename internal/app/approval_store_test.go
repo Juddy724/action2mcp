@@ -1,11 +1,14 @@
 package app
 
 import (
-	"context"
+	"action2mcp/internal/approval"
+	"action2mcp/internal/domain"
+	"action2mcp/internal/execution"
+	"action2mcp/internal/recording"
+	"action2mcp/internal/store"
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -14,7 +17,7 @@ import (
 )
 
 func TestApprovalMigrationAndDefaults(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "v5.db")
+	path := filepath.Join(t.TempDir(), "v5.DB()")
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
@@ -27,11 +30,11 @@ PRAGMA user_version=5;`)
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
-		s, err := OpenStore(path)
+		s, err := store.OpenStore(path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !s.hasColumn("tools", "approval") || !s.hasColumn("tools", "rev") || !s.hasColumn("tools", "config") {
+		if !tableHasColumn(s, "tools", "approval") || !tableHasColumn(s, "tools", "rev") || !tableHasColumn(s, "tools", "config") {
 			t.Fatal("schema columns missing")
 		}
 		old, err := s.GetToolByName("legacy")
@@ -39,16 +42,16 @@ PRAGMA user_version=5;`)
 			t.Fatal("migration changed old tool policy or revision")
 		}
 		var version int
-		if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != schemaUserVersion {
+		if err := s.DB().QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != wantSchemaUserVersion {
 			t.Fatal("wrong schema version")
 		}
-		s.db.Close()
+		s.DB().Close()
 	}
-	s, err := OpenStore(path)
+	s, err := store.OpenStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.db.Close()
+	defer s.DB().Close()
 	for _, method := range []string{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "WS"} {
 		tool := &Tool{Name: "tool_" + method, Method: method, URL: "https://example.com/api"}
 		if err := s.SaveTool(tool); err != nil {
@@ -91,11 +94,11 @@ func TestApprovalPolicyConsoleMCPAndImport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	q := &ReqRecord{RecordingID: recID, Seq: 1, Method: "GET", URL: "https://example.com/api?value=one", ResourceType: "Fetch", Status: 200}
+	q := &recording.Request{RecordingID: recID, Seq: 1, Method: "GET", URL: "https://example.com/api?value=one", ResourceType: "Fetch", Status: 200}
 	if err := a.store.InsertRequest(q); err != nil {
 		t.Fatal(err)
 	}
-	pack := &Pack{Name: "策略测试包", Enabled: true}
+	pack := &store.Pack{Name: "策略测试包", Enabled: true}
 	if err := a.store.SavePack(pack); err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +107,7 @@ func TestApprovalPolicyConsoleMCPAndImport(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"from_recording", "renamed_recording"} {
-		_, bad := a.recSaveTool(nil, map[string]any{"request_id": q.ID, "pack": pack.Name, "name": name, "overwrite": true, "approval": "off"})
+		_, bad := recSaveTool(a, map[string]any{"request_id": q.ID, "pack": pack.Name, "name": name, "overwrite": true, "approval": "off"})
 		if bad {
 			t.Fatal("MCP tool save failed")
 		}
@@ -117,7 +120,7 @@ func TestApprovalPolicyConsoleMCPAndImport(t *testing.T) {
 	if err != nil || current.Rev != 2 {
 		t.Fatal("MCP overwrite did not increment revision")
 	}
-	if _, err := a.Import([]byte(`{"format":"action2mcp","tools":[{"name":"from_recording","method":"GET","url":"https://example.com/api","approval":"off"}]}`)); err != nil {
+	if _, err := a.transfer().Import([]byte(`{"format":"action2mcp","tools":[{"name":"from_recording","method":"GET","url":"https://example.com/api","approval":"off"}]}`)); err != nil {
 		t.Fatal(err)
 	}
 	current, err = a.store.GetToolByName(tool.Name)
@@ -125,32 +128,32 @@ func TestApprovalPolicyConsoleMCPAndImport(t *testing.T) {
 		t.Fatal("import lowered policy or lost revision")
 	}
 	current.Approval = ""
-	if err := a.persistTool(current); err != nil {
+	if err := a.tools().Persist(current); err != nil {
 		t.Fatal(err)
 	}
 	if current.Approval != "always" || current.Rev != 4 {
 		t.Fatal("omitted policy did not preserve existing value")
 	}
 	current.Approval = "off"
-	if err := a.persistTool(current); err != nil {
+	if err := a.tools().Persist(current); err != nil {
 		t.Fatal(err)
 	}
 	if current.Approval != "off" || current.Rev != 5 {
 		t.Fatal("console could not lower policy")
 	}
 	current.Approval = "sometimes"
-	if err := a.persistTool(current); err == nil || !strings.Contains(err.Error(), "off 或 always") {
+	if err := a.tools().Persist(current); err == nil || !strings.Contains(err.Error(), "off 或 always") {
 		t.Fatal("invalid console policy accepted")
 	}
-	if _, err := a.Import([]byte(`{"format":"action2mcp","tools":[{"name":"invalid_import","method":"GET","url":"https://example.com/api","approval":"invalid"}]}`)); err == nil {
+	if _, err := a.transfer().Import([]byte(`{"format":"action2mcp","tools":[{"name":"invalid_import","method":"GET","url":"https://example.com/api","approval":"invalid"}]}`)); err == nil {
 		t.Fatal("invalid import policy accepted")
 	}
 	for _, method := range []string{"POST", "GET"} {
 		created := &Tool{Name: "console_" + method, Method: method, URL: "https://example.com/api"}
-		if err := a.persistTool(created); err != nil {
+		if err := a.tools().Persist(created); err != nil {
 			t.Fatal(err)
 		}
-		if created.Approval != defaultApproval(method) {
+		if created.Approval != map[string]string{"POST": "always", "GET": "off"}[method] {
 			t.Fatal("console omitted policy did not use method default")
 		}
 	}
@@ -158,7 +161,7 @@ func TestApprovalPolicyConsoleMCPAndImport(t *testing.T) {
 	if err := a.store.SaveToolInPack(write, pack.ID); err != nil || write.Approval != "always" {
 		t.Fatal("MCP accepted a lower policy for a write tool")
 	}
-	if _, err := a.Import([]byte(`{"format":"action2mcp","tools":[{"name":"import_default","method":"POST","url":"https://example.com/api"},{"name":"import_explicit","method":"POST","url":"https://example.com/api","approval":"off"}]}`)); err != nil {
+	if _, err := a.transfer().Import([]byte(`{"format":"action2mcp","tools":[{"name":"import_default","method":"POST","url":"https://example.com/api"},{"name":"import_explicit","method":"POST","url":"https://example.com/api","approval":"off"}]}`)); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct{ name, policy string }{{"import_default", "always"}, {"import_explicit", "off"}} {
@@ -171,16 +174,16 @@ func TestApprovalPolicyConsoleMCPAndImport(t *testing.T) {
 
 func TestApprovalConcurrentStorePathsDoNotDeadlock(t *testing.T) {
 	a := approvalTestApp(t)
-	a.store.db.SetMaxOpenConns(1)
+	a.store.DB().SetMaxOpenConns(1)
 	recID, err := a.store.CreateRecording("并发测试", "https://example.com/")
 	if err != nil {
 		t.Fatal(err)
 	}
-	q := &ReqRecord{RecordingID: recID, Seq: 1, Method: "GET", URL: "https://example.com/api?value=one", ResourceType: "Fetch", Status: 200}
+	q := &recording.Request{RecordingID: recID, Seq: 1, Method: "GET", URL: "https://example.com/api?value=one", ResourceType: "Fetch", Status: 200}
 	if err := a.store.InsertRequest(q); err != nil {
 		t.Fatal(err)
 	}
-	pack := &Pack{Name: "并发测试包", Enabled: true}
+	pack := &store.Pack{Name: "并发测试包", Enabled: true}
 	if err := a.store.SavePack(pack); err != nil {
 		t.Fatal(err)
 	}
@@ -204,13 +207,13 @@ func TestApprovalConcurrentStorePathsDoNotDeadlock(t *testing.T) {
 						return
 					}
 				case "rec":
-					if _, bad := a.recSaveTool(nil, map[string]any{"request_id": q.ID, "name": tool.Name, "pack": pack.Name, "overwrite": true}); bad {
+					if _, bad := recSaveTool(a, map[string]any{"request_id": q.ID, "name": tool.Name, "pack": pack.Name, "overwrite": true}); bad {
 						errors <- fmt.Errorf("concurrent rec save failed")
 						return
 					}
 				case "import":
-					file := compactJSON(map[string]any{"format": "action2mcp", "tools": []map[string]any{{"name": tool.Name, "method": "GET", "url": q.URL, "approval": "off"}}})
-					if _, err := a.Import(file); err != nil {
+					file := execution.CompactJSON(map[string]any{"format": "action2mcp", "tools": []map[string]any{{"name": tool.Name, "method": "GET", "url": q.URL, "approval": "off"}}})
+					if _, err := a.transfer().Import(file); err != nil {
 						errors <- err
 						return
 					}
@@ -240,7 +243,7 @@ func TestApprovalConcurrentStorePathsDoNotDeadlock(t *testing.T) {
 func TestApprovalExportImportAndCandidateSecrets(t *testing.T) {
 	a := approvalTestApp(t)
 	for _, kind := range []string{"query", "form", "body"} {
-		q := &ReqRecord{Method: "POST", URL: "https://example.com/api", ReqHeaders: map[string]string{}}
+		q := &recording.Request{Method: "POST", URL: "https://example.com/api", ReqHeaders: map[string]string{}}
 		chosen := Candidate{Loc: kind, Name: "label", Path: "password", Type: "string", Example: privateTestValue(t), Secret: true}
 		switch kind {
 		case "query":
@@ -252,21 +255,27 @@ func TestApprovalExportImportAndCandidateSecrets(t *testing.T) {
 			q.ReqBody = `{"password":"removed"}`
 			q.ReqHeaders["Content-Type"] = "application/json"
 		}
-		tool, err := BuildDraft(q, []Candidate{chosen})
+		tool, err := execution.BuildDraft(q, []Candidate{chosen})
 		if err != nil || len(tool.Params) != 1 || !tool.Params[0].Secret || tool.Params[0].Default != "" {
 			t.Fatal("draft lost candidate secret flag")
 		}
 		tool.Name = "candidate_" + kind
 		tool.Approval = "always"
-		if err := a.persistTool(tool); err != nil {
+		if err := a.tools().Persist(tool); err != nil {
 			t.Fatal(err)
 		}
 	}
-	data, err := a.Export()
+	data, err := a.transfer().Export()
 	if err != nil {
 		t.Fatal(err)
 	}
-	var file exportFile
+	// Published action2mcp export format (owned by internal/transfer).
+	var file struct {
+		Tools []struct {
+			Approval string         `json:"approval"`
+			Params   []domain.Param `json:"params"`
+		} `json:"tools"`
+	}
 	if err := json.Unmarshal(data, &file); err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +288,7 @@ func TestApprovalExportImportAndCandidateSecrets(t *testing.T) {
 		}
 	}
 	other := approvalTestApp(t)
-	if _, err := other.Import(data); err != nil {
+	if _, err := other.transfer().Import(data); err != nil {
 		t.Fatal(err)
 	}
 	tools, err := other.store.ListTools()
@@ -295,8 +304,8 @@ func TestApprovalExportImportAndCandidateSecrets(t *testing.T) {
 
 func TestApprovalStartupCleanupOnlyOnServe(t *testing.T) {
 	a := approvalTestApp(t)
-	r := ApprovalRecord{TS: now(), Tool: "snapshot", Title: "历史标题", ArgsDisplay: map[string]string{}, Params: []Param{}, Preview: RequestPreview{Method: "GET", URL: "https://example.com/", Headers: map[string]string{}}}
-	if err := a.store.insertApproval(&r); err != nil {
+	r := approval.Record{TS: now(), Tool: "snapshot", Title: "历史标题", ArgsDisplay: map[string]string{}, Params: []domain.Param{}, Preview: domain.RequestPreview{Method: "GET", URL: "https://example.com/", Headers: map[string]string{}}}
+	if err := a.store.Approvals.Insert(&r); err != nil {
 		t.Fatal(err)
 	}
 	other, err := NewApp(a.dataDir)
@@ -304,76 +313,21 @@ func TestApprovalStartupCleanupOnlyOnServe(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer other.Shutdown()
-	if _, err := other.Export(); err != nil {
+	if _, err := other.transfer().Export(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := other.Import([]byte(`{"format":"action2mcp"}`)); err != nil {
+	if _, err := other.transfer().Import([]byte(`{"format":"action2mcp"}`)); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := a.store.listApprovals("pending", 100)
+	rows, err := a.store.Approvals.List("pending", 100)
 	if err != nil || len(rows) != 1 || rows[0].ID != r.ID {
 		t.Fatal("NewApp/export/import cancelled an in-progress approval")
 	}
-	if err := other.store.CancelPendingApprovals(); err != nil {
+	if err := other.store.Approvals.CancelPending(); err != nil {
 		t.Fatal(err)
 	}
-	rows, err = a.ListApprovals("all", 100)
+	rows, err = a.approvals().List("all", 100)
 	if err != nil || len(rows) != 1 || rows[0].Status != "cancelled" {
 		t.Fatal("serve cleanup did not cancel leftovers")
-	}
-}
-
-func TestApprovalRetentionAndOrphanPendingCleanup(t *testing.T) {
-	a := approvalTestApp(t)
-	r := ApprovalRecord{TS: now(), Tool: "pending_snapshot", ArgsDisplay: map[string]string{}, Params: []Param{}, Preview: RequestPreview{Headers: map[string]string{}}}
-	if err := a.store.insertApproval(&r); err != nil {
-		t.Fatal(err)
-	}
-	_, err := a.store.db.Exec(`WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<1005)
-INSERT INTO approvals(ts,tool,tool_id,tool_rev,client,args_display,final_args_display,status,feedback,decided_at,result,title,preview_display,params_json)
-SELECT '', 'finished', 0, 1, '', '{}', '{}', 'rejected', '', '', '', '历史快照', '{}', '[]' FROM seq`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	last := r
-	if err := a.store.insertApproval(&last); err != nil {
-		t.Fatal(err)
-	}
-	last.Status = "cancelled"
-	last.DecidedAt = now()
-	if err := a.store.finishApproval(&last); err != nil {
-		t.Fatal(err)
-	}
-	var pending, finished int
-	if err := a.store.db.QueryRow(`SELECT COUNT(*) FROM approvals WHERE status='pending'`).Scan(&pending); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.store.db.QueryRow(`SELECT COUNT(*) FROM approvals WHERE status<>'pending'`).Scan(&finished); err != nil {
-		t.Fatal(err)
-	}
-	if pending != 1 || finished != 1000 {
-		t.Fatal("retention deleted pending or retained too much history")
-	}
-	for i := 1; i < 20; i++ {
-		copy := r
-		if err := a.store.insertApproval(&copy); err != nil {
-			t.Fatal(err)
-		}
-	}
-	upstream := newApprovalTarget(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("orphan cleanup executed request") }))
-	saveApprovalTool(t, a, upstream, "always")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	call := startApprovalCall(a, ctx, map[string]any{"value": "one"})
-	rows := pendingApprovals(t, a, 1)
-	if rows[0].Nonce == "" {
-		t.Fatal("new call did not get a decidable pending approval")
-	}
-	if err := a.store.db.QueryRow(`SELECT COUNT(*) FROM approvals WHERE status='pending'`).Scan(&pending); err != nil || pending != 1 {
-		t.Fatal("database-only pending rows were not repaired")
-	}
-	cancel()
-	if !getApprovalReply(t, call).isError {
-		t.Fatal("cancelled call executed")
 	}
 }

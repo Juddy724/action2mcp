@@ -1,6 +1,10 @@
 package app
 
 import (
+	"action2mcp/internal/approval"
+	"action2mcp/internal/domain"
+	"action2mcp/internal/execution"
+	"action2mcp/internal/vault"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -23,10 +27,10 @@ type approvalRedactionFixture struct {
 	secretLabel    bool
 	failureText    string
 	responseText   string
-	checkExecution func(RequestPreview, map[string]any) bool
+	checkExecution func(domain.RequestPreview, map[string]any) bool
 	checkPrepared  func(*testing.T, *PreparedCall)
 	checkResult    func(*testing.T, string)
-	checkPreview   func(*testing.T, RequestPreview)
+	checkPreview   func(*testing.T, domain.RequestPreview)
 	checkArgs      func(*testing.T, map[string]string)
 }
 
@@ -39,7 +43,7 @@ func exerciseApprovalRedaction(t *testing.T, f approvalRedactionFixture) {
 	const origin = "http://127.0.0.1:19000"
 	var received atomic.Bool
 	var hits atomic.Int32
-	var want RequestPreview
+	var want domain.RequestPreview
 	checkWire := func(r *http.Request) {
 		var body []byte
 		var err error
@@ -63,7 +67,7 @@ func exerciseApprovalRedaction(t *testing.T, f approvalRedactionFixture) {
 		}
 	}))
 	tool, _ := saveApprovalTool(t, a, upstream, "always")
-	tool.Params = []Param{{Name: "label", Type: "string", Required: true}}
+	tool.Params = []domain.Param{{Name: "label", Type: "string", Required: true}}
 	f.configure(tool)
 	if f.failureText != "" {
 		a.httpClient = &http.Client{Transport: approvalRoundTripper(func(r *http.Request) (*http.Response, error) {
@@ -72,7 +76,7 @@ func exerciseApprovalRedaction(t *testing.T, f approvalRedactionFixture) {
 		})}
 	}
 	for _, p := range tool.Params {
-		if p.Name == "label" && paramIsSecret(tool, p) != f.secretLabel {
+		if p.Name == "label" && execution.ParamIsSecret(tool, p) != f.secretLabel {
 			t.Fatal("template sensitivity classification is incorrect")
 		}
 	}
@@ -82,15 +86,15 @@ func exerciseApprovalRedaction(t *testing.T, f approvalRedactionFixture) {
 	assertSafe := func(value any) {
 		t.Helper()
 		requirePrivateApprovalValuesAbsent(t, value, f.private...)
-		text := string(compactJSON(value))
+		text := string(execution.CompactJSON(value))
 		for _, private := range f.private {
-			escaped := string(compactJSON(private))
+			escaped := string(execution.CompactJSON(private))
 			if strings.Contains(text, escaped[1:len(escaped)-1]) {
 				t.Fatal("approval output leaked an encoded private value")
 			}
 		}
 	}
-	assertPreview := func(preview RequestPreview) {
+	assertPreview := func(preview domain.RequestPreview) {
 		t.Helper()
 		assertSafe(preview)
 		if f.checkPreview != nil {
@@ -99,11 +103,11 @@ func exerciseApprovalRedaction(t *testing.T, f approvalRedactionFixture) {
 	}
 	prepare := func(args map[string]any) *PreparedCall {
 		t.Helper()
-		p, err := a.Prepare(tool, args)
+		p, err := a.executor().Prepare(tool, args)
 		if err != nil {
 			t.Fatal("cannot prepare redaction fixture")
 		}
-		if !f.checkExecution(p.request, args) {
+		if !f.checkExecution(renderForTest(t, tool, args), args) {
 			t.Fatal("redaction changed a raw execution value")
 		}
 		if f.checkPrepared != nil {
@@ -118,12 +122,13 @@ func exerciseApprovalRedaction(t *testing.T, f approvalRedactionFixture) {
 	if f.edits != nil {
 		finalArgs, action = f.edits, "edit"
 	}
-	want = prepare(finalArgs).request
+	prepare(finalArgs)
+	want = renderForTest(t, tool, finalArgs)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	call := startApprovalCall(a, ctx, f.args)
 	pending := pendingApprovals(t, a, 1)[0]
-	assertRecord := func(record ApprovalRecord) {
+	assertRecord := func(record approval.Record) {
 		t.Helper()
 		// Public arguments are already known to the caller and remain verbatim.
 		safeRecord := record
@@ -131,18 +136,18 @@ func exerciseApprovalRedaction(t *testing.T, f approvalRedactionFixture) {
 		assertSafe(safeRecord)
 		assertPreview(record.Preview)
 		for _, p := range record.Params {
-			if p.Name == "label" && (p.Secret != f.secretLabel || f.secretLabel && record.ArgsDisplay["label"] != secretMask) {
+			if p.Name == "label" && (p.Secret != f.secretLabel || f.secretLabel && record.ArgsDisplay["label"] != vault.Mask) {
 				t.Fatal("approval card has incorrect argument sensitivity")
 			}
 		}
-		if record.Status != "pending" && f.secretLabel && record.FinalArgsDisplay["label"] != secretMask {
+		if record.Status != "pending" && f.secretLabel && record.FinalArgsDisplay["label"] != vault.Mask {
 			t.Fatal("approval history did not mask the final secret argument")
 		}
 		if label, present := f.args["label"]; present && !f.secretLabel {
-			if record.ArgsDisplay["label"] != argString(label) {
+			if record.ArgsDisplay["label"] != domain.ArgumentText(label) {
 				t.Fatal("approval card changed a public argument")
 			}
-			if record.Status != "pending" && record.FinalArgsDisplay["label"] != argString(finalArgs["label"]) {
+			if record.Status != "pending" && record.FinalArgsDisplay["label"] != domain.ArgumentText(finalArgs["label"]) {
 				t.Fatal("approval history changed a public argument")
 			}
 		}
@@ -156,12 +161,12 @@ func exerciseApprovalRedaction(t *testing.T, f approvalRedactionFixture) {
 	assertStored := func() {
 		t.Helper()
 		var stored string
-		if a.store.db.QueryRow(`SELECT preview_display || params_json || result FROM approvals WHERE id=?`, pending.ID).Scan(&stored) != nil {
+		if a.store.DB().QueryRow(`SELECT preview_display || params_json || result FROM approvals WHERE id=?`, pending.ID).Scan(&stored) != nil {
 			t.Fatal("cannot read stored approval displays")
 		}
 		assertSafe(stored)
 		var argsJSON, finalJSON string
-		if a.store.db.QueryRow(`SELECT args_display,final_args_display FROM approvals WHERE id=?`, pending.ID).Scan(&argsJSON, &finalJSON) != nil {
+		if a.store.DB().QueryRow(`SELECT args_display,final_args_display FROM approvals WHERE id=?`, pending.ID).Scan(&argsJSON, &finalJSON) != nil {
 			t.Fatal("cannot read stored argument displays")
 		}
 		for i, text := range []string{argsJSON, finalJSON} {
@@ -177,9 +182,9 @@ func exerciseApprovalRedaction(t *testing.T, f approvalRedactionFixture) {
 				want = finalArgs
 			}
 			for key, value := range want {
-				expected := argString(value)
+				expected := domain.ArgumentText(value)
 				if key == "label" && f.secretLabel {
-					expected = secretMask
+					expected = vault.Mask
 				}
 				if displayed[key] != expected {
 					t.Fatal("persisted arguments lost a whole-secret mask or changed public text")
@@ -198,14 +203,14 @@ func exerciseApprovalRedaction(t *testing.T, f approvalRedactionFixture) {
 		t.Fatal("pending API did not return the fixture")
 	}
 	assertRecord(rows[0])
-	preview, err := a.PreviewApproval(pending.ID, pending.Nonce, f.edits)
+	preview, err := a.approvals().Preview(pending.ID, pending.Nonce, f.edits)
 	if err != nil {
 		t.Fatal("cannot preview the redaction fixture")
 	}
 	assertPreview(preview.Preview)
 	w := approvalAPIRequest(t, handler, http.MethodPost, fmt.Sprintf("/api/approvals/%d/preview", pending.ID), origin, "application/json", map[string]any{"nonce": pending.Nonce, "args": f.edits})
 	assertSafe(w.Body.String())
-	var apiPreview ApprovalPreview
+	var apiPreview approval.Preview
 	requireApprovalAPIResponse(t, w, http.StatusOK, &apiPreview)
 	assertPreview(apiPreview.Preview)
 	if hits.Load() != 0 {
@@ -260,9 +265,9 @@ func TestApprovalFormValueBoundaries(t *testing.T) {
 					tool.Body = body
 				},
 				private:        []string{left, right},
-				checkExecution: func(p RequestPreview, _ map[string]any) bool { return p.Body == body },
-				checkPreview: func(t *testing.T, p RequestPreview) {
-					if p.Body != "password="+secretMask+"&note=visible" {
+				checkExecution: func(p domain.RequestPreview, _ map[string]any) bool { return p.Body == body },
+				checkPreview: func(t *testing.T, p domain.RequestPreview) {
+					if p.Body != "password="+vault.Mask+"&note=visible" {
 						t.Fatal("form redaction lost the real delimiter or public sibling")
 					}
 				},
@@ -292,11 +297,11 @@ func TestApprovalHeaderContainers(t *testing.T) {
 				configure: func(tool *Tool) { tool.Body = ""; tool.Headers[key] = value },
 				args:      map[string]any{"label": original}, edits: map[string]any{"label": replacement},
 				private: []string{original, replacement}, secretLabel: true,
-				checkExecution: func(p RequestPreview, args map[string]any) bool {
+				checkExecution: func(p domain.RequestPreview, args map[string]any) bool {
 					return p.Headers[key] == strings.ReplaceAll(value, "{{label}}", args["label"].(string))
 				},
-				checkPreview: func(t *testing.T, p RequestPreview) {
-					if !strings.Contains(p.Headers[key], secretMask) {
+				checkPreview: func(t *testing.T, p domain.RequestPreview) {
+					if !strings.Contains(p.Headers[key], vault.Mask) {
 						t.Fatal("header preview did not mask its confidential content")
 					}
 				},
@@ -327,11 +332,11 @@ func TestApprovalPublicArgumentTextIsVerbatim(t *testing.T) {
 			exerciseApprovalRedaction(t, approvalRedactionFixture{
 				configure: func(tool *Tool) { tool.Body = `{"data":"{{label}}"}` },
 				args:      map[string]any{"label": value("old")}, edits: map[string]any{"label": value("new")},
-				checkExecution: func(p RequestPreview, args map[string]any) bool {
+				checkExecution: func(p domain.RequestPreview, args map[string]any) bool {
 					var body map[string]string
 					return json.Unmarshal([]byte(p.Body), &body) == nil && body["data"] == args["label"]
 				},
-				checkPreview: func(t *testing.T, p RequestPreview) {
+				checkPreview: func(t *testing.T, p domain.RequestPreview) {
 					var body map[string]string
 					if json.Unmarshal([]byte(p.Body), &body) != nil || body["data"] != value("old") && body["data"] != value("new") {
 						t.Fatal("public argument preview changed its rendered text")
@@ -368,7 +373,7 @@ func TestApprovalAmbiguousContainersFailClosed(t *testing.T) {
 				},
 				args: map[string]any{"label": original}, edits: map[string]any{"label": replacement},
 				private: []string{original, replacement}, secretLabel: true,
-				checkExecution: func(p RequestPreview, args map[string]any) bool {
+				checkExecution: func(p domain.RequestPreview, args map[string]any) bool {
 					return strings.Contains(p.URL+p.Body+p.Headers["Referer"], args["label"].(string))
 				},
 			})
@@ -388,7 +393,7 @@ func TestApprovalDuplicateEscapedKeys(t *testing.T) {
 				configure: func(tool *Tool) { tool.Body = tc.body },
 				args:      map[string]any{"label": original}, edits: map[string]any{"label": replacement},
 				private: []string{original, replacement}, secretLabel: true,
-				checkExecution: func(p RequestPreview, args map[string]any) bool {
+				checkExecution: func(p domain.RequestPreview, args map[string]any) bool {
 					if tc.name != "embedded" {
 						return p.Body == strings.ReplaceAll(tc.body, "{{label}}", args["label"].(string))
 					}
@@ -421,7 +426,7 @@ func TestApprovalEncodingAwareDisplaysAndErrors(t *testing.T) {
 		configure: func(tool *Tool) { tool.Body = `{"token":"` + private + `","data":"{{label}}"}` },
 		args:      map[string]any{"label": original}, edits: map[string]any{"label": replacement},
 		private: variants, failureText: original,
-		checkExecution: func(p RequestPreview, args map[string]any) bool {
+		checkExecution: func(p domain.RequestPreview, args map[string]any) bool {
 			var body map[string]string
 			return json.Unmarshal([]byte(p.Body), &body) == nil && body["token"] == private && body["data"] == args["label"]
 		},
@@ -448,14 +453,14 @@ func TestApprovalEncodedLiteralScrub(t *testing.T) {
 			)
 			for _, value := range []string{private, url.QueryEscape(private), html.EscapeString(private)} {
 				for i := 0; i < 9; i++ {
-					encoded := string(compactJSON(value))
+					encoded := string(execution.CompactJSON(value))
 					value = encoded[1 : len(encoded)-1]
 					variants = append(variants, value)
 				}
 			}
 			for i, variant := range variants {
-				got := a.scrubApprovalText("before "+variant+" after", values)
-				if got != "before "+secretMask+" after" {
+				got := a.executor().ScrubApprovalText("before "+variant+" after", values)
+				if got != "before "+vault.Mask+" after" {
 					t.Fatalf("encoded literal was not scrubbed at variant %d", i)
 				}
 			}
@@ -489,69 +494,20 @@ func TestApprovalStaticTemplateLiterals(t *testing.T) {
 						if kind == "sensitive_nested" {
 							key = "credentials"
 						}
-						tool.Body = string(compactJSON(map[string]string{key: `RUN {"password":"` + private + `"}`}))
+						tool.Body = string(execution.CompactJSON(map[string]string{key: `RUN {"password":"` + private + `"}`}))
 					case "embedded_form":
-						tool.Body = string(compactJSON(map[string]string{"data": "password=" + private + "&note=visible"}))
+						tool.Body = string(execution.CompactJSON(map[string]string{"data": "password=" + private + "&note=visible"}))
 					case "form":
 						tool.Headers["Content-Type"] = "application/x-www-form-urlencoded"
 						tool.Body = "password=" + private + "&note=visible"
 					}
 				},
 				private: []string{private}, failureText: "request failed: " + private,
-				checkExecution: func(p RequestPreview, _ map[string]any) bool {
+				checkExecution: func(p domain.RequestPreview, _ map[string]any) bool {
 					return strings.Contains(p.URL+p.Body+p.Headers["Authorization"]+p.Headers["X-Meta"]+p.Headers["Referer"], private)
 				},
 			})
 		})
-	}
-}
-
-func TestApprovalTemplateContainerAnalysis(t *testing.T) {
-	cases := []struct {
-		name string
-		tool Tool
-		want bool
-	}{
-		{"unicode_key", Tool{Body: `{"pass\u0077ord":"{{label}}"}`}, true},
-		{"duplicate_nested", Tool{Body: `{"data":"{\"password\":\"{{label}}\",\"pass\\u0077ord\":\"public\"}"}`}, true},
-		{"embedded_form", Tool{Body: `{"data":"password={{label}}&note=visible"}`}, true},
-		{"sensitive_embedded_json", Tool{Body: `{"credentials":"{\"plain\":\"{{label}}\"}"}`}, true},
-		{"sensitive_embedded_url", Tool{Body: `{"credentials":"https://example.com/?plain={{label}}"}`}, true},
-		{"public_query_semicolon", Tool{URL: "https://example.com/?other=public;bad&label={{label}}"}, true},
-		{"public_query_escape", Tool{URL: "https://example.com/?other=%ZZ&label={{label}}"}, true},
-		{"fragment_escape", Tool{URL: "https://example.com/#label={{label}}%ZZ"}, true},
-		{"path_escape", Tool{URL: "https://example.com/%ZZ/{{label}}"}, true},
-		{"body_parse_failure", Tool{Body: `{"data":"{{label}}"} trailing`}, true},
-		{"embedded_parse_failure", Tool{Body: `{"data":"RUN {\"plain\":\"{{label}}\"} trailing"}`}, true},
-		{"quoted_non_key", Tool{Body: `{"note":"password={{label}}"}`}, false},
-		{"unquoted_non_key", Tool{Body: `note=password={{label}}`}, false},
-		{"excluded_key", Tool{Body: `{"passwordStrength":"{{label}}"}`}, false},
-		{"public_embedded_sibling", Tool{Body: `{"data":"RUN {\"broken\":} trailing","label":"{{label}}"}`}, false},
-		{"deep_secret", Tool{Body: strings.Repeat("[", 100) + `{"password":"{{label}}"}` + strings.Repeat("]", 100)}, true},
-		{"deep_public", Tool{Body: strings.Repeat("[", 100) + `{"label":"{{label}}"}` + strings.Repeat("]", 100)}, true},
-		{"shallow_public", Tool{Body: strings.Repeat("[", 10) + `{"label":"{{label}}"}` + strings.Repeat("]", 10)}, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if paramIsSecret(&tc.tool, Param{Name: "label"}) != tc.want {
-				t.Fatal("template container analysis violated its confidentiality boundary")
-			}
-		})
-	}
-}
-
-func TestApprovalHeaderPreviewStructuralWalk(t *testing.T) {
-	private := privateTestValue(t)
-	preview := redactPreview(RequestPreview{Headers: map[string]string{
-		"X-Meta":  `{"password":"` + private + `"}`,
-		"Referer": "https://example.com/?token=" + private,
-		"X-Form":  "password=" + private + "&note=visible",
-	}})
-	requirePrivateApprovalValuesAbsent(t, preview, private)
-	for _, value := range preview.Headers {
-		if !strings.Contains(value, secretMask) {
-			t.Fatal("header preview did not structurally mask a sensitive field")
-		}
 	}
 }
 
@@ -571,11 +527,11 @@ func TestApprovalSendEncodedResolvedConfig(t *testing.T) {
 	}))
 	a.httpClient = upstream.Client()
 	tool := &Tool{Method: "POST", URL: upstream.URL + "/?value={{cfg.display_config}}", Body: "{{cfg.display_config}}"}
-	prepared, err := a.Prepare(tool, nil)
+	prepared, err := a.executor().Prepare(tool, nil)
 	if err != nil || !strings.Contains(prepared.Preview.Body, "{{cfg.display_config}}") {
 		t.Fatal("prepare did not preserve the deferred configuration reference")
 	}
-	res, err := a.Send(prepared)
+	res, err := a.executor().Send(prepared)
 	if err != nil || res.Error != "" || !received.Load() {
 		t.Fatal("send changed the resolved configuration value")
 	}
@@ -598,17 +554,8 @@ func TestApprovalScrubPreservesEncodingGrammars(t *testing.T) {
 		url.QueryEscape(html.EscapeString(unicode)),
 		url.QueryEscape(url.QueryEscape(unicode)),
 	} {
-		if a.scrubApprovalText("before "+variant+" after", []string{private}) != "before "+secretMask+" after" {
+		if a.executor().ScrubApprovalText("before "+variant+" after", []string{private}) != "before "+vault.Mask+" after" {
 			t.Fatalf("mixed encoding grammar was not scrubbed at variant %d", i)
 		}
-	}
-}
-
-func TestApprovalMalformedJSONQuotedSuffix(t *testing.T) {
-	left, right := privateTestValue(t), privateTestValue(t)
-	preview := redactPreview(RequestPreview{Body: `{"password":"` + left + `"` + right + `,"note":"visible"}`})
-	requirePrivateApprovalValuesAbsent(t, preview, left, right)
-	if !strings.Contains(preview.Body, `"note":"visible"`) || !strings.Contains(preview.Body, secretMask) {
-		t.Fatal("malformed JSON redaction lost the field boundary or public sibling")
 	}
 }

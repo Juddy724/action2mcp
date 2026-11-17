@@ -1,6 +1,9 @@
 package app
 
 import (
+	"action2mcp/internal/mcp"
+	"action2mcp/internal/mwconfig"
+	"action2mcp/internal/store"
 	"bufio"
 	"encoding/json"
 	"net/http"
@@ -30,9 +33,9 @@ func TestPackMembershipEndpoints(t *testing.T) {
 		}
 		tools = append(tools, x)
 	}
-	mw := &Middleware{Name: "库", Type: "mysql", Config: MWConfig{Host: "127.0.0.1", Port: 1, User: "u"}}
+	mw := &mwconfig.Middleware{Name: "库", Type: "mysql", Config: mwconfig.MWConfig{Host: "127.0.0.1", Port: 1, User: "u"}}
 	app.store.SaveMiddleware(mw)
-	p := &Pack{Name: "包", Enabled: true, ToolIDs: []int64{tools[0].ID}}
+	p := &store.Pack{Name: "包", Enabled: true, ToolIDs: []int64{tools[0].ID}}
 	if err := app.store.SavePack(p); err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +141,7 @@ func TestPackMembershipEndpoints(t *testing.T) {
 	}
 
 	// flat mode reflects membership too. Builtin rec_* tools are listed alongside pack tools.
-	app.store.SetSetting("mcp_mode", ModeFlat)
+	app.store.SetSetting("mcp_mode", mcp.ModeFlat)
 	if n := c.toolNames(); !has(n, "t_a") || !has(n, "t_c") || has(n, "t_b") || !has(n, "rec_list_recordings") {
 		t.Fatalf("flat %v", n)
 	}

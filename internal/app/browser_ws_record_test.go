@@ -1,13 +1,13 @@
 package app
 
 import (
+	"action2mcp/internal/cdp"
+	"action2mcp/internal/recording"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"action2mcp/internal/cdp"
 )
 
 func TestRecordWebSocket(t *testing.T) {
@@ -67,7 +67,7 @@ func TestRecordWebSocketFlushOnStop(t *testing.T) {
 	defer app.Shutdown()
 	wsSend(bs)("Network.webSocketCreated", map[string]any{"requestId": "9", "url": "wss://example.com/term"})
 	got := bs.FinishRecording()
-	if got == nil || got.count != 1 || got.useful != 0 {
+	if got == nil || got.Count != 1 || got.Useful != 0 {
 		t.Fatalf("flush count = %+v", got)
 	}
 	full := mustOneWS(t, app, id)
@@ -119,7 +119,7 @@ func TestRecordWebSocketIgnoresUnknown(t *testing.T) {
 		"requestId": "3", "response": map[string]any{"opcode": 1, "payloadData": "orphan"},
 	})
 	send("Network.webSocketCreated", map[string]any{"requestId": "3", "url": "wss://example.com/late"})
-	if got := bs.FinishRecording(); got == nil || got.count != 2 {
+	if got := bs.FinishRecording(); got == nil || got.Count != 2 {
 		t.Fatalf("count = %+v", got)
 	}
 	reqs, err := app.store.ListRequests(id)
@@ -133,7 +133,7 @@ func TestRecordWebSocketIgnoresUnknown(t *testing.T) {
 		}
 		sent := parseWSEnv(t, full.ReqBody)
 		recv := parseWSEnv(t, full.RespBody)
-		for _, f := range append(append([]wsStoredFrame{}, sent.Frames...), recv.Frames...) {
+		for _, f := range append(append([]recording.Frame{}, sent.Frames...), recv.Frames...) {
 			if f.Text == "before" || f.Text == "orphan" || strings.Contains(f.Text, "unknown") {
 				t.Fatalf("unexpected frame in %s: %#v", full.URL, f)
 			}
@@ -159,7 +159,7 @@ func TestRecordWebSocketTruncation(t *testing.T) {
 		"requestId": "1", "response": map[string]any{"opcode": 1, "payloadData": "hello-你好"},
 	})
 	send("Network.webSocketFrameSent", map[string]any{
-		"requestId": "1", "response": map[string]any{"opcode": 1, "payloadData": strings.Repeat("y", maxBody)},
+		"requestId": "1", "response": map[string]any{"opcode": 1, "payloadData": strings.Repeat("y", recording.MaxBody)},
 	})
 	send("Network.webSocketFrameSent", map[string]any{
 		"requestId": "1", "response": map[string]any{"opcode": 1, "payloadData": "after-cut"},
@@ -231,74 +231,6 @@ func TestRecordWebSocketUsefulFlip(t *testing.T) {
 	}
 }
 
-func TestRecordWebSocketPersistKeepsPending(t *testing.T) {
-	app, bs, _ := newWSRec(t, "ws-db")
-	defer app.Shutdown()
-	send := wsSend(bs)
-	send("Network.webSocketCreated", map[string]any{"requestId": "1", "url": "wss://example.com/term"})
-	send("Network.webSocketHandshakeResponseReceived", map[string]any{
-		"requestId": "1", "response": map[string]any{"status": 101},
-	})
-	if err := app.store.db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	send("Network.webSocketClosed", map[string]any{"requestId": "1"})
-	bs.mu.Lock()
-	pr := bs.rec.pending[key("s", "1")]
-	bs.mu.Unlock()
-	if pr == nil || pr.wsState != "closed" {
-		t.Fatal("failed close dropped the pending socket")
-	}
-	bs.FinishRecording()
-}
-
-func TestWSTruncationKeepsAcceptedFrame(t *testing.T) {
-	keepSent := largestWSText(t, true)
-	sent := &pendingReq{}
-	sent.addWSFrame(true, wsStoredFrame{Op: 1, TS: "00:00:00.000", Text: keepSent})
-	sent.addWSFrame(true, wsStoredFrame{Op: 1, TS: "00:00:00.000", Text: strings.Repeat("b", maxBody)})
-	fitted, cut := fitWSFrames(sent.wsSent, sent.wsSentCut, "", "")
-	if !sent.wsSentCut || !cut || len(fitted) != 1 || fitted[0].Text != keepSent {
-		t.Fatalf("sent lost an accepted frame: cut=%v n=%d", cut, len(fitted))
-	}
-
-	keepRecv := largestWSText(t, false)
-	recv := &pendingReq{wsState: "closed", wsErr: strings.Repeat("\x01", 512)}
-	recv.addWSFrame(false, wsStoredFrame{Op: 1, TS: "00:00:00.000", Text: keepRecv})
-	recv.addWSFrame(false, wsStoredFrame{Op: 1, TS: "00:00:00.000", Text: strings.Repeat("b", maxBody)})
-	fitted, cut = fitWSFrames(recv.wsRecv, recv.wsRecvCut, recv.wsState, recv.wsErr)
-	if !recv.wsRecvCut || !cut || len(fitted) != 1 || fitted[0].Text != keepRecv {
-		t.Fatalf("recv lost an accepted frame: cut=%v n=%d", cut, len(fitted))
-	}
-}
-
-func largestWSText(t *testing.T, sent bool) string {
-	t.Helper()
-	lo, hi, best := 0, maxBody, -1
-	for lo <= hi {
-		mid := (lo + hi) / 2
-		pr := &pendingReq{}
-		pr.addWSFrame(sent, wsStoredFrame{Op: 1, TS: "00:00:00.000", Text: strings.Repeat("a", mid)})
-		ok := !pr.wsSentCut && !pr.wsRecvCut && len(pr.wsSent)+len(pr.wsRecv) == 1
-		if ok {
-			best = mid
-			lo = mid + 1
-		} else {
-			hi = mid - 1
-		}
-	}
-	if best <= 0 {
-		t.Fatal("no frame fit")
-	}
-	return strings.Repeat("a", best)
-}
-
-func TestWSBinaryLen(t *testing.T) {
-	if wsBinaryLen("AA==") != 1 || wsBinaryLen("AAAA") != 3 || wsBinaryLen("AAA") != 2 || wsBinaryLen("@@@@") != 0 || wsBinaryLen("") != 0 {
-		t.Fatalf("lens = %d %d %d %d", wsBinaryLen("AA=="), wsBinaryLen("AAAA"), wsBinaryLen("AAA"), wsBinaryLen("@@@@"))
-	}
-}
-
 func TestRecordedWSNotExecutableTemplate(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join(moduleRoot(t), "web", "app.js"))
 	if err != nil {
@@ -315,7 +247,7 @@ func TestRecordedWSNotExecutableTemplate(t *testing.T) {
 	}
 }
 
-func newWSRec(t *testing.T, name string) (*App, *BrowserSession, int64) {
+func newWSRec(t *testing.T, name string) (*App, *recording.Capture, int64) {
 	t.Helper()
 	app, err := NewApp(t.TempDir())
 	if err != nil {
@@ -325,18 +257,19 @@ func newWSRec(t *testing.T, name string) (*App, *BrowserSession, int64) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bs := &BrowserSession{app: app, rec: &activeRecording{id: id, pending: map[string]*pendingReq{}}}
+	bs := recording.New(app.store, recording.Hooks{Classify: app.store.ClassifyRecorded})
+	bs.Start(id, name)
 	return app, bs, id
 }
 
-func wsSend(bs *BrowserSession) func(string, any) {
+func wsSend(bs *recording.Capture) func(string, any) {
 	return func(method string, params any) {
 		b, _ := json.Marshal(params)
-		bs.handle(cdp.Event{Method: method, SessionID: "s", Params: b})
+		bs.HandleEvent(cdp.Event{Method: method, SessionID: "s", Params: b})
 	}
 }
 
-func mustOneWS(t *testing.T, app *App, id int64) *ReqRecord {
+func mustOneWS(t *testing.T, app *App, id int64) *recording.Request {
 	t.Helper()
 	reqs, err := app.store.ListRequests(id)
 	if err != nil {
@@ -352,9 +285,9 @@ func mustOneWS(t *testing.T, app *App, id int64) *ReqRecord {
 	return full
 }
 
-func parseWSEnv(t *testing.T, body string) wsEnvelope {
+func parseWSEnv(t *testing.T, body string) recording.Envelope {
 	t.Helper()
-	var env wsEnvelope
+	var env recording.Envelope
 	if err := json.Unmarshal([]byte(body), &env); err != nil {
 		t.Fatalf("envelope: %v body=%s", err, body)
 	}

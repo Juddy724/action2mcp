@@ -1,6 +1,12 @@
 package app
 
 import (
+	"action2mcp/internal/domain"
+	"action2mcp/internal/execution"
+	"action2mcp/internal/mcp"
+	"action2mcp/internal/mwconfig"
+	"action2mcp/internal/store"
+	"action2mcp/internal/vault"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -15,6 +21,9 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+// writeOpPrefix is the published write-tool description marker (owned by internal/mcp).
+const writeOpPrefix = "【写操作，仅在用户明确要求时调用】"
 
 func presentTestApp(t *testing.T) *App {
 	t.Helper()
@@ -44,7 +53,7 @@ func presentTestApp(t *testing.T) *App {
 func presentTestAppFlat(t *testing.T) *App {
 	t.Helper()
 	a := presentTestApp(t)
-	a.store.SetSetting("mcp_mode", ModeFlat)
+	a.store.SetSetting("mcp_mode", mcp.ModeFlat)
 	return a
 }
 
@@ -61,10 +70,10 @@ func presentUpstream(t *testing.T, status int, contentType, body string) *httpte
 	return s
 }
 
-func savePresentTool(t *testing.T, a *App, name, method, rawURL string, cfg ToolConfig, params []Param) *Tool {
+func savePresentTool(t *testing.T, a *App, name, method, rawURL string, cfg ToolConfig, params []domain.Param) *Tool {
 	t.Helper()
 	if params == nil {
-		params = []Param{}
+		params = []domain.Param{}
 	}
 	tool := &Tool{
 		Name: name, Title: name, Method: method, URL: rawURL, Approval: "off",
@@ -73,7 +82,7 @@ func savePresentTool(t *testing.T, a *App, name, method, rawURL string, cfg Tool
 	if err := a.store.SaveTool(tool); err != nil {
 		t.Fatal(err)
 	}
-	pack := &Pack{Name: name + "_pack", Enabled: true, ToolIDs: []int64{tool.ID}}
+	pack := &store.Pack{Name: name + "_pack", Enabled: true, ToolIDs: []int64{tool.ID}}
 	if err := a.store.SavePack(pack); err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +92,7 @@ func savePresentTool(t *testing.T, a *App, name, method, rawURL string, cfg Tool
 func startApprovalCallNamed(a *App, name string, args map[string]any) <-chan approvalReply {
 	done := make(chan approvalReply, 1)
 	go func() {
-		v, err := a.invokeTool(context.Background(), &mcpCtx{}, name, args)
+		v, err := invokeTool(a, context.Background(), name, args)
 		done <- unpackApprovalReply(v, err)
 	}()
 	return done
@@ -94,13 +103,12 @@ func invokePresent(t *testing.T, a *App, name string, args map[string]any) (stri
 	if args == nil {
 		args = map[string]any{}
 	}
-	v, rpc := a.invokeTool(context.Background(), &mcpCtx{}, name, args)
+	v, rpc := invokeTool(a, context.Background(), name, args)
 	if rpc != nil {
 		t.Fatalf("rpc error: %v", rpc)
 	}
-	r := v.(map[string]any)
-	bad, _ := r["isError"].(bool)
-	return r["content"].([]map[string]any)[0]["text"].(string), bad
+	bad, _ := v["isError"].(bool)
+	return v["content"].([]any)[0].(map[string]any)["text"].(string), bad
 }
 
 func bugStyleHTML() string {
@@ -126,79 +134,6 @@ func bugStyleHTML() string {
 </body></html>`
 }
 
-func TestBindValuesReportsAllMissingParams(t *testing.T) {
-	tool := &Tool{Params: []Param{
-		{Name: "a", Type: "string", Required: true},
-		{Name: "b", Type: "string", Required: true},
-		{Name: "c", Type: "string", Required: false},
-	}}
-	_, err := tool.bindValues(map[string]any{}, nil, nil, false, time.Now())
-	if err == nil || err.Error() != "缺少参数: a、b" {
-		t.Fatalf("got %v", err)
-	}
-}
-
-func TestJSONBusinessFailureHeuristics(t *testing.T) {
-	fail := []string{
-		`{"success":false,"msg":"nope"}`,
-		`{"ok":false,"message":"denied"}`,
-		`{"code":"DEMOERR0001","msg":"downstream"}`,
-		`{"code":"DEMOERR0001"}`,
-		`{"code":-1,"msg":"neg"}`,
-		`{"code":500,"msg":"httpish"}`,
-		`{"code":"500","msg":"httpish-str"}`,
-		`{"code":"NO"}`,
-		`{"code":"ERR42"}`,
-		`{"code":400,"msg":"bad request"}`,
-		`{"status":"NO"}`,
-		`{"status":"false"}`,
-	}
-	for _, raw := range fail {
-		text, ok := detectJSONBusinessFailure(raw)
-		if !ok {
-			t.Fatalf("expected failure for %s", raw)
-		}
-		if !strings.HasPrefix(text, "业务失败") {
-			t.Fatalf("prefix: %s", text)
-		}
-		if !strings.Contains(text, raw) {
-			t.Fatalf("original body missing from %s", text)
-		}
-	}
-	// no-message boolean false -> just "业务失败"
-	text, ok := detectJSONBusinessFailure(`{"success":false}`)
-	if !ok || !strings.HasPrefix(text, "业务失败") {
-		t.Fatalf("boolean false without msg: %v %s", ok, text)
-	}
-
-	keep := []string{
-		`{"success":true,"code":"DEMOERR0001"}`,
-		`{"success":true,"ok":false}`,
-		`{"code":0,"msg":"ok"}`,
-		`{"code":200}`,
-		`{"status":1,"name":"active"}`,
-		`{"status":500}`,
-		`{"code":1,"msg":"category"}`,
-		`{"code":"AB12","msg":"name"}`,
-		`{"ok":"false"}`,
-		`{"code":"500"}`,
-		`{"code":"n","msg":"north"}`,
-		`{"code":"N"}`,
-		`{"code":-1}`,
-		`{"code":399,"msg":"almost"}`,
-		`{"code":600,"msg":"too-high"}`,
-		`{"status":"n"}`,
-		`{"status":"ERR1"}`,
-		`[ {"success":false} ]`,
-		`not-json`,
-	}
-	for _, raw := range keep {
-		if _, ok := detectJSONBusinessFailure(raw); ok {
-			t.Fatalf("false positive for %s", raw)
-		}
-	}
-}
-
 func TestPresentJSONFailureViaMCP(t *testing.T) {
 	a := presentTestApp(t)
 	up := presentUpstream(t, 200, "application/json", `{"success":false,"msg":"PTM-like DEMOERR0001"}`)
@@ -217,7 +152,7 @@ func TestPresentJSONFailureViaMCP(t *testing.T) {
 		t.Fatalf("HTTP prefix should be omitted on business failure: %s", text)
 	}
 
-	off := boolPtr(false)
+	off := execution.BoolPtr(false)
 	up2 := presentUpstream(t, 200, "application/json", `{"success":false,"msg":"still-ok"}`)
 	savePresentTool(t, a, "json_fail_off", "GET", up2.URL, ToolConfig{DetectFailure: off}, nil)
 	text, isErr = invokePresent(t, a, "json_fail_off", nil)
@@ -297,130 +232,32 @@ func TestPresentHTMLCleanAndSelectorAndFallback(t *testing.T) {
 
 	// selector
 	up2 := presentUpstream(t, 200, "text/html", html)
-	savePresentTool(t, a, "bug_sel", "GET", up2.URL, ToolConfig{ResultFormat: resultFormatSelector, ResultSelector: "#main"}, nil)
+	savePresentTool(t, a, "bug_sel", "GET", up2.URL, ToolConfig{ResultFormat: execution.ResultFormatSelector, ResultSelector: "#main"}, nil)
 	text, isErr = invokePresent(t, a, "bug_sel", nil)
 	if isErr || !strings.Contains(text, "接口超时咨询") {
 		t.Fatalf("selector: %v %s", isErr, text)
 	}
 
 	up3 := presentUpstream(t, 200, "text/html", html)
-	savePresentTool(t, a, "bug_miss", "GET", up3.URL, ToolConfig{ResultFormat: resultFormatSelector, ResultSelector: "#no-such"}, nil)
+	savePresentTool(t, a, "bug_miss", "GET", up3.URL, ToolConfig{ResultFormat: execution.ResultFormatSelector, ResultSelector: "#no-such"}, nil)
 	text, isErr = invokePresent(t, a, "bug_miss", nil)
 	if isErr {
 		t.Fatalf("miss should fall back, not error: %s", text)
 	}
-	if !strings.Contains(text, presentFallbackMiss) || !strings.Contains(text, "<nav") {
+	if !strings.Contains(text, "[提示] 指定区域未匹配到内容，已返回原始 HTML。") || !strings.Contains(text, "<nav") {
 		t.Fatalf("expected raw fallback: %s", text)
 	}
 
 	// JS-rendered page: almost empty after clean, raw > 2KB, no alert
 	jsPage := `<!DOCTYPE html><html><head><script>` + strings.Repeat("var a=1;", 400) + `</script></head><body><div id="app"></div></body></html>`
-	if len(jsPage) <= presentRawMinBytes {
+	if len(jsPage) <= 2048 {
 		t.Fatalf("fixture too small: %d", len(jsPage))
 	}
 	up4 := presentUpstream(t, 200, "text/html", jsPage)
 	savePresentTool(t, a, "js_page", "GET", up4.URL, ToolConfig{}, nil)
 	text, isErr = invokePresent(t, a, "js_page", nil)
-	if isErr || !strings.Contains(text, presentFallbackEmpty) || !strings.Contains(text, "<script>") {
+	if isErr || !strings.Contains(text, "[提示] 页面内容过少或主要由脚本生成，已返回原始 HTML。") || !strings.Contains(text, "<script>") {
 		t.Fatalf("js fallback: %v %s", isErr, text)
-	}
-}
-
-func TestPickAlertPrefersNearestLocationAndSkipsHugeScript(t *testing.T) {
-	raw := `<script>alert('先出现的提示'); alert('真正的错误'); location.href='/home';</script>`
-	if got := pickAlertMessage(raw); got != "真正的错误" {
-		t.Fatalf("nearest alert: %q", got)
-	}
-	raw = `<script>alert('第一条'); alert('第二条');</script>`
-	if got := pickAlertMessage(raw); got != "第一条" {
-		t.Fatalf("first alert without location: %q", got)
-	}
-	raw = `<script>window.alert("窗口提示"); location.href='/next';</script>`
-	if got := pickAlertMessage(raw); got != "窗口提示" {
-		t.Fatalf("window.alert: %q", got)
-	}
-	big := `<script>alert('大脚本错误'); location.href='/';` + strings.Repeat("x", 3000) + `</script><script>alert('小脚本');</script>`
-	if got := pickAlertMessage(big); got != "小脚本" {
-		t.Fatalf("huge script should be ignored: %q", got)
-	}
-	escaped := `<script>alert('line\nbreak');</script>`
-	if got := pickAlertMessage(escaped); got != "line\nbreak" {
-		t.Fatalf("escaped newline: %q", got)
-	}
-}
-
-func TestPresentSelectorDoesNotFalseAlert(t *testing.T) {
-	page := `<html><body><script>alert('忽略这条');</script><main>` +
-		strings.Repeat("<p>正文足够长，不应该被当成失败。</p>", 8) +
-		`<h1 id="ticket-title">短</h1></main></body></html>`
-	p := &PreparedCall{presentCfg: ToolConfig{ResultFormat: resultFormatSelector, ResultSelector: "#ticket-title"}}
-	res := &CallResult{Status: 200, Body: page, Headers: map[string]string{"Content-Type": "text/html"}}
-	presentToolResult(p, res)
-	if res.Outcome == outcomeBusinessError {
-		t.Fatalf("selector excerpt must not turn a real page into an alert failure: %s", res.Body)
-	}
-	if strings.Contains(res.Body, "已返回原始 HTML") || !strings.Contains(res.Body, "短") {
-		t.Fatalf("selector result: %s", res.Body)
-	}
-}
-
-func TestPresentAlertIgnoresLinkURLLength(t *testing.T) {
-	page := `<html><body><script>alert('对象不存在');location.href='/x';</script>` +
-		`<a href="https://example.com/` + strings.Repeat("a", 500) + `">返回</a></body></html>`
-	p := &PreparedCall{}
-	res := &CallResult{Status: 200, Body: page, Headers: map[string]string{"Content-Type": "text/html"}}
-	presentToolResult(p, res)
-	if res.Outcome != outcomeBusinessError || !strings.Contains(res.Body, "业务失败：对象不存在") {
-		t.Fatalf("long href must not hide the alert: outcome=%s body=%s", res.Outcome, res.Body)
-	}
-	if strings.Contains(res.Body, "已返回原始 HTML") {
-		t.Fatalf("failure must not fall back: %s", res.Body)
-	}
-}
-
-func TestPresentSQLGuardAndWSSkip60KB(t *testing.T) {
-	msg := strings.Repeat("甲", maxResult)
-	raw := `{"success":false,"msg":"` + msg + `"}`
-	sql := &PreparedCall{ws: true, wsConfig: ToolConfig{SQLGuard: &SQLGuardConfig{Enabled: true}}}
-	sqlRes := &CallResult{Status: 200, Body: raw, Outcome: outcomeSuccess, Truncated: true, Headers: map[string]string{"Content-Type": "application/json"}}
-	presentToolResult(sql, sqlRes)
-	if sqlRes.Body != raw || sqlRes.Outcome != outcomeSuccess || !sqlRes.Truncated {
-		t.Fatalf("sql guard changed result outcome=%s trunc=%v changed=%v", sqlRes.Outcome, sqlRes.Truncated, sqlRes.Body != raw)
-	}
-
-	ws := &PreparedCall{ws: true}
-	wsRes := &CallResult{Status: 200, Body: raw, Headers: map[string]string{"Content-Type": "application/json"}}
-	presentToolResult(ws, wsRes)
-	if wsRes.Outcome != outcomeBusinessError || wsRes.Truncated || !strings.Contains(wsRes.Body, msg) {
-		t.Fatalf("ws json failure truncated or missed: outcome=%s trunc=%v len=%d", wsRes.Outcome, wsRes.Truncated, len(wsRes.Body))
-	}
-	if strings.Contains(wsRes.Body, "…[已截断]") {
-		t.Fatal("ws result was 60KB-truncated")
-	}
-
-	httpRes := &CallResult{Status: 200, Body: raw, Headers: map[string]string{"Content-Type": "application/json"}}
-	presentToolResult(&PreparedCall{}, httpRes)
-	if httpRes.Outcome != outcomeBusinessError || !httpRes.Truncated || !strings.HasPrefix(httpRes.Body, "业务失败：") || !strings.Contains(httpRes.Body, "…[已截断]") {
-		t.Fatalf("http json failure should keep the prefix and truncate: outcome=%s trunc=%v body=%s", httpRes.Outcome, httpRes.Truncated, httpRes.Body[:min(80, len(httpRes.Body))])
-	}
-
-	page := `<!DOCTYPE html><html><body><nav>导航不要</nav><main><h1>标题乙</h1><p>需要保留的正文</p></main></body></html>`
-	wsHTML := &CallResult{Status: 200, Body: page, Headers: map[string]string{"Content-Type": "text/html"}}
-	presentToolResult(&PreparedCall{ws: true}, wsHTML)
-	if strings.Contains(wsHTML.Body, "导航不要") || !strings.Contains(wsHTML.Body, "标题乙") || wsHTML.Truncated {
-		t.Fatalf("ws html: trunc=%v body=%s", wsHTML.Truncated, wsHTML.Body)
-	}
-}
-
-func TestDetectFailureFalseRoundTrip(t *testing.T) {
-	off := boolPtr(false)
-	raw := ToolConfig{DetectFailure: off}.marshal()
-	if !strings.Contains(raw, `"detect_failure":false`) {
-		t.Fatalf("unchecked detection must be stored as false: %s", raw)
-	}
-	back, err := parseToolConfigJSON(raw)
-	if err != nil || back.detectFailureEnabled() {
-		t.Fatalf("round trip: %+v %v", back, err)
 	}
 }
 
@@ -430,16 +267,16 @@ func TestPresentSelectorSmallRegionNotFallback(t *testing.T) {
 	// region, not fall back to the whole raw HTML.
 	pad := strings.Repeat("<p>导航与页脚占位文字占位文字占位文字</p>", 80)
 	html := `<!DOCTYPE html><html><body><nav>` + pad + `</nav><main><h1 id="ticket-title">短标题</h1><p>正文一句。</p></main></body></html>`
-	if len(html) <= presentRawMinBytes {
+	if len(html) <= 2048 {
 		t.Fatalf("fixture too small: %d", len(html))
 	}
 	up := presentUpstream(t, 200, "text/html", html)
-	savePresentTool(t, a, "sel_small", "GET", up.URL, ToolConfig{ResultFormat: resultFormatSelector, ResultSelector: "#ticket-title"}, nil)
+	savePresentTool(t, a, "sel_small", "GET", up.URL, ToolConfig{ResultFormat: execution.ResultFormatSelector, ResultSelector: "#ticket-title"}, nil)
 	text, isErr := invokePresent(t, a, "sel_small", nil)
 	if isErr {
 		t.Fatal(text)
 	}
-	if strings.Contains(text, presentFallbackEmpty) || strings.Contains(text, "<nav") {
+	if strings.Contains(text, "[提示] 页面内容过少或主要由脚本生成，已返回原始 HTML。") || strings.Contains(text, "<nav") {
 		t.Fatalf("small selector hit must not fall back to raw: %s", text)
 	}
 	if !strings.Contains(text, "短标题") {
@@ -451,7 +288,7 @@ func TestPresentMCPCannotOverrideFormat(t *testing.T) {
 	a := presentTestApp(t)
 	html := bugStyleHTML()
 	up := presentUpstream(t, 200, "text/html", html)
-	savePresentTool(t, a, "locked_fmt", "GET", up.URL, ToolConfig{ResultFormat: resultFormatAuto}, nil)
+	savePresentTool(t, a, "locked_fmt", "GET", up.URL, ToolConfig{ResultFormat: execution.ResultFormatAuto}, nil)
 	text, isErr := invokePresent(t, a, "locked_fmt", map[string]any{"result_format": "raw"})
 	if isErr {
 		t.Fatal(text)
@@ -470,17 +307,17 @@ func TestPresentScrubAfterCleaning(t *testing.T) {
 	page := `<!DOCTYPE html><html><body><main><h1>可见标题</h1><p>密钥是 ` + secret + ` 请勿泄露</p></main></body></html>`
 	up := presentUpstream(t, 200, "text/html", page)
 	tool := savePresentTool(t, a, "scrub_page", "GET", up.URL, ToolConfig{}, nil)
-	// Register the secret as if it came from a bound credential.
-	prepared, err := a.Prepare(tool, map[string]any{})
+	// Register the secret through a real secret-parameter binding.
+	tool.Params = []domain.Param{{Name: "credential", Type: "string", Secret: true}}
+	prepared, err := a.executor().Prepare(tool, map[string]any{"credential": secret})
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared.secretValues = append(prepared.secretValues, secret)
-	res, err := a.Send(prepared)
+	res, err := a.executor().Send(prepared)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Body == secretMask {
+	if res.Body == vault.Mask {
 		t.Fatal("whole body fail-closed")
 	}
 	if strings.Contains(res.Body, secret) {
@@ -497,12 +334,12 @@ func TestPresentApprovalStoresWhatAIReceived(t *testing.T) {
 	up := presentUpstream(t, 200, "text/html", html)
 	tool := &Tool{
 		Name: "appr_html", Title: "审批清洗", Method: "GET", URL: up.URL, Approval: "always",
-		Params: []Param{},
+		Params: []domain.Param{},
 	}
 	if err := a.store.SaveTool(tool); err != nil {
 		t.Fatal(err)
 	}
-	pack := &Pack{Name: "appr_html_pack", Enabled: true, ToolIDs: []int64{tool.ID}}
+	pack := &store.Pack{Name: "appr_html_pack", Enabled: true, ToolIDs: []int64{tool.ID}}
 	if err := a.store.SavePack(pack); err != nil {
 		t.Fatal(err)
 	}
@@ -517,7 +354,7 @@ func TestPresentApprovalStoresWhatAIReceived(t *testing.T) {
 	if !strings.Contains(reply.text, "HTTP 200") || !strings.Contains(reply.text, "接口超时咨询") {
 		t.Fatalf("AI text: %s", reply.text)
 	}
-	got, _, err := a.GetApprovalResult(rows[0].ID)
+	got, _, err := a.approvals().Result(rows[0].ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -531,16 +368,12 @@ func TestPresentApprovalStoresWhatAIReceived(t *testing.T) {
 
 func TestToolAnnotationsAndWritePrefix(t *testing.T) {
 	a := presentTestApp(t)
-	get := savePresentTool(t, a, "ann_get", "GET", "http://127.0.0.1/x", ToolConfig{}, nil)
-	post := savePresentTool(t, a, "ann_post", "POST", "http://127.0.0.1/x", ToolConfig{}, nil)
-	readPost := savePresentTool(t, a, "ann_read_post", "POST", "http://127.0.0.1/x", ToolConfig{OpKind: opKindRead}, nil)
-	del := savePresentTool(t, a, "ann_del", "DELETE", "http://127.0.0.1/x", ToolConfig{}, nil)
+	savePresentTool(t, a, "ann_get", "GET", "http://127.0.0.1/x", ToolConfig{}, nil)
+	savePresentTool(t, a, "ann_post", "POST", "http://127.0.0.1/x", ToolConfig{}, nil)
+	savePresentTool(t, a, "ann_read_post", "POST", "http://127.0.0.1/x", ToolConfig{OpKind: execution.OpKindRead}, nil)
+	savePresentTool(t, a, "ann_del", "DELETE", "http://127.0.0.1/x", ToolConfig{}, nil)
 
-	defs := a.recordedToolDefs([]*Tool{get, post, readPost, del}, map[int64][]string{}, false)
-	byName := map[string]map[string]any{}
-	for _, d := range defs {
-		byName[d["name"].(string)] = d
-	}
+	byName := listedToolDefs(t, a, mcp.ModeFlat)
 	ann := func(name string) map[string]any {
 		return byName[name]["annotations"].(map[string]any)
 	}
@@ -565,28 +398,17 @@ func TestToolAnnotationsAndWritePrefix(t *testing.T) {
 	if ann("ann_del")["destructiveHint"] != true || ann("ann_del")["readOnlyHint"] != false || ann("ann_del")["idempotentHint"] != true {
 		t.Fatalf("DELETE: %+v", ann("ann_del"))
 	}
-	put := savePresentTool(t, a, "ann_put", "PUT", "http://127.0.0.1/x", ToolConfig{}, nil)
-	wsRead := &Tool{Name: "ann_ws_sql", Method: "WS", Config: ToolConfig{SQLGuard: &SQLGuardConfig{Enabled: true}}}
-	wsWrite := &Tool{Name: "ann_ws", Method: "WS"}
-	putDefs := a.recordedToolDefs([]*Tool{put}, map[int64][]string{}, false)
-	putAnn := putDefs[0]["annotations"].(map[string]any)
+	savePresentTool(t, a, "ann_put", "PUT", "http://127.0.0.1/x", ToolConfig{}, nil)
+	putDef := listedToolDefs(t, a, mcp.ModeFlat)["ann_put"]
+	putAnn := putDef["annotations"].(map[string]any)
 	if putAnn["readOnlyHint"] != false || putAnn["destructiveHint"] != false || putAnn["idempotentHint"] != true {
 		t.Fatalf("PUT: %+v", putAnn)
 	}
-	if !strings.HasPrefix(putDefs[0]["description"].(string), writeOpPrefix) {
+	if !strings.HasPrefix(putDef["description"].(string), writeOpPrefix) {
 		t.Fatal("PUT should have write prefix")
 	}
-	if write, wsAnn := toolOpKind(wsRead); write || wsAnn["readOnlyHint"] != true || wsAnn["idempotentHint"] != true {
-		t.Fatalf("sql guard WS: write=%v ann=%v", write, wsAnn)
-	}
-	if write, wsAnn := toolOpKind(wsWrite); !write || wsAnn["destructiveHint"] != false || wsAnn["idempotentHint"] != false || wsAnn["readOnlyHint"] != false {
-		t.Fatalf("plain WS: write=%v ann=%v", write, wsAnn)
-	}
-	forced := &Tool{Name: "ann_ws_force", Method: "WS", Config: ToolConfig{SQLGuard: &SQLGuardConfig{Enabled: true}, OpKind: opKindWrite}}
-	if write, _ := toolOpKind(forced); !write {
-		t.Fatal("op_kind=write should override sql guard")
-	}
-	for _, d := range entryToolDefs() {
+	// WebSocket op-kind classification is owned by internal/mcpserver (TestToolOpKindWebSocketOverrides).
+	for _, d := range listedToolDefs(t, a, mcp.ModeTiered) {
 		if d["name"] != "call_pack_tool" {
 			continue
 		}
@@ -658,16 +480,16 @@ func TestLoadRecPackIncludesAnnotations(t *testing.T) {
 
 func TestMWAnnotationsMatchSpec(t *testing.T) {
 	a := presentTestApp(t)
-	ms := []*Middleware{
-		{ID: 1, Name: "db1", Type: "mysql", Config: MWConfig{Perms: map[string]bool{"select": true}}},
-		{ID: 2, Name: "rd1", Type: "redis", Config: MWConfig{Perms: map[string]bool{"read": true, "write": true}}},
-		{ID: 3, Name: "mq1", Type: "mq", Config: MWConfig{Perms: map[string]bool{"consume": true, "send": true, "admin": true}, MQKind: "kafka"}},
-		{ID: 4, Name: "pod1", Type: "websocket", Config: MWConfig{Perms: map[string]bool{"log": true, "exec": true}}},
-		{ID: 5, Name: "sql1", Type: "websocket", Config: MWConfig{WSMode: wsModeSQLConsole, Perms: map[string]bool{"select": true}}},
+	ms := []*mwconfig.Middleware{
+		{ID: 1, Name: "db1", Type: "mysql", Config: mwconfig.MWConfig{Perms: map[string]bool{"select": true}}},
+		{ID: 2, Name: "rd1", Type: "redis", Config: mwconfig.MWConfig{Perms: map[string]bool{"read": true, "write": true}}},
+		{ID: 3, Name: "mq1", Type: "mq", Config: mwconfig.MWConfig{Perms: map[string]bool{"consume": true, "send": true, "admin": true}, MQKind: "kafka"}},
+		{ID: 4, Name: "pod1", Type: "websocket", Config: mwconfig.MWConfig{Perms: map[string]bool{"log": true, "exec": true}}},
+		{ID: 5, Name: "sql1", Type: "websocket", Config: mwconfig.MWConfig{WSMode: mwconfig.WSModeSQLConsole, Perms: map[string]bool{"select": true}}},
 	}
 	packs := map[int64][]string{1: {"p"}, 2: {"p"}, 3: {"p"}, 4: {"p"}, 5: {"p"}}
 	byName := map[string]map[string]any{}
-	for _, d := range a.mwToolListFor(ms, packs) {
+	for _, d := range a.middlewares().ToolListFor(ms, packs) {
 		byName[d["name"].(string)] = d
 	}
 	check := func(name string, readOnly, destructive, idempotent, write bool) {
@@ -699,7 +521,7 @@ func TestMWAnnotationsMatchSpec(t *testing.T) {
 	check("mq_create_topic", false, true, false, true)
 	check("pod_read_log", true, false, true, false)
 	check("pod_exec", false, true, false, true)
-	check(wsSQLQueryTool, true, false, true, false)
+	check(mwconfig.WSSQLQueryTool, true, false, true, false)
 }
 
 func TestLoadPackPlainJSONResponse(t *testing.T) {
@@ -708,7 +530,7 @@ func TestLoadPackPlainJSONResponse(t *testing.T) {
 	c := &recTestClient{t: t, handler: a.Handler()}
 	c.call("initialize", map[string]any{"protocolVersion": "2025-06-18", "clientInfo": map[string]any{"name": "json-only"}})
 
-	body := compactJSON(map[string]any{"jsonrpc": "2.0", "id": 99, "method": "tools/call", "params": map[string]any{"name": "load_pack", "arguments": map[string]any{"pack": "plain_json_tool_pack"}}})
+	body := execution.CompactJSON(map[string]any{"jsonrpc": "2.0", "id": 99, "method": "tools/call", "params": map[string]any{"name": "load_pack", "arguments": map[string]any{"pack": "plain_json_tool_pack"}}})
 	req := httptest.NewRequest("POST", "https://example.com/mcp", strings.NewReader(string(body)))
 	req.Host = "127.0.0.1"
 	req.Header.Set("Content-Type", "application/json")
@@ -738,7 +560,7 @@ func TestLoadPackPlainJSONResponse(t *testing.T) {
 
 func TestSchemaV11ToV12PresentationDefaults(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "a2m.db")
+	path := filepath.Join(dir, "a2m.DB()")
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatal(err)
@@ -764,14 +586,14 @@ PRAGMA user_version=11;
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := OpenStore(path)
+	st, err := store.OpenStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.db.Close()
+	defer st.DB().Close()
 	var ver int
-	if err := st.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil || ver != schemaUserVersion {
-		t.Fatalf("version=%d err=%v want %d", ver, err, schemaUserVersion)
+	if err := st.DB().QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil || ver != wantSchemaUserVersion {
+		t.Fatalf("version=%d err=%v want %d", ver, err, wantSchemaUserVersion)
 	}
 	tool, err := st.GetToolByName("legacy_view")
 	if err != nil {
@@ -780,12 +602,12 @@ PRAGMA user_version=11;
 	if tool.Config.ResultFormat != "" || tool.Config.DetectFailure != nil {
 		t.Fatalf("stored config should stay zero: %+v", tool.Config)
 	}
-	if tool.Config.resultFormat() != resultFormatAuto || !tool.Config.detectFailureEnabled() {
-		t.Fatalf("defaults: format=%s detect=%v", tool.Config.resultFormat(), tool.Config.detectFailureEnabled())
+	if tool.Config.EffectiveResultFormat() != execution.ResultFormatAuto || !tool.Config.DetectFailureEnabled() {
+		t.Fatalf("defaults: format=%s detect=%v", tool.Config.EffectiveResultFormat(), tool.Config.DetectFailureEnabled())
 	}
 	// Do not require the JSON in SQLite to have been rewritten.
 	var raw string
-	if err := st.db.QueryRow(`SELECT config FROM tools WHERE name='legacy_view'`).Scan(&raw); err != nil {
+	if err := st.DB().QueryRow(`SELECT config FROM tools WHERE name='legacy_view'`).Scan(&raw); err != nil {
 		t.Fatal(err)
 	}
 	if strings.TrimSpace(raw) != "{}" {
@@ -799,7 +621,7 @@ func TestValidatePresentationOnSave(t *testing.T) {
 	if err := a.store.SaveTool(tool); err == nil {
 		t.Fatal("invalid result_format should be rejected")
 	}
-	tool.Config.ResultFormat = resultFormatSelector
+	tool.Config.ResultFormat = execution.ResultFormatSelector
 	tool.Config.ResultSelector = ""
 	if err := a.store.SaveTool(tool); err == nil {
 		t.Fatal("empty selector should be rejected")
@@ -825,4 +647,22 @@ func TestHTTP400KeepsExistingFormat(t *testing.T) {
 	if !strings.Contains(text, "HTTP 404") || !strings.Contains(text, "gone") {
 		t.Fatalf("should keep HTTP N format: %s", text)
 	}
+}
+
+// listedToolDefs reads tools/list (no session) in the given MCP mode, keyed by name.
+func listedToolDefs(t *testing.T, a *App, mode string) map[string]map[string]any {
+	t.Helper()
+	previous := a.store.GetSetting("mcp_mode", mcp.ModeTiered)
+	a.store.SetSetting("mcp_mode", mode)
+	defer a.store.SetSetting("mcp_mode", previous)
+	listed, rpc := mcpRequest(a, context.Background(), "tools/list", map[string]any{})
+	if rpc != nil {
+		t.Fatalf("tools/list: %v", rpc)
+	}
+	out := map[string]map[string]any{}
+	for _, d := range listed["tools"].([]any) {
+		def := d.(map[string]any)
+		out[def["name"].(string)] = def
+	}
+	return out
 }

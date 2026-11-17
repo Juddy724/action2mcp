@@ -1,6 +1,9 @@
 package app
 
 import (
+	"action2mcp/internal/approval"
+	"action2mcp/internal/store"
+	"action2mcp/internal/vault"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -9,6 +12,14 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+)
+
+// Public history API contract, independent of the owner's private constants.
+const (
+	approvalResultPreviewBytes = 2 * 1024
+	approvalResultFullMax      = 1 << 20
+	approvalResultTruncMark    = "…[已截断]"
+	approvalResultFullCapNote  = "…[已截断]（结果超过 1MB，已截断保存）"
 )
 
 func TestApprovalResultFullAPIAndStorage(t *testing.T) {
@@ -40,7 +51,7 @@ func TestApprovalResultFullAPIAndStorage(t *testing.T) {
 	if strings.Contains(reply.text, secret) {
 		t.Fatal("AI result leaked vault secret")
 	}
-	if !strings.Contains(reply.text, "TAIL-MARKER-XYZ") || !strings.Contains(reply.text, secretMask) {
+	if !strings.Contains(reply.text, "TAIL-MARKER-XYZ") || !strings.Contains(reply.text, vault.Mask) {
 		t.Fatalf("AI result missing tail or mask: %s", truncate(reply.text, 200))
 	}
 
@@ -84,7 +95,7 @@ func TestApprovalResultFullAPIAndStorage(t *testing.T) {
 	if strings.Contains(out.Result, secret) {
 		t.Fatal("full result leaked secret")
 	}
-	if !strings.Contains(out.Result, secretMask) {
+	if !strings.Contains(out.Result, vault.Mask) {
 		t.Fatal("full result should be scrubbed the same way the AI saw")
 	}
 
@@ -105,22 +116,22 @@ func TestApprovalResultFullAPIAndStorage(t *testing.T) {
 func TestApprovalResultFullCapAndMigration(t *testing.T) {
 	huge := strings.Repeat("Z", approvalResultFullMax+2048)
 	a := approvalTestApp(t)
-	if err := a.store.insertApproval(&ApprovalRecord{TS: now(), Tool: "t", Title: "t", Status: "pending", Client: "c"}); err != nil {
+	if err := a.store.Approvals.Insert(&approval.Record{TS: now(), Tool: "t", Title: "t", Status: "pending", Client: "c"}); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := a.store.listApprovals("pending", 10)
+	rows, err := a.store.Approvals.List("pending", 10)
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("insert: %v %d", err, len(rows))
 	}
-	a.approvalResult(rows[0].ID, huge)
-	full, truncated, err := a.GetApprovalResult(rows[0].ID)
+	a.approvals().Service().RecordResult(rows[0].ID, huge)
+	full, truncated, err := a.approvals().Result(rows[0].ID)
 	if err != nil || !truncated {
 		t.Fatalf("cap: truncated=%v err=%v", truncated, err)
 	}
 	if !strings.Contains(full, approvalResultFullCapNote) {
 		t.Fatal("missing 1MB cap note")
 	}
-	hist, err := a.ListApprovals("all", 10)
+	hist, err := a.approvals().List("all", 10)
 	if err != nil || len(hist) != 1 || !hist[0].HasFullResult {
 		t.Fatal("list should flag full result")
 	}
@@ -129,7 +140,7 @@ func TestApprovalResultFullCapAndMigration(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	path := dir + "/v9.db"
+	path := dir + "/v9.DB()"
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
@@ -143,19 +154,19 @@ func TestApprovalResultFullCapAndMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := OpenStore(path)
+	s, err := store.OpenStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.db.Close()
-	if !s.hasColumn("approvals", "result_full") {
+	defer s.DB().Close()
+	if !tableHasColumn(s, "approvals", "result_full") {
 		t.Fatal("result_full column missing after migration")
 	}
 	var ver int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&ver); err != nil || ver != schemaUserVersion {
+	if err := s.DB().QueryRow("PRAGMA user_version").Scan(&ver); err != nil || ver != wantSchemaUserVersion {
 		t.Fatalf("version=%d err=%v", ver, err)
 	}
-	got, err := s.listApprovals("all", 10)
+	got, err := s.Approvals.List("all", 10)
 	if err != nil || len(got) != 1 || got[0].Result != "HTTP 200 old-summary" {
 		t.Fatalf("migration lost old result: %+v %v", got, err)
 	}

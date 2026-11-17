@@ -1,6 +1,12 @@
 package app
 
 import (
+	"action2mcp/internal/domain"
+	"action2mcp/internal/execution"
+	"action2mcp/internal/mcp"
+	"action2mcp/internal/recording"
+	"action2mcp/internal/store"
+	"action2mcp/internal/vault"
 	"bytes"
 	"encoding/json"
 	"mime/multipart"
@@ -23,7 +29,7 @@ func forbidText(t *testing.T, label, text string, parts ...string) {
 func countTable(t *testing.T, app *App, table string) int {
 	t.Helper()
 	var n int
-	if err := app.store.db.QueryRow("SELECT count(*) FROM " + table).Scan(&n); err != nil {
+	if err := app.store.DB().QueryRow("SELECT count(*) FROM " + table).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	return n
@@ -54,7 +60,7 @@ func TestReview051Finding01FailClosedStructured(t *testing.T) {
 	}
 	// Command-prefixed JSON cut inside the token, plus a complete JWT earlier in the text.
 	cut := "execute {\"note\":\"hello-field\",\"token\":\"" + fakeToken[:16]
-	cmd := &ReqRecord{
+	cmd := &recording.Request{
 		RecordingID: recID, Method: "POST", URL: "https://api.example.com/exec",
 		ReqHeaders: map[string]string{"Content-Type": "text/plain"},
 		ReqBody:    cut + "\n…[已截断]" + fakeJWT,
@@ -70,8 +76,8 @@ func TestReview051Finding01FailClosedStructured(t *testing.T) {
 
 	// Valid outer JSON whose inner string is incomplete JSON.
 	inner := `{"token":"` + fakeToken
-	outer := string(compactJSON(map[string]any{"wrap": inner}))
-	nested := &ReqRecord{
+	outer := string(execution.CompactJSON(map[string]any{"wrap": inner}))
+	nested := &recording.Request{
 		RecordingID: recID, Method: "POST", URL: "https://api.example.com/wrap",
 		ReqHeaders: map[string]string{"Content-Type": "application/json"},
 		ReqBody:    outer,
@@ -83,12 +89,10 @@ func TestReview051Finding01FailClosedStructured(t *testing.T) {
 	// Depth exhaustion: a plain token nested in eight JSON strings is not under a sensitive key.
 	deep := "depth-FAKE-token-xyz"
 	for i := 0; i < 8; i++ {
-		deep = string(compactJSON(map[string]any{"wrap": deep}))
+		deep = string(execution.CompactJSON(map[string]any{"wrap": deep}))
 	}
-	if got := app.sanitizeString(deep, false, 0, nil); strings.Contains(got, "depth-FAKE-token-xyz") || !strings.Contains(got, structuredOmitted) {
-		t.Fatalf("depth did not fail closed: %s", got)
-	}
-	deepReq := &ReqRecord{
+	// The direct sanitizer depth assertion lives with its owner: analysis.TestSanitizeDepthFailsClosed.
+	deepReq := &recording.Request{
 		RecordingID: recID, Method: "POST", URL: "https://api.example.com/deep",
 		ReqHeaders: map[string]string{"Content-Type": "application/json"},
 		ReqBody:    deep,
@@ -106,7 +110,7 @@ func TestReview051Finding01FailClosedStructured(t *testing.T) {
 	if err := w.WriteField("password", fakeToken); err != nil {
 		t.Fatal(err)
 	}
-	mp := &ReqRecord{
+	mp := &recording.Request{
 		RecordingID: recID, Method: "POST", URL: "https://api.example.com/mp-cut",
 		ReqHeaders: map[string]string{"Content-Type": w.FormDataContentType()},
 		ReqBody: buf.String() + "--" + w.Boundary() + "\r\n" +
@@ -117,7 +121,7 @@ func TestReview051Finding01FailClosedStructured(t *testing.T) {
 	seedRecRequest(t, app, mp)
 	mpText := mustTool(t, c, "rec_get_request", map[string]any{"request_id": mp.ID, "max_body": 100000})
 	forbidText(t, "multipart cut", mpText, "tok-FAKE", "eyJhbGci", fakeToken, fakeJWT)
-	if !strings.Contains(mpText, "keep-visible") || !strings.Contains(mpText, secretMask) {
+	if !strings.Contains(mpText, "keep-visible") || !strings.Contains(mpText, vault.Mask) {
 		t.Fatalf("complete parts were not outlined: %s", mpText)
 	}
 }
@@ -143,7 +147,7 @@ func TestReview051Finding02MultipartFile(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
-	q := &ReqRecord{
+	q := &recording.Request{
 		Method: "POST", URL: "https://api.example.com/upload",
 		ReqHeaders: map[string]string{"Content-Type": w.FormDataContentType()},
 		ReqBody:    buf.String(), Status: 200,
@@ -151,10 +155,10 @@ func TestReview051Finding02MultipartFile(t *testing.T) {
 	seedRecRequest(t, app, q)
 	detail := mustTool(t, c, "rec_get_request", map[string]any{"request_id": q.ID, "max_body": 100000})
 	forbidText(t, "get file", detail, fakeToken, fakeJWT, "tok-FAKE", "eyJhbGci")
-	if !strings.Contains(detail, omittedFileValue) {
+	if !strings.Contains(detail, recOmittedFileValue) {
 		t.Fatalf("binary file was not removed: %s", detail)
 	}
-	if !strings.Contains(detail, secretMask) && !strings.Contains(detail, "{{") && !strings.Contains(detail, structuredOmitted) {
+	if !strings.Contains(detail, vault.Mask) && !strings.Contains(detail, "{{") && !strings.Contains(detail, recStructuredOmitted) {
 		t.Fatalf("textual file was not sanitized: %s", detail)
 	}
 
@@ -163,7 +167,7 @@ func TestReview051Finding02MultipartFile(t *testing.T) {
 		"request_id": q.ID, "name": "upload_creds", "pack": "file-pack", "create_pack": true, "dry_run": true,
 	})
 	forbidText(t, "dry_run file", dry, fakeToken, fakeJWT, "tok-FAKE", "eyJhbGci")
-	if !strings.Contains(dry, omittedFileValue) {
+	if !strings.Contains(dry, recOmittedFileValue) {
 		t.Fatalf("dry_run kept binary file: %s", dry)
 	}
 	assertNoWrites(t, app, before)
@@ -176,18 +180,18 @@ func TestReview051Finding02MultipartFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	blob := tool.Body + string(compactJSON(tool))
+	blob := tool.Body + string(execution.CompactJSON(tool))
 	forbidText(t, "stored file", blob, fakeToken, fakeJWT, "tok-FAKE", "eyJhbGci")
-	if !strings.Contains(tool.Body, omittedFileValue) {
+	if !strings.Contains(tool.Body, recOmittedFileValue) {
 		t.Fatalf("stored body kept binary file: %s", tool.Body)
 	}
 }
 
 func TestReview051Finding03EncodedQuery(t *testing.T) {
 	app, _, c := startRecServer(t)
-	payload := string(compactJSON(map[string]any{"token": fakeToken, "note": "visible-note"}))
+	payload := string(execution.CompactJSON(map[string]any{"token": fakeToken, "note": "visible-note"}))
 	rawURL := "https://api.example.com/search?payload=" + url.QueryEscape(payload) + "&again=" + url.QueryEscape(url.QueryEscape(payload))
-	q := &ReqRecord{
+	q := &recording.Request{
 		Method: "GET", URL: rawURL, Status: 200, ResourceType: "Fetch",
 		RespMime: "application/json", RespBody: `{"ok":true}`,
 	}
@@ -232,16 +236,16 @@ func TestReview051Finding03EncodedQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	forbidText(t, "stored query tool", tool.URL+"\n"+tool.Body+"\n"+tool.Description+"\n"+tool.Title+string(compactJSON(tool.Params)), fakeToken, "tok-FAKE")
+	forbidText(t, "stored query tool", tool.URL+"\n"+tool.Body+"\n"+tool.Description+"\n"+tool.Title+string(execution.CompactJSON(tool.Params)), fakeToken, "tok-FAKE")
 }
 
 func TestReview051Finding04SensitiveAncestry(t *testing.T) {
 	app, _, c := startRecServer(t)
 	const shortSecret = "Zk9q!"
-	q := &ReqRecord{
+	q := &recording.Request{
 		Method: "POST", URL: "https://api.example.com/login",
 		ReqHeaders: map[string]string{"Content-Type": "application/json"},
-		ReqBody:    string(compactJSON(map[string]any{"credentials": map[string]any{"value": shortSecret}, "note": "hello"})),
+		ReqBody:    string(execution.CompactJSON(map[string]any{"credentials": map[string]any{"value": shortSecret}, "note": "hello"})),
 		Status:     200,
 	}
 	seedRecRequest(t, app, q)
@@ -269,9 +273,9 @@ func TestReview051Finding04SensitiveAncestry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	blob := tool.Body + "\n" + tool.Description + "\n" + string(compactJSON(tool.Params))
+	blob := tool.Body + "\n" + tool.Description + "\n" + string(execution.CompactJSON(tool.Params))
 	forbidText(t, "renamed param", blob, shortSecret)
-	var label *Param
+	var label *domain.Param
 	for i := range tool.Params {
 		if tool.Params[i].Name == "label" {
 			label = &tool.Params[i]
@@ -280,12 +284,12 @@ func TestReview051Finding04SensitiveAncestry(t *testing.T) {
 	if label == nil || !label.Required || label.Default != "" {
 		t.Fatalf("renamed secret param: %+v", tool.Params)
 	}
-	if !label.Secret || !paramIsSecret(tool, *label) {
+	if !label.Secret || !execution.ParamIsSecret(tool, *label) {
 		t.Fatal("renamed secret flag lost")
 	}
 	legacy := *label
 	legacy.Secret, legacy.Description = false, ""
-	if !paramIsSecret(tool, legacy) {
+	if !execution.ParamIsSecret(tool, legacy) {
 		t.Fatal("legacy renamed secret location was not detected")
 	}
 	if strings.Contains(tool.Body, shortSecret) {
@@ -295,15 +299,15 @@ func TestReview051Finding04SensitiveAncestry(t *testing.T) {
 
 func TestReview051Finding05SavedMetadata(t *testing.T) {
 	app, _, c := startRecServer(t)
-	if err := app.store.SetSetting("mcp_mode", ModeFlat); err != nil {
+	if err := app.store.SetSetting("mcp_mode", mcp.ModeFlat); err != nil {
 		t.Fatal(err)
 	}
 	const other = "other-FAKE-secret-zzz"
-	nested := string(compactJSON(map[string]any{"password": other}))
-	q := &ReqRecord{
+	nested := string(execution.CompactJSON(map[string]any{"password": other}))
+	q := &recording.Request{
 		Method: "POST", URL: "https://api.example.com/items",
 		ReqHeaders: map[string]string{"Content-Type": "application/json"},
-		ReqBody:    string(compactJSON(map[string]any{"q": "hello", "token": fakeToken})),
+		ReqBody:    string(execution.CompactJSON(map[string]any{"q": "hello", "token": fakeToken})),
 		Status:     200,
 	}
 	seedRecRequest(t, app, q)
@@ -317,19 +321,19 @@ func TestReview051Finding05SavedMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	blob := tool.Title + "\n" + tool.Description + "\n" + tool.Body + "\n" + string(compactJSON(tool.Params))
+	blob := tool.Title + "\n" + tool.Description + "\n" + tool.Body + "\n" + string(execution.CompactJSON(tool.Params))
 	forbidText(t, "stored meta", blob, other, fakeJWT, "eyJhbGci", fakeToken, "tok-FAKE")
 	for _, p := range tool.Params {
 		if p.Name == "q" && strings.Contains(p.Description, other) {
 			t.Fatalf("param description: %+v", p)
 		}
-		if (p.Name == "token" || isSensitiveKey(p.Name) || p.Required) && p.Default != "" && (strings.Contains(p.Default, "tok-FAKE") || strings.Contains(p.Default, other)) {
+		if (p.Name == "token" || execution.IsSensitiveKey(p.Name) || p.Required) && p.Default != "" && (strings.Contains(p.Default, "tok-FAKE") || strings.Contains(p.Default, other)) {
 			t.Fatalf("default kept: %+v", p)
 		}
 	}
 	_, listed := c.call("tools/list", map[string]any{})
-	forbidText(t, "tools/list", string(compactJSON(listed)), other, fakeJWT, "eyJhbGci", fakeToken, "tok-FAKE")
-	if err := app.store.SetSetting("mcp_mode", ModeTiered); err != nil {
+	forbidText(t, "tools/list", string(execution.CompactJSON(listed)), other, fakeJWT, "eyJhbGci", fakeToken, "tok-FAKE")
+	if err := app.store.SetSetting("mcp_mode", mcp.ModeTiered); err != nil {
 		t.Fatal(err)
 	}
 	loaded := mustTool(t, c, "load_pack", map[string]any{"pack": "meta-pack"})
@@ -384,10 +388,10 @@ func TestReview051Finding06EncodedLiteral(t *testing.T) {
 	if encoded == raw || !strings.Contains(encoded, "%2F") && !strings.Contains(encoded, "%2f") {
 		t.Fatalf("fixture did not encode: %s", encoded)
 	}
-	q := &ReqRecord{
+	q := &recording.Request{
 		Method: "POST", URL: "https://api.example.com/echo",
 		ReqHeaders: map[string]string{"Content-Type": "application/json"},
-		ReqBody:    string(compactJSON(map[string]any{"password": raw, "echo": encoded})),
+		ReqBody:    string(execution.CompactJSON(map[string]any{"password": raw, "echo": encoded})),
 		Status:     200,
 	}
 	seedRecRequest(t, app, q)
@@ -403,19 +407,19 @@ func TestReview051Finding06EncodedLiteral(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	forbidText(t, "stored encoded", tool.Body+string(compactJSON(tool)), raw, encoded, "FAKE%2F", "FAKE%2f")
+	forbidText(t, "stored encoded", tool.Body+string(execution.CompactJSON(tool)), raw, encoded, "FAKE%2F", "FAKE%2f")
 }
 
 func TestReview051Finding07PlaceholderSubstring(t *testing.T) {
 	const mixed = "FAKE-secret{{x}}tail"
-	if isWholePlaceholder(mixed) || !isWholePlaceholder("{{secret.known}}") || !isWholePlaceholder("{{a}}{{b}}") {
+	if execution.IsWholePlaceholder(mixed) || !execution.IsWholePlaceholder("{{secret.known}}") || !execution.IsWholePlaceholder("{{a}}{{b}}") {
 		t.Fatal("placeholder classification")
 	}
 	app, _, c := startRecServer(t)
-	q := &ReqRecord{
+	q := &recording.Request{
 		Method: "POST", URL: "https://api.example.com/mix",
 		ReqHeaders: map[string]string{"Content-Type": "application/json"},
-		ReqBody:    string(compactJSON(map[string]any{"password": mixed, "note": mixed})),
+		ReqBody:    string(execution.CompactJSON(map[string]any{"password": mixed, "note": mixed})),
 		Status:     200,
 	}
 	seedRecRequest(t, app, q)
@@ -431,13 +435,13 @@ func TestReview051Finding07PlaceholderSubstring(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	forbidText(t, "stored mixed", tool.Body+string(compactJSON(tool.Params)), mixed, "FAKE-secret")
+	forbidText(t, "stored mixed", tool.Body+string(execution.CompactJSON(tool.Params)), mixed, "FAKE-secret")
 }
 
 func TestReview051Finding08KeyCase(t *testing.T) {
 	yes := []string{"AUTHToken", "ACCESSTOKEN", "X-AUTH-TOKEN", "AccessToken", "AUTH_TOKEN", "X_AUTH_TOKEN"}
 	for _, k := range yes {
-		if !isSensitiveKey(k) {
+		if !execution.IsSensitiveKey(k) {
 			t.Errorf("expected sensitive: %s", k)
 		}
 	}
@@ -455,12 +459,12 @@ func TestReview051Finding08KeyCase(t *testing.T) {
 		"retry_count", "name_length", "passwordHint", "value",
 	}
 	for _, k := range tableYes {
-		if !isSensitiveKey(strings.ToUpper(k)) {
+		if !execution.IsSensitiveKey(strings.ToUpper(k)) {
 			t.Errorf("uppercase should be sensitive: %s", strings.ToUpper(k))
 		}
 	}
 	for _, k := range append(tableNo, "PASSWORDSTRENGTH", "TOKENTYPE", "TOKEN_TYPE", "ACCOUNT", "PASSWORDHINT", "RETRY_COUNT") {
-		if isSensitiveKey(k) || isSensitiveKey(strings.ToUpper(k)) {
+		if execution.IsSensitiveKey(k) || execution.IsSensitiveKey(strings.ToUpper(k)) {
 			t.Errorf("expected not sensitive: %s", k)
 		}
 	}
@@ -473,10 +477,10 @@ func TestReview051Finding08KeyCase(t *testing.T) {
 		"PASSWORDSTRENGTH": "strength-keep-444",
 		"tokenType":        "Bearer",
 	}
-	q := &ReqRecord{
+	q := &recording.Request{
 		Method: "POST", URL: "https://api.example.com/keys",
 		ReqHeaders: map[string]string{"Content-Type": "application/json"},
-		ReqBody:    string(compactJSON(body)), Status: 200,
+		ReqBody:    string(execution.CompactJSON(body)), Status: 200,
 	}
 	seedRecRequest(t, app, q)
 	detail := mustTool(t, c, "rec_get_request", map[string]any{"request_id": q.ID})
@@ -491,7 +495,7 @@ func TestReview051Finding08KeyCase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("save: %s (%v)", saved, err)
 	}
-	blob := tool.Body + string(compactJSON(tool))
+	blob := tool.Body + string(execution.CompactJSON(tool))
 	forbidText(t, "saved keys", blob, "auth-FAKE-value-111", "access-FAKE-value-222", "xauth-FAKE-value-333")
 	if !strings.Contains(blob, "strength-keep-444") {
 		t.Fatalf("strength value removed: %s", blob)
@@ -503,10 +507,10 @@ func TestReview051Finding09ShortVault(t *testing.T) {
 	if err := app.vault.Upsert("short_page", "secret", "1", "https://api.example.com", ""); err != nil {
 		t.Fatal(err)
 	}
-	if got := app.vault.secretVariants(); len(got) != 0 {
+	if got := app.vault.SecretVariants(); len(got) != 0 {
 		t.Fatalf("short vault value produced variants: %v", got)
 	}
-	q := &ReqRecord{
+	q := &recording.Request{
 		Method: "GET", URL: "https://api.example.com/list?page=1",
 		ResourceType: "WebSocket", Status: 101,
 		ReqHeaders: map[string]string{"Content-Type": "application/json"},
@@ -554,10 +558,10 @@ func TestReview051Finding10ErrorTemplate(t *testing.T) {
 	if err := app.vault.Upsert("word_overwrite", "secret", "overwrite", "https://api.example.com", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.store.SavePack(&Pack{Name: "team-overwrite-pack", Enabled: true}); err != nil {
+	if err := app.store.SavePack(&store.Pack{Name: "team-overwrite-pack", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
-	q := &ReqRecord{
+	q := &recording.Request{
 		Method: "POST", URL: "https://api.example.com/items",
 		ReqHeaders: map[string]string{"Content-Type": "application/json"},
 		ReqBody:    `{"q":"hello"}`, Status: 200,
@@ -578,7 +582,7 @@ func TestReview051Finding10ErrorTemplate(t *testing.T) {
 	if strings.Contains(bad, "******=true") {
 		t.Fatalf("composed template was scrubbed: %s", bad)
 	}
-	if strings.Contains(bad, "team-overwrite-pack") || !strings.Contains(bad, "team-"+secretMask+"-pack") {
+	if strings.Contains(bad, "team-overwrite-pack") || !strings.Contains(bad, "team-"+vault.Mask+"-pack") {
 		t.Fatalf("pack name was not sanitized before composition: %s", bad)
 	}
 	if !strings.Contains(bad, "id=") {
@@ -592,11 +596,11 @@ func TestReview051Finding11GroupIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	noise := &ReqRecord{
+	noise := &recording.Request{
 		RecordingID: recID, Seq: 1, Method: "POST", URL: "https://app.example.com/item-10001",
 		ResourceType: "Fetch", Status: 200, Noise: true, NoiseReason: "埋点/日志",
 	}
-	business := &ReqRecord{
+	business := &recording.Request{
 		RecordingID: recID, Seq: 2, Method: "POST", URL: "https://app.example.com/item-10002",
 		ResourceType: "Fetch", Status: 200,
 	}
@@ -633,11 +637,11 @@ func TestReview051Finding11GroupIDs(t *testing.T) {
 }
 
 func TestReview051Finding12UUIDTemplate(t *testing.T) {
-	got, changed := templatePath("/view-550e8400-e29b-41d4-a716-446655440000.html")
+	got, changed := recording.TemplatePath("/view-550e8400-e29b-41d4-a716-446655440000.html")
 	if !changed || got != "/view-{id}.html" {
 		t.Fatalf("uuid template: %s %v", got, changed)
 	}
-	digit, ok := templatePath("/pro/action-editComment-26875561.html")
+	digit, ok := recording.TemplatePath("/pro/action-editComment-26875561.html")
 	if !ok || digit != "/pro/action-editComment-{id}.html" {
 		t.Fatalf("digit template: %s %v", digit, ok)
 	}
@@ -646,8 +650,8 @@ func TestReview051Finding12UUIDTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := &ReqRecord{RecordingID: recID, Seq: 1, Method: "GET", URL: "https://app.example.com/view-550e8400-e29b-41d4-a716-446655440000.html", Status: 200, ResourceType: "Fetch"}
-	b := &ReqRecord{RecordingID: recID, Seq: 2, Method: "GET", URL: "https://app.example.com/view-11111111-2222-3333-4444-555555555555.html", Status: 200, ResourceType: "Fetch"}
+	a := &recording.Request{RecordingID: recID, Seq: 1, Method: "GET", URL: "https://app.example.com/view-550e8400-e29b-41d4-a716-446655440000.html", Status: 200, ResourceType: "Fetch"}
+	b := &recording.Request{RecordingID: recID, Seq: 2, Method: "GET", URL: "https://app.example.com/view-11111111-2222-3333-4444-555555555555.html", Status: 200, ResourceType: "Fetch"}
 	if err := app.store.InsertRequest(a); err != nil || app.store.InsertRequest(b) != nil {
 		t.Fatal(err)
 	}
@@ -677,7 +681,7 @@ func TestReview051Finding13NestedJSONRender(t *testing.T) {
 		URL:     "https://api.example.com/echo",
 		Headers: map[string]string{"Content-Type": "application/json"},
 		Body:    `{"body":"{\"password\":\"{{p}}\"}"}`,
-		Params:  []Param{{Name: "p", Type: "string", Required: true}},
+		Params:  []domain.Param{{Name: "p", Type: "string", Required: true}},
 	}
 	_, _, _, body, err := tool.RenderWith(map[string]any{"p": `say "hi"`}, nil, nil)
 	if err != nil {
@@ -699,8 +703,8 @@ func TestReview051Finding13NestedJSONRender(t *testing.T) {
 
 func TestReview051Finding14TrackingBoundary(t *testing.T) {
 	list := func(raw, body string) (bool, string) {
-		q := &ReqRecord{Method: "POST", URL: "https://app.example.com" + raw, ResourceType: "Fetch", RespMime: "application/json", RespBody: body, Status: 200}
-		return ClassifyNoise(q)
+		q := &recording.Request{Method: "POST", URL: "https://app.example.com" + raw, ResourceType: "Fetch", RespMime: "application/json", RespBody: body, Status: 200}
+		return recording.ClassifyNoise(q)
 	}
 	if n, why := list("/report/login", `{"ok":true}`); n {
 		t.Fatalf("/report/login: %s", why)
@@ -728,9 +732,9 @@ func TestReview051Finding15CarryEarlierOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mk := func(seq int, raw string) *ReqRecord {
+	mk := func(seq int, raw string) *recording.Request {
 		t.Helper()
-		q := &ReqRecord{
+		q := &recording.Request{
 			RecordingID: recID, Seq: seq, Method: "POST", URL: "https://app.example.com" + raw,
 			ResourceType: "Fetch", Status: 204, Noise: true, NoiseReason: "埋点/日志",
 		}
@@ -745,9 +749,9 @@ func TestReview051Finding15CarryEarlierOnly(t *testing.T) {
 	sameHigh := mk(4, "/report/log")
 	off := false
 	on := true
-	note := func(q *ReqRecord, override *bool) {
+	note := func(q *recording.Request, override *bool) {
 		t.Helper()
-		if err := app.store.SetRequestNote(RequestNote{
+		if err := app.store.SetRequestNote(recording.Note{
 			RequestID: q.ID, RecordingID: recID, Category: "query", Purpose: "标注", Source: "agent", NoiseOverride: override,
 		}); err != nil {
 			t.Fatal(err)
@@ -755,14 +759,14 @@ func TestReview051Finding15CarryEarlierOnly(t *testing.T) {
 	}
 	// A later request must not change an earlier one, and a request must not carry its own note.
 	note(late, &off)
-	if noise, why := app.classifyRecorded(early); !noise || why == "沿用之前的标注" {
+	if noise, why := app.store.ClassifyRecorded(early); !noise || why == "沿用之前的标注" {
 		t.Fatalf("later note affected earlier request: %v %s", noise, why)
 	}
 	reloaded, err := app.store.GetRequest(late.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	noise, why := app.classifyRecorded(reloaded)
+	noise, why := app.store.ClassifyRecorded(reloaded)
 	if !noise || why == "沿用之前的标注" {
 		t.Fatalf("own note was applied: %v %s", noise, why)
 	}
@@ -779,23 +783,23 @@ func TestReview051Finding15CarryEarlierOnly(t *testing.T) {
 	}
 
 	note(early, &off)
-	if noise, why := app.classifyRecorded(late); noise || why != "沿用之前的标注" {
+	if noise, why := app.store.ClassifyRecorded(late); noise || why != "沿用之前的标注" {
 		t.Fatalf("earlier note did not carry: %v %s", noise, why)
 	}
 	if err := app.store.DeleteRequestNote(early.ID); err != nil {
 		t.Fatal(err)
 	}
-	if noise, why := app.classifyRecorded(late); !noise || why == "沿用之前的标注" {
+	if noise, why := app.store.ClassifyRecorded(late); !noise || why == "沿用之前的标注" {
 		t.Fatalf("clearing the earlier note did not restore the heuristic: %v %s", noise, why)
 	}
 
 	// Same sequence: only a lower id is earlier. The earliest override wins.
 	note(sameHigh, &off)
-	if noise, why := app.classifyRecorded(sameLow); !noise || why == "沿用之前的标注" {
+	if noise, why := app.store.ClassifyRecorded(sameLow); !noise || why == "沿用之前的标注" {
 		t.Fatalf("higher id influenced same seq: %v %s", noise, why)
 	}
 	note(sameLow, &on)
-	if noise, why := app.classifyRecorded(sameHigh); !noise || why != "沿用之前的标注" {
+	if noise, why := app.store.ClassifyRecorded(sameHigh); !noise || why != "沿用之前的标注" {
 		t.Fatalf("lower id should carry and win: %v %s", noise, why)
 	}
 }
@@ -807,15 +811,15 @@ func TestReview051Finding16CarryCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	var idx string
-	if err := app.store.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_request_notes_group'`).Scan(&idx); err != nil {
+	if err := app.store.DB().QueryRow(`SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_request_notes_group'`).Scan(&idx); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(idx, "recording_id") || !strings.Contains(idx, "group_key") {
 		t.Fatalf("group index: %s", idx)
 	}
-	mk := func(seq int, raw string) *ReqRecord {
+	mk := func(seq int, raw string) *recording.Request {
 		t.Helper()
-		q := &ReqRecord{
+		q := &recording.Request{
 			RecordingID: recID, Seq: seq, Method: "POST", URL: "https://app.example.com" + raw,
 			ResourceType: "Fetch", Status: 204, Noise: true, NoiseReason: "埋点/日志",
 		}
@@ -832,7 +836,7 @@ func TestReview051Finding16CarryCache(t *testing.T) {
 		if i%2 == 0 {
 			ov = &off
 		}
-		if err := app.store.SetRequestNote(RequestNote{
+		if err := app.store.SetRequestNote(recording.Note{
 			RequestID: other.ID, RecordingID: recID, Category: "noise", Purpose: "无关", Source: "agent", NoiseOverride: ov,
 		}); err != nil {
 			t.Fatal(err)
@@ -841,12 +845,12 @@ func TestReview051Finding16CarryCache(t *testing.T) {
 	first := mk(20, "/log/collect")
 	second := mk(21, "/log/collect")
 	current := mk(30, "/log/collect")
-	if err := app.store.SetRequestNote(RequestNote{
+	if err := app.store.SetRequestNote(recording.Note{
 		RequestID: second.ID, RecordingID: recID, Category: "query", Purpose: "较晚", Source: "agent", NoiseOverride: &off,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.store.SetRequestNote(RequestNote{
+	if err := app.store.SetRequestNote(recording.Note{
 		RequestID: first.ID, RecordingID: recID, Category: "query", Purpose: "最早", Source: "agent", NoiseOverride: &on,
 	}); err != nil {
 		t.Fatal(err)
@@ -865,7 +869,7 @@ func TestReview051Finding16CarryCache(t *testing.T) {
 	if ov, ok := lookup(); !ok || !ov {
 		t.Fatalf("cached override: %v %v", ov, ok)
 	}
-	if err := app.store.SetRequestNote(RequestNote{
+	if err := app.store.SetRequestNote(recording.Note{
 		RequestID: first.ID, RecordingID: recID, Category: "query", Purpose: "改了", Source: "agent", NoiseOverride: &off,
 	}); err != nil {
 		t.Fatal(err)
@@ -883,7 +887,7 @@ func TestReview051Finding16CarryCache(t *testing.T) {
 		t.Fatal("cleared notes still carry")
 	}
 	// The current request's own note is never a source, even after the cache is warm.
-	if err := app.store.SetRequestNote(RequestNote{
+	if err := app.store.SetRequestNote(recording.Note{
 		RequestID: current.ID, RecordingID: recID, Category: "query", Purpose: "自己", Source: "agent", NoiseOverride: &off,
 	}); err != nil {
 		t.Fatal(err)
@@ -895,10 +899,10 @@ func TestReview051Finding16CarryCache(t *testing.T) {
 
 func TestReview051Finding17DraftWriteFree(t *testing.T) {
 	app, _, c := startRecServer(t)
-	q := &ReqRecord{
+	q := &recording.Request{
 		Method: "POST", URL: "https://api.example.com/secret",
 		ReqHeaders: map[string]string{"Content-Type": "application/json"},
-		ReqBody:    string(compactJSON(map[string]any{"password": fakeToken, "note": "hello"})),
+		ReqBody:    string(execution.CompactJSON(map[string]any{"password": fakeToken, "note": "hello"})),
 		Status:     200,
 	}
 	seedRecRequest(t, app, q)
@@ -935,7 +939,7 @@ func TestReview051Finding17DraftWriteFree(t *testing.T) {
 			t.Fatalf("dry_run secret default: %s", dry)
 		}
 		desc, _ := prop["description"].(string)
-		if !strings.Contains(desc, "敏感") && !strings.Contains(dry, removedSecretDesc) {
+		if !strings.Contains(desc, "敏感") && !strings.Contains(dry, execution.RemovedSecretDescription) {
 			t.Fatalf("dry_run description: %s", dry)
 		}
 	}

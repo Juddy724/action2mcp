@@ -1,6 +1,7 @@
 package app
 
 import (
+	"action2mcp/internal/recording"
 	"strings"
 	"testing"
 )
@@ -19,7 +20,7 @@ func TestSmokeSeededRecordingAnalysis(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	q := &ReqRecord{
+	q := &recording.Request{
 		RecordingID:  id,
 		Seq:          1,
 		Method:       "GET",
@@ -33,15 +34,15 @@ func TestSmokeSeededRecordingAnalysis(t *testing.T) {
 	if err := app.store.InsertRequest(q); err != nil {
 		t.Fatal(err)
 	}
-	list := smokeRecText(t, app.callRecTool(nil, "rec_list_recordings", nil))
+	list := smokeRecText(t, app.recAnalysis().Call(nil, "rec_list_recordings", nil))
 	if !strings.Contains(list, "smoke-flow") || strings.Contains(list, secret) || strings.Contains(list, "sid=") {
 		t.Fatalf("list leaked or missed the recording: %s", list)
 	}
-	view := smokeRecText(t, app.callRecTool(nil, "rec_get_recording", map[string]any{"recording_id": id}))
+	view := smokeRecText(t, app.recAnalysis().Call(nil, "rec_get_recording", map[string]any{"recording_id": id}))
 	if !strings.Contains(view, "/api/items") || strings.Contains(view, secret) || strings.Contains(view, "q=demo") {
 		t.Fatalf("recording view: %s", view)
 	}
-	ann := smokeRecText(t, app.callRecTool(nil, "rec_annotate", map[string]any{
+	ann := smokeRecText(t, app.recAnalysis().Call(nil, "rec_annotate", map[string]any{
 		"recording_id": id,
 		"summary":      "查看示例条目",
 		"notes": []any{
@@ -59,7 +60,7 @@ func TestSmokeSeededRecordingAnalysis(t *testing.T) {
 	if note.Purpose != "列出示例条目" || note.Category != "query" {
 		t.Fatalf("stored note: %+v", note)
 	}
-	detail := smokeRecText(t, app.callRecTool(nil, "rec_get_request", map[string]any{"request_id": q.ID, "max_body": 100000}))
+	detail := smokeRecText(t, app.recAnalysis().Call(nil, "rec_get_request", map[string]any{"request_id": q.ID, "max_body": 100000}))
 	if !strings.Contains(detail, "列出示例条目") || strings.Contains(detail, secret) {
 		t.Fatalf("request detail: %s", detail)
 	}

@@ -1,6 +1,10 @@
 package app
 
 import (
+	"action2mcp/internal/approval"
+	"action2mcp/internal/domain"
+	"action2mcp/internal/execution"
+	"action2mcp/internal/vault"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -8,9 +12,7 @@ import (
 	"html"
 	"io"
 	"net/http"
-	"reflect"
 	"runtime"
-	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -49,7 +51,7 @@ func TestApprovalVerbatimWholeParam(t *testing.T) {
 				}))
 				tool, _ := saveApprovalTool(t, a, upstream, "always")
 				tool.Body = `{"data":"{{label}}"}`
-				tool.Params = []Param{{Name: "label", Type: "string", Required: true}}
+				tool.Params = []domain.Param{{Name: "label", Type: "string", Required: true}}
 				if a.store.SaveTool(tool) != nil {
 					t.Fatal("cannot save verbatim argument fixture")
 				}
@@ -66,18 +68,18 @@ func TestApprovalVerbatimWholeParam(t *testing.T) {
 				}
 				handler := a.Handler()
 				w := approvalAPIRequest(t, handler, http.MethodPost, fmt.Sprintf("/api/approvals/%d/preview", pending.ID), origin, "application/json", map[string]any{"nonce": pending.Nonce, "args": args})
-				var preview ApprovalPreview
+				var preview approval.Preview
 				requireApprovalAPIResponse(t, w, http.StatusOK, &preview)
 				if preview.Preview.Body != wantBody || hits.Load() != 0 {
 					t.Fatal("confirmed preview changed argument bytes or executed the request")
 				}
 				if value.name == "json" && action == "edit" {
 					otherArgs := map[string]any{"label": strings.Replace(want, `" 123 "`, `"123"`, 1)}
-					other, err := a.PreviewApproval(pending.ID, pending.Nonce, otherArgs)
+					other, err := a.approvals().Preview(pending.ID, pending.Nonce, otherArgs)
 					if err != nil || other.PreviewHash == preview.PreviewHash {
 						t.Fatal("preview hash did not bind the exact argument whitespace")
 					}
-					requireApprovalStatus(t, a.DecideApproval(pending.ID, pending.Nonce, "edit", otherArgs, "", preview.PreviewHash), http.StatusConflict)
+					requireApprovalStatus(t, a.approvals().Decide(pending.ID, pending.Nonce, "edit", otherArgs, "", preview.PreviewHash), http.StatusConflict)
 					if hits.Load() != 0 {
 						t.Fatal("request with a mismatched preview hash executed")
 					}
@@ -93,28 +95,10 @@ func TestApprovalVerbatimWholeParam(t *testing.T) {
 				}
 				var originalJSON, finalJSON string
 				var originalArgs, finalArgs map[string]string
-				if a.store.db.QueryRow(`SELECT args_display,final_args_display FROM approvals WHERE id=?`, pending.ID).Scan(&originalJSON, &finalJSON) != nil || json.Unmarshal([]byte(originalJSON), &originalArgs) != nil || json.Unmarshal([]byte(finalJSON), &finalArgs) != nil || originalArgs["label"] != value.text || finalArgs["label"] != want {
+				if a.store.DB().QueryRow(`SELECT args_display,final_args_display FROM approvals WHERE id=?`, pending.ID).Scan(&originalJSON, &finalJSON) != nil || json.Unmarshal([]byte(originalJSON), &originalArgs) != nil || json.Unmarshal([]byte(finalJSON), &finalArgs) != nil || originalArgs["label"] != value.text || finalArgs["label"] != want {
 					t.Fatal("persisted argument displays changed the original or submitted text")
 				}
 			})
-		}
-	}
-}
-
-func TestApprovalWholeParamReplacement(t *testing.T) {
-	a := approvalTestApp(t)
-	tool := &Tool{Body: `{"data":"{{label}}"}`, Params: []Param{{Name: "label", Type: "string"}}}
-	for _, tc := range []struct{ original, edit any }{
-		{`{"note":"old","retained":true}`, `{"note":"new"}`},
-		{"note=old&retained=visible", "note=new"},
-		{map[string]any{"note": "old", "retained": true}, map[string]any{"note": "new"}},
-		{[]any{"old", "retained"}, []any{"new"}},
-		{map[string]any{"note": "old"}, ` {"note":"new","id":" 123 "} `},
-	} {
-		p := &pendingApproval{tool: tool, args: map[string]any{"label": tc.original, "untouched": "original"}}
-		merged, err := a.editApprovalArgs(p, map[string]any{"label": tc.edit})
-		if err != nil || !reflect.DeepEqual(merged["label"], tc.edit) || merged["untouched"] != "original" {
-			t.Fatal("whole-parameter replacement retained a subpath or rewrote submitted text")
 		}
 	}
 }
@@ -127,10 +111,10 @@ func TestApprovalWholeSecretParameter(t *testing.T) {
 			const origin = "http://127.0.0.1:19000"
 			original, replacement := privateTestValue(t), privateTestValue(t)
 			want := original
-			edit := secretMask
+			edit := vault.Mask
 			switch kind {
 			case "unchanged_marker":
-				edit = ApprovalSecretUnchanged
+				edit = approval.SecretUnchanged
 			case "replace", "reject_embedded_mask":
 				edit, want = replacement, replacement
 			}
@@ -144,7 +128,7 @@ func TestApprovalWholeSecretParameter(t *testing.T) {
 			}))
 			tool, _ := saveApprovalTool(t, a, upstream, "always")
 			tool.Body = `{"data":"{{label}}"}`
-			tool.Params = []Param{{Name: "label", Type: "string", Required: true, Secret: true}}
+			tool.Params = []domain.Param{{Name: "label", Type: "string", Required: true, Secret: true}}
 			if a.store.SaveTool(tool) != nil {
 				t.Fatal("cannot save whole-secret fixture")
 			}
@@ -152,12 +136,12 @@ func TestApprovalWholeSecretParameter(t *testing.T) {
 			defer cancel()
 			call := startApprovalCall(a, ctx, map[string]any{"label": original})
 			pending := pendingApprovals(t, a, 1)[0]
-			if pending.ArgsDisplay["label"] != secretMask {
+			if pending.ArgsDisplay["label"] != vault.Mask {
 				t.Fatal("secret argument was not wholly masked")
 			}
 			handler := a.Handler()
 			if kind == "reject_embedded_mask" {
-				for _, invalid := range []any{"prefix" + secretMask, secretMask + "suffix", `{"password":"******","note":"new"}`, map[string]any{"nested": secretMask}} {
+				for _, invalid := range []any{"prefix" + vault.Mask, vault.Mask + "suffix", `{"password":"******","note":"new"}`, map[string]any{"nested": vault.Mask}} {
 					for _, endpoint := range []string{"preview", "decide"} {
 						w := approvalAPIRequest(t, handler, http.MethodPost, fmt.Sprintf("/api/approvals/%d/%s", pending.ID, endpoint), origin, "application/json", map[string]any{"nonce": pending.Nonce, "args": map[string]any{"label": invalid}, "action": "edit", "preview_hash": pending.PreviewHash})
 						requireApprovalAPIResponse(t, w, http.StatusBadRequest, nil)
@@ -169,7 +153,7 @@ func TestApprovalWholeSecretParameter(t *testing.T) {
 				}
 			}
 			args := map[string]any{"label": edit}
-			preview, err := a.PreviewApproval(pending.ID, pending.Nonce, args)
+			preview, err := a.approvals().Preview(pending.ID, pending.Nonce, args)
 			if err != nil {
 				t.Fatal("whole-secret preview failed")
 			}
@@ -180,7 +164,7 @@ func TestApprovalWholeSecretParameter(t *testing.T) {
 			} else if preview.PreviewHash == pending.PreviewHash {
 				t.Fatal("replacement secret did not change the bound request")
 			}
-			if a.DecideApproval(pending.ID, pending.Nonce, "edit", args, "", preview.PreviewHash) != nil {
+			if a.approvals().Decide(pending.ID, pending.Nonce, "edit", args, "", preview.PreviewHash) != nil {
 				t.Fatal("whole-secret decision failed")
 			}
 			reply := getApprovalReply(t, call)
@@ -190,7 +174,7 @@ func TestApprovalWholeSecretParameter(t *testing.T) {
 			}
 			history := listApprovalAPI(t, handler, origin, "all")
 			requirePrivateApprovalValuesAbsent(t, history, original, replacement)
-			if len(history) != 1 || history[0].FinalArgsDisplay["label"] != secretMask {
+			if len(history) != 1 || history[0].FinalArgsDisplay["label"] != vault.Mask {
 				t.Fatal("whole-secret history did not retain the wholesale mask")
 			}
 		})
@@ -225,12 +209,12 @@ func TestApprovalBase64SubstringOutputs(t *testing.T) {
 								t.Fatal("public base64 argument was not displayed verbatim")
 							}
 						},
-						checkExecution: func(p RequestPreview, args map[string]any) bool {
+						checkExecution: func(p domain.RequestPreview, args map[string]any) bool {
 							var body map[string]string
 							return json.Unmarshal([]byte(p.Body), &body) == nil && body["token"] == private && body["data"] == args["label"]
 						},
 						checkResult: func(t *testing.T, result string) {
-							if result != "HTTP 200" && !strings.Contains(result, secretMask+suffix.text) {
+							if result != "HTTP 200" && !strings.Contains(result, vault.Mask+suffix.text) {
 								t.Fatal("base64 substring scrub lost the mask or trailing text")
 							}
 						},
@@ -272,27 +256,27 @@ func TestApprovalURLUserinfoDisplaysAndErrors(t *testing.T) {
 						},
 						args: map[string]any{"label": private}, private: []string{private}, secretLabel: template, failureText: failureText,
 						checkPrepared: func(t *testing.T, p *PreparedCall) {
-							if !slices.Contains(p.secretValues, private) {
+							if execution.New(execution.Options{}).ScrubPrepared(private, p, false) != vault.Mask {
 								t.Fatal("URL userinfo password was not collected for error scrubbing")
 							}
 						},
 						checkResult: func(t *testing.T, result string) {
-							if failure && !strings.Contains(result, "demo:"+secretMask+"@") {
+							if failure && !strings.Contains(result, "demo:"+vault.Mask+"@") {
 								t.Fatal("URL userinfo error lost the username or password mask")
 							}
 						},
-						checkExecution: func(p RequestPreview, _ map[string]any) bool {
+						checkExecution: func(p domain.RequestPreview, _ map[string]any) bool {
 							if header {
 								return strings.Contains(p.Headers["X-Target"], rawURL)
 							}
 							return p.URL == rawURL
 						},
-						checkPreview: func(t *testing.T, p RequestPreview) {
+						checkPreview: func(t *testing.T, p domain.RequestPreview) {
 							value := p.URL
 							if header {
 								value = p.Headers["X-Target"]
 							}
-							if !strings.Contains(value, "demo:"+secretMask+"@") {
+							if !strings.Contains(value, "demo:"+vault.Mask+"@") {
 								t.Fatal("URL userinfo preview lost the username or password mask")
 							}
 						},
@@ -311,15 +295,15 @@ func TestApprovalContainerResourceBounds(t *testing.T) {
 		{"wide_array", "[" + strings.Repeat("0,", 60000) + `{"password":"` + private + `","label":"{{label}}"}]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tool := &Tool{Method: "POST", URL: "https://example.com/api", Body: tc.body, Params: []Param{{Name: "label", Type: "string"}}}
+			tool := &Tool{Method: "POST", URL: "https://example.com/api", Body: tc.body, Params: []domain.Param{{Name: "label", Type: "string"}}}
 			runtime.GC()
 			var before, after runtime.MemStats
 			runtime.ReadMemStats(&before)
 			start := time.Now()
-			preview := redactPreview(RequestPreview{Body: tc.body})
-			prepared, err := a.Prepare(tool, map[string]any{"label": private})
-			secret := paramIsSecret(tool, tool.Params[0])
-			display := a.approvalArgs(tool, map[string]any{"label": private}, nil)
+			preview := execution.RedactPreview(domain.RequestPreview{Body: tc.body})
+			prepared, err := a.executor().Prepare(tool, map[string]any{"label": private})
+			secret := execution.ParamIsSecret(tool, tool.Params[0])
+			display := a.executor().ApprovalArgs(tool, map[string]any{"label": private}, nil)
 			elapsed := time.Since(start)
 			runtime.ReadMemStats(&after)
 			if elapsed >= 2*time.Second {
@@ -329,7 +313,7 @@ func TestApprovalContainerResourceBounds(t *testing.T) {
 			if allocated > 64<<20 {
 				t.Fatal("bounded approval analysis exceeded its allocation allowance")
 			}
-			if err != nil || !secret || preview.Body != secretMask || prepared.Preview.Body != secretMask || display["label"] != secretMask {
+			if err != nil || !secret || preview.Body != vault.Mask || prepared.Preview.Body != vault.Mask || display["label"] != vault.Mask {
 				t.Fatal("over-limit approval container did not fail closed")
 			}
 			requirePrivateApprovalValuesAbsent(t, prepared.Preview, private)
@@ -343,7 +327,7 @@ func TestApprovalHTMLLookaheadResourceBound(t *testing.T) {
 	private := privateTestValue(t) + `<&"`
 	text := strings.Repeat("&", 160000)
 	start := time.Now()
-	got := a.scrubApprovalText(text, []string{private})
+	got := a.executor().ScrubApprovalText(text, []string{private})
 	elapsed := time.Since(start)
 	if elapsed >= time.Second {
 		t.Fatal("HTML lookahead exceeded one second on unterminated entities")
@@ -351,7 +335,7 @@ func TestApprovalHTMLLookaheadResourceBound(t *testing.T) {
 	if got != text {
 		t.Fatal("unterminated entities changed during scrubbing")
 	}
-	if a.scrubApprovalText("before "+html.EscapeString(private)+" after", []string{private}) != "before "+secretMask+" after" {
+	if a.executor().ScrubApprovalText("before "+html.EscapeString(private)+" after", []string{private}) != "before "+vault.Mask+" after" {
 		t.Fatal("bounded HTML entity scrubbing missed a private value")
 	}
 	t.Logf("unterminated HTML scan took %s", elapsed)

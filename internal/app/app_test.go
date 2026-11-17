@@ -1,6 +1,9 @@
 package app
 
 import (
+	"action2mcp/internal/domain"
+	"action2mcp/internal/mcp"
+	"action2mcp/internal/store"
 	"bytes"
 	"encoding/json"
 	"io"
@@ -47,17 +50,17 @@ func TestServerMCPAndExport(t *testing.T) {
 
 	tool := &Tool{Approval: "off", Name: "echo_search", Title: "查询", Method: "POST", URL: upstream.URL + "/api/search",
 		Headers: map[string]string{"Content-Type": "application/json"},
-		Body:    `{"kw":"{{kw}}"}`, Params: []Param{{Name: "kw", Type: "string", Required: true}},
+		Body:    `{"kw":"{{kw}}"}`, Params: []domain.Param{{Name: "kw", Type: "string", Required: true}},
 		CredHeaders: []string{"cookie"}}
 	if err := app.store.SaveTool(tool); err != nil {
 		t.Fatal(err)
 	}
-	pack := &Pack{Name: "测试包", Enabled: true, ToolIDs: []int64{tool.ID}}
+	pack := &store.Pack{Name: "测试包", Enabled: true, ToolIDs: []int64{tool.ID}}
 	if err := app.store.SavePack(pack); err != nil {
 		t.Fatal(err)
 	}
 	app.store.ReplaceCookies([]Cookie{{Name: "sid", Value: "secret-session", Domain: "127.0.0.1", Path: "/"}})
-	app.store.SetSetting("mcp_mode", ModeFlat) // this test covers the 0.3.0-style flat mode
+	app.store.SetSetting("mcp_mode", mcp.ModeFlat) // this test covers the 0.3.0-style flat mode
 
 	sid := ""
 	rpc := func(body string) map[string]any {
@@ -106,7 +109,7 @@ func TestServerMCPAndExport(t *testing.T) {
 		t.Fatal("foreign origin not rejected")
 	}
 
-	exp, err := app.Export()
+	exp, err := app.transfer().Export()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,25 +118,5 @@ func TestServerMCPAndExport(t *testing.T) {
 	}
 	if !bytes.Contains(exp, []byte("echo_search")) {
 		t.Fatal("export missing tool")
-	}
-}
-
-func TestNoiseClassification(t *testing.T) {
-	cases := []struct {
-		q     ReqRecord
-		noise bool
-	}{
-		{ReqRecord{Method: "GET", URL: "https://x.com/static/app.js", ResourceType: "Script"}, true},
-		{ReqRecord{Method: "OPTIONS", URL: "https://x.com/api/order"}, true},
-		{ReqRecord{Method: "POST", URL: "https://x.com/api/order/create", ResourceType: "Fetch", Status: 200, RespMime: "application/json"}, false},
-		{ReqRecord{Method: "WS", URL: "wss://x.com/ws/logs", ResourceType: "WebSocket", Status: 101}, false},
-		{ReqRecord{Method: "WS", URL: "wss://x.com/ws", ResourceType: "WebSocket", Status: 0}, true},
-		{ReqRecord{Method: "WS", URL: "wss://www.google-analytics.com/g/collect", ResourceType: "WebSocket", Status: 101}, true},
-		{ReqRecord{Method: "WS", URL: "wss://logs.example.com/log", ResourceType: "WebSocket", Status: 101}, false},
-	}
-	for _, c := range cases {
-		if n, why := ClassifyNoise(&c.q); n != c.noise {
-			t.Errorf("%s %s: noise=%v (%s) want %v", c.q.Method, c.q.URL, n, why, c.noise)
-		}
 	}
 }

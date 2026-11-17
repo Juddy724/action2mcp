@@ -1,6 +1,10 @@
 package app
 
 import (
+	"action2mcp/internal/execution"
+	"action2mcp/internal/mwconfig"
+	"action2mcp/internal/recording"
+	"action2mcp/internal/store"
 	"bytes"
 	"encoding/json"
 	"mime/multipart"
@@ -29,16 +33,16 @@ func TestSensitiveKeyTable(t *testing.T) {
 		"retry_count", "name_length", "passwordHint", "value",
 	}
 	for _, k := range yes {
-		if !isSensitiveKey(k) {
+		if !execution.IsSensitiveKey(k) {
 			t.Errorf("expected sensitive: %s", k)
 		}
 	}
 	for _, k := range no {
-		if isSensitiveKey(k) {
+		if execution.IsSensitiveKey(k) {
 			t.Errorf("expected not sensitive: %s", k)
 		}
 	}
-	if !pathSensitive("credentials.value") || isSensitiveKey("credentials.value") {
+	if !execution.PathSensitive("credentials.value") || execution.IsSensitiveKey("credentials.value") {
 		t.Fatal("children of a sensitive key are sensitive; the last segment alone is not")
 	}
 }
@@ -51,12 +55,12 @@ func TestRec051LeaksAndOvermask(t *testing.T) {
 	if err := app.vault.Upsert("short_true", "secret", "true", "https://api.example.com", ""); err != nil {
 		t.Fatal(err)
 	}
-	frame := "execute " + string(compactJSON(map[string]any{"data": map[string]any{"n": 1}, "token": fakeToken}))
-	reqBody := string(compactJSON(map[string]any{"frames": []any{map[string]any{"op": 1, "text": frame}}}))
-	inner := string(compactJSON(map[string]any{"token": fakeJWT}))
-	mid := string(compactJSON(map[string]any{"headers": inner}))
-	resp := string(compactJSON(map[string]any{"body": mid, "ua": "Mozilla/5.0 (X11) Chrome/157.0.0.0", "q": "zh;q=0.9"}))
-	q := &ReqRecord{
+	frame := "execute " + string(execution.CompactJSON(map[string]any{"data": map[string]any{"n": 1}, "token": fakeToken}))
+	reqBody := string(execution.CompactJSON(map[string]any{"frames": []any{map[string]any{"op": 1, "text": frame}}}))
+	inner := string(execution.CompactJSON(map[string]any{"token": fakeJWT}))
+	mid := string(execution.CompactJSON(map[string]any{"headers": inner}))
+	resp := string(execution.CompactJSON(map[string]any{"body": mid, "ua": "Mozilla/5.0 (X11) Chrome/157.0.0.0", "q": "zh;q=0.9"}))
+	q := &recording.Request{
 		Method: "GET",
 		URL:    "https://api.example.com/message-ajaxGetMessage-1.html?rpcId=1.1",
 		ReqHeaders: map[string]string{
@@ -92,15 +96,15 @@ func TestRec051LeaksAndOvermask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	blob := string(compactJSON(tool))
+	blob := string(execution.CompactJSON(tool))
 	rejectRecLiterals(t, blob, fakeToken, fakeJWT, fakeSID)
-	if !strings.Contains(blob, "{{secret.") && !strings.Contains(blob, removedSecretDesc) {
+	if !strings.Contains(blob, "{{secret.") && !strings.Contains(blob, execution.RemovedSecretDescription) {
 		t.Fatalf("nested secret was not parameterized: %s", blob)
 	}
 	_, listed := c.call("tools/list", map[string]any{})
-	rejectRecLiterals(t, string(compactJSON(listed)), fakeToken, fakeJWT, fakeSID)
+	rejectRecLiterals(t, string(execution.CompactJSON(listed)), fakeToken, fakeJWT, fakeSID)
 
-	if err := app.store.SavePack(&Pack{Name: "已有包", Enabled: true}); err != nil {
+	if err := app.store.SavePack(&store.Pack{Name: "已有包", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	packs, err := app.store.ListPacks()
@@ -131,9 +135,9 @@ func TestRec051GroupingAnnotateAndCompact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mk := func(seq int, method, raw string, noise bool, reason, res string, status int) *ReqRecord {
+	mk := func(seq int, method, raw string, noise bool, reason, res string, status int) *recording.Request {
 		t.Helper()
-		q := &ReqRecord{
+		q := &recording.Request{
 			RecordingID: recID, Seq: seq, Method: method, URL: "https://app.example.com" + raw,
 			ResourceType: res, Status: status, Noise: noise, NoiseReason: reason, RespMime: "application/json",
 		}
@@ -264,12 +268,12 @@ func TestRec051GroupingAnnotateAndCompact(t *testing.T) {
 	}
 }
 
-func mustCompact(v any) string { return string(compactJSON(v)) }
+func mustCompact(v any) string { return string(execution.CompactJSON(v)) }
 
 func TestRec051PartialMultipartAndSave(t *testing.T) {
 	app, _, c := startRecServer(t)
 	body := `{"token":"` + fakeToken + `","note":"` + strings.Repeat("b", 40) + "\n…[已截断]" + fakeJWT
-	q := &ReqRecord{
+	q := &recording.Request{
 		Method: "POST", URL: "https://api.example.com/api/taskLog/list",
 		ResourceType: "Fetch", Status: 200, RespMime: "application/json",
 		ReqHeaders: map[string]string{"Content-Type": "application/json"},
@@ -311,7 +315,7 @@ func TestRec051PartialMultipartAndSave(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
-	mq := &ReqRecord{
+	mq := &recording.Request{
 		Method: "POST", URL: "https://api.example.com/upload",
 		ReqHeaders:   map[string]string{"Content-Type": w.FormDataContentType()},
 		ReqBody:      buf.String(),
@@ -338,7 +342,7 @@ func TestRec051PartialMultipartAndSave(t *testing.T) {
 	if !sawTitle || sawFile {
 		t.Fatalf("multipart candidates: %s", mustCompact(md["candidates"]))
 	}
-	gq := &ReqRecord{Method: "GET", URL: "https://api.example.com/page", ResourceType: "Document", Status: 200}
+	gq := &recording.Request{Method: "GET", URL: "https://api.example.com/page", ResourceType: "Document", Status: 200}
 	seedRecRequest(t, app, gq)
 	gd := decodeRec(t, mustTool(t, c, "rec_get_request", map[string]any{"request_id": gq.ID}))
 	if gd["req_body_note"] != "请求体未采集（该方法通常没有请求体）" {
@@ -403,8 +407,8 @@ func problemHas(probs []any, phrase string) bool {
 
 func TestRec051NoiseAndMiddlewareCount(t *testing.T) {
 	list := func(method, raw, res, mime, body string, status int) (bool, string) {
-		q := &ReqRecord{Method: method, URL: "https://app.example.com" + raw, ResourceType: res, RespMime: mime, RespBody: body, Status: status}
-		return ClassifyNoise(q)
+		q := &recording.Request{Method: method, URL: "https://app.example.com" + raw, ResourceType: res, RespMime: mime, RespBody: body, Status: status}
+		return recording.ClassifyNoise(q)
 	}
 	if n, why := list("POST", "/api/taskLog/list", "Fetch", "application/json", `{"list":[{"id":1}]}`, 200); n {
 		t.Fatalf("taskLog list: %s", why)
@@ -424,7 +428,7 @@ func TestRec051NoiseAndMiddlewareCount(t *testing.T) {
 	if n, _ := list("POST", "/mars/general/batch/collect", "Fetch", "text/plain", "", 200); !n {
 		t.Fatal("batch collect")
 	}
-	if n, _ := ClassifyNoise(&ReqRecord{Method: "GET", URL: "https://www.google-analytics.com/g/collect", ResourceType: "Fetch", Status: 200}); !n {
+	if n, _ := recording.ClassifyNoise(&recording.Request{Method: "GET", URL: "https://www.google-analytics.com/g/collect", ResourceType: "Fetch", Status: 200}); !n {
 		t.Fatal("analytics host")
 	}
 	if n, why := list("GET", "/api/userinfo", "Fetch", "application/json", `{"data":{"records":[{"id":1}],"total":1}}`, 200); n {
@@ -436,21 +440,21 @@ func TestRec051NoiseAndMiddlewareCount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first := &ReqRecord{RecordingID: recID, Seq: 1, Method: "POST", URL: "https://app.example.com/log/collect", ResourceType: "Fetch", Status: 204, RespBody: ""}
+	first := &recording.Request{RecordingID: recID, Seq: 1, Method: "POST", URL: "https://app.example.com/log/collect", ResourceType: "Fetch", Status: 204, RespBody: ""}
 	if err := app.store.InsertRequest(first); err != nil {
 		t.Fatal(err)
 	}
 	off := false
-	if err := app.store.SetRequestNote(RequestNote{RequestID: first.ID, RecordingID: recID, Category: "query", Purpose: "不是埋点", Source: "agent", NoiseOverride: &off}); err != nil {
+	if err := app.store.SetRequestNote(recording.Note{RequestID: first.ID, RecordingID: recID, Category: "query", Purpose: "不是埋点", Source: "agent", NoiseOverride: &off}); err != nil {
 		t.Fatal(err)
 	}
-	next := &ReqRecord{RecordingID: recID, Method: "POST", URL: "https://app.example.com/log/collect", ResourceType: "Fetch", Status: 204}
-	noise, why := app.classifyRecorded(next)
+	next := &recording.Request{RecordingID: recID, Method: "POST", URL: "https://app.example.com/log/collect", ResourceType: "Fetch", Status: 204}
+	noise, why := app.store.ClassifyRecorded(next)
 	if noise || why != "沿用之前的标注" {
 		t.Fatalf("override carry: %v %s", noise, why)
 	}
 
-	db := &Middleware{Name: "订单库", Type: "mysql", Config: MWConfig{Host: "127.0.0.1", Port: 1, User: "u"}}
+	db := &mwconfig.Middleware{Name: "订单库", Type: "mysql", Config: mwconfig.MWConfig{Host: "127.0.0.1", Port: 1, User: "u"}}
 	if err := app.store.SaveMiddleware(db); err != nil {
 		t.Fatal(err)
 	}
@@ -458,7 +462,7 @@ func TestRec051NoiseAndMiddlewareCount(t *testing.T) {
 	if err := app.store.SaveTool(echo); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.store.SavePack(&Pack{Name: "计数包", Enabled: true, ToolIDs: []int64{echo.ID}, MiddlewareIDs: []int64{db.ID}}); err != nil {
+	if err := app.store.SavePack(&store.Pack{Name: "计数包", Enabled: true, ToolIDs: []int64{echo.ID}, MiddlewareIDs: []int64{db.ID}}); err != nil {
 		t.Fatal(err)
 	}
 	txt, _ := c.tool("list_packs", map[string]any{})
@@ -486,7 +490,7 @@ func TestRec051NoiseAndMiddlewareCount(t *testing.T) {
 func TestRecBodyTruncationMarkers(t *testing.T) {
 	app, _, c := startRecServer(t)
 	long := `{"items":[` + strings.Repeat(`{"name":"abcdefghij","n":1},`, 60) + `{"name":"end"}]}`
-	q := &ReqRecord{
+	q := &recording.Request{
 		Method: "POST", URL: "https://api.example.com/api/list",
 		ResourceType: "Fetch", Status: 200, RespMime: "application/json",
 		ReqHeaders: map[string]string{"Content-Type": "application/json"},

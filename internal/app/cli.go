@@ -1,6 +1,8 @@
 package app
 
 import (
+	"action2mcp/internal/config"
+	"action2mcp/internal/mcp"
 	"bufio"
 	"bytes"
 	"context"
@@ -41,6 +43,9 @@ const usage = `Action2MCP %s —— 把浏览器里的业务操作录成 AI 可�
 `
 
 // Main runs the Action2MCP CLI. Arguments, stdio, and exit codes are unchanged.
+// exitServer ends the serve process; cmdServe installs the real shutdown.
+var exitServer = func() {}
+
 func Main() {
 	log.SetFlags(log.Ltime)
 	args := os.Args[1:]
@@ -49,7 +54,7 @@ func Main() {
 		cmd = args[0]
 		args = args[1:]
 	}
-	dataDir := resolveDataDir()
+	dataDir := config.ResolveDataDir()
 	var err error
 	switch cmd {
 	case "serve", "start":
@@ -115,7 +120,7 @@ func Main() {
 }
 
 func baseURL(dataDir string) string {
-	cfg := LoadConfig(dataDir)
+	cfg := config.LoadConfig(dataDir)
 	return fmt.Sprintf("http://127.0.0.1:%d", cfg.Port)
 }
 
@@ -188,7 +193,7 @@ func samePath(a, b string) bool {
 }
 
 func portTakenErr(dataDir, other string) error {
-	cfg := LoadConfig(dataDir)
+	cfg := config.LoadConfig(dataDir)
 	return fmt.Errorf("端口 %d 已被另一份 Action2MCP 占用（它的数据目录: %s）。\n请先在那份程序目录里执行 a2m quit 关闭它，或者修改本目录 data/config.json 里的 port 换一个端口", cfg.Port, other)
 }
 
@@ -224,7 +229,7 @@ func ensureServer(dataDir string) error {
 }
 
 func cmdServe(dataDir string, open bool) error {
-	cfg := LoadConfig(dataDir)
+	cfg := config.LoadConfig(dataDir)
 	consoleURL := fmt.Sprintf("http://localhost:%d/", cfg.Port)
 	if _, other := probeServer(dataDir); other != "" {
 		return portTakenErr(dataDir, other)
@@ -244,7 +249,7 @@ func cmdServe(dataDir string, open bool) error {
 	if err != nil {
 		return fmt.Errorf("端口 %d 被占用: %v（可在 data/config.json 修改 port）", cfg.Port, err)
 	}
-	if err := app.store.CancelPendingApprovals(); err != nil {
+	if err := app.store.Approvals.CancelPending(); err != nil {
 		ln.Close()
 		app.Shutdown()
 		return fmt.Errorf("清理遗留审批失败：%w", err)
@@ -322,7 +327,7 @@ func cmdStop(dataDir string) error {
 	if _, err := apiCall(dataDir, "POST", "/api/recordings/stop", map[string]string{"reason": "command"}, &info); err != nil {
 		return err
 	}
-	fmt.Printf("■ 已结束录制 #%d「%s」：共捕获 %d 个请求，其中 %d 个可能是业务请求。\n  打开控制台查看并保存为工具: http://localhost:%d/#/recordings/%d\n", info.RecordingID, info.Name, info.Count, info.Useful, LoadConfig(dataDir).Port, info.RecordingID)
+	fmt.Printf("■ 已结束录制 #%d「%s」：共捕获 %d 个请求，其中 %d 个可能是业务请求。\n  打开控制台查看并保存为工具: http://localhost:%d/#/recordings/%d\n", info.RecordingID, info.Name, info.Count, info.Useful, config.LoadConfig(dataDir).Port, info.RecordingID)
 	return nil
 }
 
@@ -350,7 +355,7 @@ func cmdStatus(dataDir string) error {
 	} else {
 		fmt.Println("当前没有录制")
 	}
-	if st.MCPMode == ModeFlat {
+	if st.MCPMode == mcp.ModeFlat {
 		fmt.Printf("工具 %d 个，已开启流程包 %d 个，MCP 平铺模式：对 AI 暴露 %d 个工具\n", st.TotalTools, st.EnabledPacks, st.ExposedTools)
 	} else {
 		fmt.Printf("工具 %d 个，已开启流程包 %d 个（共 %d 个工具），MCP 阶梯模式：AI 先看到 4 个入口工具，按需加载流程包\n", st.TotalTools, st.EnabledPacks, st.ExposedTools)
@@ -363,7 +368,7 @@ func cmdExport(dataDir, file string) error {
 	if err != nil {
 		return err
 	}
-	b, err := app.Export()
+	b, err := app.transfer().Export()
 	if err != nil {
 		return err
 	}
@@ -383,7 +388,7 @@ func cmdImport(dataDir, file string) error {
 	if err != nil {
 		return err
 	}
-	r, err := app.Import(b)
+	r, err := app.transfer().Import(b)
 	if err != nil {
 		return err
 	}

@@ -1,6 +1,11 @@
 package app
 
 import (
+	"action2mcp/internal/domain"
+	"action2mcp/internal/execution"
+	"action2mcp/internal/mcp"
+	"action2mcp/internal/store"
+	"action2mcp/internal/vault"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -20,7 +25,7 @@ func wrapApprovalJSONDepth(inner string, depth int) string {
 
 func assertNoSecretLeak(t *testing.T, where, text, secret string) {
 	t.Helper()
-	if secret == "" || secret == secretMask {
+	if secret == "" || secret == vault.Mask {
 		t.Fatal("invalid secret fixture")
 	}
 	if strings.Contains(text, secret) {
@@ -64,7 +69,7 @@ func TestMCPSecretParamDefaultsHidden(t *testing.T) {
 		URL:         "https://example.com/echo",
 		Headers:     map[string]string{"Content-Type": "application/json"},
 		Body:        `{"token":{{token}},"password":{{password}},"authorization":{{label}},"note":{{note}}}`,
-		Params: []Param{
+		Params: []domain.Param{
 			{Name: "token", Type: "string", Secret: true, Default: flagSecret, Description: "token default " + flagSecret},
 			{Name: "password", Type: "string", Default: keySecret},
 			{Name: "label", Type: "string", Default: posSecret},
@@ -74,7 +79,7 @@ func TestMCPSecretParamDefaultsHidden(t *testing.T) {
 	if err := app.store.SaveTool(tool); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.store.SavePack(&Pack{Name: "脱敏包", Description: "desc " + flagSecret, Scenarios: "scene " + keySecret, Enabled: true, ToolIDs: []int64{tool.ID}}); err != nil {
+	if err := app.store.SavePack(&store.Pack{Name: "脱敏包", Description: "desc " + flagSecret, Scenarios: "scene " + keySecret, Enabled: true, ToolIDs: []int64{tool.ID}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -89,7 +94,7 @@ func TestMCPSecretParamDefaultsHidden(t *testing.T) {
 
 	c := &mcpTestClient{t: t, url: srv.URL + "/mcp"}
 	_, init := c.call("initialize", map[string]any{"protocolVersion": "2025-06-18", "clientInfo": map[string]any{"name": "schema-test"}})
-	forbid("tiered initialize", string(compactJSON(init)))
+	forbid("tiered initialize", string(execution.CompactJSON(init)))
 	listedPacks, _ := c.tool("list_packs", map[string]any{})
 	forbid("list_packs", listedPacks)
 	loaded, isErr := c.tool("load_pack", map[string]any{"pack": "脱敏包"})
@@ -101,16 +106,16 @@ func TestMCPSecretParamDefaultsHidden(t *testing.T) {
 		t.Fatal("load_pack hid a public parameter default")
 	}
 	_, listed := c.call("tools/list", map[string]any{})
-	forbid("tiered tools/list", string(compactJSON(listed)))
+	forbid("tiered tools/list", string(execution.CompactJSON(listed)))
 
-	if err := app.store.SetSetting("mcp_mode", ModeFlat); err != nil {
+	if err := app.store.SetSetting("mcp_mode", mcp.ModeFlat); err != nil {
 		t.Fatal(err)
 	}
 	flat := &mcpTestClient{t: t, url: srv.URL + "/mcp"}
 	_, finit := flat.call("initialize", map[string]any{"protocolVersion": "2025-06-18", "clientInfo": map[string]any{"name": "schema-flat"}})
-	forbid("flat initialize", string(compactJSON(finit)))
+	forbid("flat initialize", string(execution.CompactJSON(finit)))
 	_, flist := flat.call("tools/list", map[string]any{})
-	body := string(compactJSON(flist))
+	body := string(execution.CompactJSON(flist))
 	forbid("flat tools/list", body)
 	if !strings.Contains(body, publicDefault) {
 		t.Fatal("tools/list hid a public parameter default")
@@ -119,20 +124,7 @@ func TestMCPSecretParamDefaultsHidden(t *testing.T) {
 
 func TestMCPLimitedTemplateSecretsScrubbed(t *testing.T) {
 	secret := "LimitSecretValue-R7/deep"
-	body := wrapApprovalJSONDepth(`{"password":"`+secret+`"}`, maxApprovalDepth+1)
-	analysis := analyzeApprovalTemplate(&Tool{Body: body, Headers: map[string]string{"Content-Type": "application/json"}})
-	if !analysis.limitedBody {
-		t.Fatal("expected the nested template to hit the analysis limit")
-	}
-	found := false
-	for _, value := range analysis.values {
-		if value == secret {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("limited analysis did not collect the sensitive literal")
-	}
+	body := wrapApprovalJSONDepth(`{"password":"`+secret+`"}`, vault.MaxDecodeDepth+1)
 
 	upstream := newApprovalTarget(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		data, _ := io.ReadAll(r.Body)
@@ -150,20 +142,19 @@ func TestMCPLimitedTemplateSecretsScrubbed(t *testing.T) {
 	if err := a.store.SaveTool(tool); err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := a.Prepare(tool, map[string]any{})
+	prepared, err := a.executor().Prepare(tool, map[string]any{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	joined := strings.Join(prepared.secretValues, "\n")
-	if !strings.Contains(joined, secret) {
+	if a.executor().ScrubPrepared(secret, prepared, false) != vault.Mask {
 		t.Fatal("prepared secretValues omitted the limited literal")
 	}
-	res, err := a.Send(prepared)
+	res, err := a.executor().Send(prepared)
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertNoSecretLeak(t, "Send body", res.Body, secret)
-	assertNoSecretLeak(t, "scrubbed error", a.scrubApprovalText("upstream echoed "+secret, prepared.secretValues), secret)
+	assertNoSecretLeak(t, "scrubbed error", a.executor().ScrubPrepared("upstream echoed "+secret, prepared, false), secret)
 
 	reply := getApprovalReply(t, startApprovalCall(a, context.Background(), map[string]any{}))
 	assertNoSecretLeak(t, "MCP call result", reply.text, secret)
@@ -183,13 +174,13 @@ func TestMCPLimitedTemplateSecretsScrubbed(t *testing.T) {
 	approveRecord(t, a, pending)
 	errReply := getApprovalReply(t, call)
 	assertNoSecretLeak(t, "MCP error result", errReply.text, secret)
-	rows, err := a.ListApprovals("all", 10)
+	rows, err := a.approvals().List("all", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, row := range rows {
 		assertNoSecretLeak(t, "approvals.result", row.Result, secret)
-		assertNoSecretLeak(t, "approval preview", string(compactJSON(row.Preview)), secret)
+		assertNoSecretLeak(t, "approval preview", string(execution.CompactJSON(row.Preview)), secret)
 	}
 }
 
@@ -217,7 +208,7 @@ func TestVaultScrubEncodingAndPackGuide(t *testing.T) {
 		t.Fatal(err)
 	}
 	guide := "先调用 guide_echo。密文 " + encoded + " 不能出现。引用 {{secret.svc_token}} 保持原样。"
-	if err := app.store.SavePack(&Pack{Name: "回显包", Description: "回显", Enabled: true, Guide: guide, ToolIDs: []int64{tool.ID}}); err != nil {
+	if err := app.store.SavePack(&store.Pack{Name: "回显包", Description: "回显", Enabled: true, Guide: guide, ToolIDs: []int64{tool.ID}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -225,14 +216,14 @@ func TestVaultScrubEncodingAndPackGuide(t *testing.T) {
 	defer srv.Close()
 	c := &mcpTestClient{t: t, url: srv.URL + "/mcp"}
 	_, init := c.call("initialize", map[string]any{"protocolVersion": "2025-06-18", "clientInfo": map[string]any{"name": "guide-enc"}})
-	assertNoSecretLeak(t, "tiered initialize", string(compactJSON(init)), secret)
+	assertNoSecretLeak(t, "tiered initialize", string(execution.CompactJSON(init)), secret)
 	loaded, isErr := c.tool("load_pack", map[string]any{"pack": "回显包"})
 	if isErr || !strings.Contains(loaded, "{{secret.svc_token}}") {
 		t.Fatalf("load_pack: %s", loaded)
 	}
 	assertNoSecretLeak(t, "load_pack guide", loaded, secret)
 
-	if err := app.store.SetSetting("mcp_mode", ModeFlat); err != nil {
+	if err := app.store.SetSetting("mcp_mode", mcp.ModeFlat); err != nil {
 		t.Fatal(err)
 	}
 	flat := &mcpTestClient{t: t, url: srv.URL + "/mcp"}
@@ -241,20 +232,5 @@ func TestVaultScrubEncodingAndPackGuide(t *testing.T) {
 	if !strings.Contains(instr, "{{secret.svc_token}}") {
 		t.Fatal("flat initialize dropped the secret reference")
 	}
-	assertNoSecretLeak(t, "flat initialize", string(compactJSON(finit)), secret)
-}
-
-func TestLimitedLexicalScanUnicodeKey(t *testing.T) {
-	secret := "UnicodeLimitSecret-R7"
-	body := wrapApprovalJSONDepth(`{"\u0070assword":"`+secret+`"}`, maxApprovalDepth+1)
-	analysis := analyzeApprovalTemplate(&Tool{Body: body, Headers: map[string]string{"Content-Type": "application/json"}})
-	if !analysis.limitedBody {
-		t.Fatal("expected the escaped-key template to hit the analysis limit")
-	}
-	for _, value := range analysis.values {
-		if value == secret {
-			return
-		}
-	}
-	t.Fatal("limited scan missed a unicode-escaped sensitive key")
+	assertNoSecretLeak(t, "flat initialize", string(execution.CompactJSON(finit)), secret)
 }

@@ -97,6 +97,21 @@ python3 build.py   # 生成 dist/ 下四个平台的 zip；内部同样执行 go
 
 你的数据（录制记录、工具、密钥）只保存在本地 `data/` 目录，不会进入仓库。
 
+## 源码包职责
+
+- `cmd/a2m`：程序入口；`internal/app`：仅负责应用组装（compose.go）与生命周期。
+- `internal/config`、`credential`、`vault`：运行配置、凭据引用规则、加密配置与脱敏。
+- `internal/recording`：HTTP/WebSocket 录制采集、录制数据与标注仓储、分组与噪声规则。
+- `internal/site`：站点登录配置与并发安全的站点仓储；`internal/mcp`：MCP 会话、流程包加载状态与 SSE 通知。
+- `internal/domain`：参数/请求预览契约；`internal/approval`：审批状态机、nonce/超时、决定持久化、完整参数替换及历史/结果预算。执行预览与敏感度判定通过类型化端口接入。
+- `internal/result`：HTML/JSON 结果呈现与业务失败检测；`internal/execution`：工具模型与模板、敏感性策略、冻结准备、HTTP/WS 发送与 SQL/EXPLAIN 护栏、凭据绑定、重试与结果清理；通过明确端口接入浏览器登录态和 SQL 控制台。
+- `internal/browser`：专用浏览器/页面/租约、Cookie、录制生命周期与 CDP 事件转发；`internal/login`：站点登录代次、等待/取消/冷却、登录窗口与加密 Header 采集。状态锁由各包私有管理，站点录制登录识别由 `site` 持有。
+- `internal/middleware`：MySQL、Redis、Kafka/RabbitMQ/RocketMQ 原生驱动、SQL/键/主题范围检查、结果预算与连接缓存；通过显式端口接入凭据解析和权限/审计。
+- `internal/mwconfig`、`store`、`catalog`：中间件配置、数据库迁移与审计、工具目录；`internal/analysis`：`rec_*` 录制分析工具；`internal/mcpserver`：MCP HTTP 端点与调用路由；`internal/invoke`：审批等待与执行前校验；`internal/mwtools`：数据库/Redis/MQ、WebSocket 终端与 SQL 控制台工具；`internal/console`：本地控制台 API；`internal/transfer`：不含密钥的导入导出。
+- `internal/cdp`、`htmlmd`、`ahocorasick`、`sqlguard`：底层协议和独立算法；`web`：内嵌控制台资源。
+
+依赖方向和安全边界见 [架构说明](docs/architecture.md)。
+
 ## 目前的限制
 
 - 跨域 iframe 里的请求，以及 Service Worker 发出的请求，暂时录不到。

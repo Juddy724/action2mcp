@@ -1,13 +1,23 @@
 package app
 
 import (
+	"action2mcp/internal/analysis"
+	"action2mcp/internal/domain"
+	"action2mcp/internal/execution"
+	"action2mcp/internal/mcp"
+	"action2mcp/internal/recording"
+	"action2mcp/internal/store"
+	"action2mcp/internal/vault"
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -48,7 +58,7 @@ type recTestClient struct {
 func (c *recTestClient) call(method string, params any) ([]map[string]any, map[string]any) {
 	c.t.Helper()
 	c.id++
-	body := compactJSON(map[string]any{"jsonrpc": "2.0", "id": c.id, "method": method, "params": params})
+	body := execution.CompactJSON(map[string]any{"jsonrpc": "2.0", "id": c.id, "method": method, "params": params})
 	req := httptest.NewRequest("POST", "https://example.com/mcp", strings.NewReader(string(body)))
 	req.Host = "127.0.0.1"
 	req.Header.Set("Content-Type", "application/json")
@@ -171,7 +181,7 @@ func TestRecToolsListingAndToggle(t *testing.T) {
 			}
 		}
 	}
-	if builtinID != recPackID {
+	if builtinID != store.RecordingPackID {
 		t.Fatalf("builtin id %d", builtinID)
 	}
 
@@ -185,7 +195,7 @@ func TestRecToolsListingAndToggle(t *testing.T) {
 			t.Fatalf("after load missing %s in %v", n, names)
 		}
 	}
-	byID, isErr := c.tool("load_pack", map[string]any{"pack": recPackID})
+	byID, isErr := c.tool("load_pack", map[string]any{"pack": store.RecordingPackID})
 	if isErr || !strings.Contains(byID, `"builtin":true`) {
 		t.Fatalf("load by id: err=%v %s", isErr, byID)
 	}
@@ -235,7 +245,7 @@ func TestRecToolsListingAndToggle(t *testing.T) {
 	if txt, isErr = flat.tool("rec_get_recording", map[string]any{"recording_id": 1}); !isErr || !strings.Contains(txt, "已关闭") {
 		t.Fatalf("disabled call: err=%v %s", isErr, txt)
 	}
-	app.store.SetSetting("mcp_mode", ModeTiered)
+	app.store.SetSetting("mcp_mode", mcp.ModeTiered)
 	tiered := &recTestClient{t: t, handler: srv}
 	tiered.call("initialize", map[string]any{"protocolVersion": "2025-06-18"})
 	if txt, isErr = tiered.tool("list_packs", map[string]any{}); isErr || strings.Contains(txt, "录制分析") {
@@ -269,19 +279,19 @@ func TestRecToolsAnnotateSaveScrub(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	orders := &ReqRecord{RecordingID: recID, Seq: 1, Method: "GET", URL: "https://api.example.com/v1/orders?id=100&access_token=" + secQuery, ResourceType: "Fetch", Status: 200}
+	orders := &recording.Request{RecordingID: recID, Seq: 1, Method: "GET", URL: "https://api.example.com/v1/orders?id=100&access_token=" + secQuery, ResourceType: "Fetch", Status: 200}
 	if err := app.store.InsertRequest(orders); err != nil {
 		t.Fatal(err)
 	}
-	dup := &ReqRecord{RecordingID: recID, Seq: 2, Method: "GET", URL: "https://api.example.com/v1/orders?id=101&access_token=" + secQuery, ResourceType: "Fetch", Status: 200}
+	dup := &recording.Request{RecordingID: recID, Seq: 2, Method: "GET", URL: "https://api.example.com/v1/orders?id=101&access_token=" + secQuery, ResourceType: "Fetch", Status: 200}
 	if err := app.store.InsertRequest(dup); err != nil {
 		t.Fatal(err)
 	}
-	dup2 := &ReqRecord{RecordingID: recID, Seq: 3, Method: "GET", URL: "https://api.example.com/v1/orders?id=102", ResourceType: "Fetch", Status: 200}
+	dup2 := &recording.Request{RecordingID: recID, Seq: 3, Method: "GET", URL: "https://api.example.com/v1/orders?id=102", ResourceType: "Fetch", Status: 200}
 	if err := app.store.InsertRequest(dup2); err != nil {
 		t.Fatal(err)
 	}
-	post := &ReqRecord{
+	post := &recording.Request{
 		RecordingID: recID, Seq: 4, Method: "POST",
 		URL:          "https://api.example.com/v1/orders?access_token=" + secQuery,
 		ResourceType: "Fetch", Status: 201,
@@ -297,11 +307,11 @@ func TestRecToolsAnnotateSaveScrub(t *testing.T) {
 	if err := app.store.InsertRequest(post); err != nil {
 		t.Fatal(err)
 	}
-	users := &ReqRecord{RecordingID: recID, Seq: 5, Method: "GET", URL: "https://api.example.com/v1/users?kw=alice", ResourceType: "Fetch", Status: 200}
+	users := &recording.Request{RecordingID: recID, Seq: 5, Method: "GET", URL: "https://api.example.com/v1/users?kw=alice", ResourceType: "Fetch", Status: 200}
 	if err := app.store.InsertRequest(users); err != nil {
 		t.Fatal(err)
 	}
-	noise := &ReqRecord{RecordingID: recID, Seq: 6, Method: "GET", URL: "https://logs.example.com/collect", ResourceType: "Fetch", Status: 204, Noise: true, NoiseReason: "埋点/日志"}
+	noise := &recording.Request{RecordingID: recID, Seq: 6, Method: "GET", URL: "https://logs.example.com/collect", ResourceType: "Fetch", Status: 204, Noise: true, NoiseReason: "埋点/日志"}
 	if err := app.store.InsertRequest(noise); err != nil {
 		t.Fatal(err)
 	}
@@ -309,7 +319,7 @@ func TestRecToolsAnnotateSaveScrub(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	other := &ReqRecord{RecordingID: otherID, Seq: 1, Method: "GET", URL: "https://other.example.com/a", ResourceType: "Fetch", Status: 200}
+	other := &recording.Request{RecordingID: otherID, Seq: 1, Method: "GET", URL: "https://other.example.com/a", ResourceType: "Fetch", Status: 200}
 	if err := app.store.InsertRequest(other); err != nil {
 		t.Fatal(err)
 	}
@@ -495,7 +505,7 @@ func TestRecToolsAnnotateSaveScrub(t *testing.T) {
 	if !isErr || !strings.Contains(missing, "询问用户") || !strings.Contains(missing, "create_pack") {
 		t.Fatalf("missing pack: %s", missing)
 	}
-	if err := app.store.SavePack(&Pack{Name: "已有包", Enabled: true}); err != nil {
+	if err := app.store.SavePack(&store.Pack{Name: "已有包", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	unknown, isErr := c.tool("rec_save_tool", map[string]any{"request_id": post.ID, "name": "create_order", "pack": "没有这个包", "description": "创建订单"})
@@ -546,13 +556,13 @@ func TestRecToolsAnnotateSaveScrub(t *testing.T) {
 	if !strings.Contains(stored.Body, "{{order_id}}") || (!strings.Contains(stored.Body, "{{password}}") && !strings.Contains(stored.Body, "{{secret.")) {
 		t.Fatalf("tool body not parameterised: %s", stored.Body)
 	}
-	var passParam *Param
+	var passParam *domain.Param
 	for i := range stored.Params {
 		if stored.Params[i].Name == "password" {
 			passParam = &stored.Params[i]
 		}
 	}
-	if passParam == nil || !passParam.Required || passParam.Default != "" || passParam.Description != removedSecretDesc {
+	if passParam == nil || !passParam.Required || passParam.Default != "" || passParam.Description != execution.RemovedSecretDescription {
 		t.Fatalf("password param: %+v", stored.Params)
 	}
 	if !strings.Contains(stored.URL, "{{") {
@@ -634,7 +644,7 @@ func mustTool(t *testing.T, c *recTestClient, name string, args map[string]any) 
 	return txt
 }
 
-func seedRecRequest(t *testing.T, app *App, q *ReqRecord) {
+func seedRecRequest(t *testing.T, app *App, q *recording.Request) {
 	t.Helper()
 	if q.RecordingID == 0 {
 		var err error
@@ -666,7 +676,7 @@ func decodeRec(t *testing.T, text string) map[string]any {
 func rejectRecLiterals(t *testing.T, text string, secrets ...string) {
 	t.Helper()
 	for _, secret := range secrets {
-		for _, form := range literalForms(secret) {
+		for _, form := range testLiteralForms(secret) {
 			if strings.Contains(text, form) {
 				t.Fatalf("leaked %q in %s", form, text)
 			}
@@ -700,7 +710,7 @@ func TestRecSecurityBodyFormats(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			app, _, c := startRecServer(t)
-			q := &ReqRecord{ReqHeaders: map[string]string{"Content-Type": tt.contentType}, ReqBody: tt.body, RespBody: tt.response, RespMime: "application/json"}
+			q := &recording.Request{ReqHeaders: map[string]string{"Content-Type": tt.contentType}, ReqBody: tt.body, RespBody: tt.response, RespMime: "application/json"}
 			seedRecRequest(t, app, q)
 			text := mustTool(t, c, "rec_get_request", map[string]any{"request_id": q.ID})
 			out := decodeRec(t, text)
@@ -711,10 +721,10 @@ func TestRecSecurityBodyFormats(t *testing.T) {
 			if out["req_body_total"] != float64(len(tt.body)) {
 				t.Fatalf("original length lost: %s", text)
 			}
-			if tt.hidden && out["req_body"] != hiddenRecBody {
+			if tt.hidden && out["req_body"] != recHiddenBody {
 				t.Fatalf("unsafe body fallback: %s", text)
 			}
-			if tt.name == "truncated_json" && (out["req_body_partial"] != true || out["req_body"] == hiddenRecBody) {
+			if tt.name == "truncated_json" && (out["req_body_partial"] != true || out["req_body"] == recHiddenBody) {
 				t.Fatalf("truncated body should be a partial sanitize: %s", text)
 			}
 			if tt.name == "multipart_password" && !strings.Contains(out["req_body"].(string), "keep this field") {
@@ -730,12 +740,12 @@ func TestRecSecurityBodyFormats(t *testing.T) {
 func TestRecSecurityHeadersEscapesAndShortValues(t *testing.T) {
 	app, _, c := startRecServer(t)
 	password := "quote\"slash\\newline\nprivate"
-	q := &ReqRecord{
+	q := &recording.Request{
 		ReqHeaders:  map[string]string{"Content-Type": "application/json", "Cookie": "a=first-cookie-private; b=middle-cookie-private; c=last-cookie-private", "Referer": "https://example.com/?token=referer-private"},
-		ReqBody:     string(compactJSON(map[string]any{"password": password, "echo": password, "credentials": map[string]any{"value": "xy"}, "short_echo": "xy", "normal": "xylophone"})),
+		ReqBody:     string(execution.CompactJSON(map[string]any{"password": password, "echo": password, "credentials": map[string]any{"value": "xy"}, "short_echo": "xy", "normal": "xylophone"})),
 		RespHeaders: map[string]string{"Location": "https://example.com/callback?access_token=location-private", "Content-Location": "https://example.com/result?token=content-location-private", "Set-Cookie": "a=first-set-private; Expires=Wed, 09 Jun 2027 10:18:14 GMT; Path=/, b=middle-set-private; Path=/\nc=last-set-private; Path=/"},
 		RespMime:    "application/json",
-		RespBody:    string(compactJSON(map[string]any{"cookie": "middle-cookie-private", "set_cookie_echo": "middle-set-private", "redirect_echo": "location-private", "password_echo": password, "short_echo": "xy", "normal": "xylophone"})),
+		RespBody:    string(execution.CompactJSON(map[string]any{"cookie": "middle-cookie-private", "set_cookie_echo": "middle-set-private", "redirect_echo": "location-private", "password_echo": password, "short_echo": "xy", "normal": "xylophone"})),
 	}
 	seedRecRequest(t, app, q)
 	text := mustTool(t, c, "rec_get_request", map[string]any{"request_id": q.ID, "max_body": 10000})
@@ -744,7 +754,7 @@ func TestRecSecurityHeadersEscapesAndShortValues(t *testing.T) {
 	for _, key := range []string{"req_body", "resp_body"} {
 		body := decodeRec(t, out[key].(string))
 		for _, field := range []string{"echo", "password_echo"} {
-			if value, ok := body[field]; ok && value != secretMask {
+			if value, ok := body[field]; ok && value != vault.Mask {
 				t.Fatalf("escaped password echo survived: %s", text)
 			}
 		}
@@ -752,25 +762,20 @@ func TestRecSecurityHeadersEscapesAndShortValues(t *testing.T) {
 			t.Fatalf("short literal handling: %s", text)
 		}
 	}
-	if replaceLiterals(`echo=a\"b and a"b`, []string{`a"b`}) != "echo=****** and ******" {
-		t.Fatal("JSON escaped form was not scrubbed")
-	}
-	if got := replaceLiterals("7 17 7.0", []string{"7"}); got != "****** 17 ******.0" {
-		t.Fatalf("short token mask: %q", got)
-	}
+	// Direct literal-replacement assertions live with the owner: analysis.TestReplaceLiteralsEscapedAndShortTokens.
 }
 
 func TestRecSecurityRecordingWideAndErrors(t *testing.T) {
 	app, _, c := startRecServer(t)
 	secret := "recording-wide-private"
-	q := &ReqRecord{URL: "https://example.com/reset/" + secret}
+	q := &recording.Request{URL: "https://example.com/reset/" + secret}
 	seedRecRequest(t, app, q)
-	other := &ReqRecord{RecordingID: q.RecordingID, Seq: 2, Noise: true, RespMime: "application/json", RespBody: `{"credentials":[{"value":"` + secret + `"}]}`}
+	other := &recording.Request{RecordingID: q.RecordingID, Seq: 2, Noise: true, RespMime: "application/json", RespBody: `{"credentials":[{"value":"` + secret + `"}]}`}
 	seedRecRequest(t, app, other)
 	if err := app.store.SetRecordingSummary(q.RecordingID, "重置 "+secret); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.store.SetRequestNote(RequestNote{RequestID: q.ID, RecordingID: q.RecordingID, Category: "query", Purpose: "检查 " + secret, Source: "agent"}); err != nil {
+	if err := app.store.SetRequestNote(recording.Note{RequestID: q.ID, RecordingID: q.RecordingID, Category: "query", Purpose: "检查 " + secret, Source: "agent"}); err != nil {
 		t.Fatal(err)
 	}
 	text := mustTool(t, c, "rec_get_recording", map[string]any{"recording_id": q.RecordingID})
@@ -786,7 +791,7 @@ func TestRecSecurityRecordingWideAndErrors(t *testing.T) {
 	if err := app.vault.Upsert("error_secret", "secret", "error-vault-private", "https://example.com", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.store.SavePack(&Pack{Name: "ops-error-vault-private", Enabled: true}); err != nil {
+	if err := app.store.SavePack(&store.Pack{Name: "ops-error-vault-private", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	for _, pack := range []string{"", "unknown"} {
@@ -807,7 +812,7 @@ func TestRecSecurityTypedJSONAndCandidates(t *testing.T) {
 	for i := 0; i < 150; i++ {
 		body[fmt.Sprintf("field_%03d", i)] = strings.Repeat("a", 300)
 	}
-	q := &ReqRecord{URL: "https://example.com/search?page=2000", ReqHeaders: map[string]string{"Content-Type": "application/json"}, ReqBody: string(compactJSON(body)), Status: 200}
+	q := &recording.Request{URL: "https://example.com/search?page=2000", ReqHeaders: map[string]string{"Content-Type": "application/json"}, ReqBody: string(execution.CompactJSON(body)), Status: 200}
 	seedRecRequest(t, app, q)
 	text := mustTool(t, c, "rec_get_request", map[string]any{"request_id": q.ID, "max_body": 0})
 	out := decodeRec(t, text)
@@ -821,8 +826,8 @@ func TestRecSecurityTypedJSONAndCandidates(t *testing.T) {
 		t.Fatal("aggregate candidate cap missing")
 	}
 	candidates := out["candidates"].([]any)
-	if len(compactJSON(candidates)) > 16100 || len(candidates) > 100 {
-		t.Fatalf("candidate budget exceeded: %d", len(compactJSON(candidates)))
+	if len(execution.CompactJSON(candidates)) > 16100 || len(candidates) > 100 {
+		t.Fatalf("candidate budget exceeded: %d", len(execution.CompactJSON(candidates)))
 	}
 	for _, item := range candidates {
 		row := item.(map[string]any)
@@ -840,7 +845,7 @@ func TestRecSecurityTypedJSONAndCandidates(t *testing.T) {
 
 func TestRecSecuritySaveSchemasAndTemplates(t *testing.T) {
 	app, _, c := startRecServer(t)
-	if err := app.store.SetSetting("mcp_mode", ModeFlat); err != nil {
+	if err := app.store.SetSetting("mcp_mode", mcp.ModeFlat); err != nil {
 		t.Fatal(err)
 	}
 	for name, value := range map[string]string{"prefix_secret": "vault-private", "existing_ref": "kept-private"} {
@@ -848,7 +853,7 @@ func TestRecSecuritySaveSchemasAndTemplates(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	q := &ReqRecord{ReqHeaders: map[string]string{"Content-Type": "application/json"}, ReqBody: `{"credentials":{"value":"ancestor-private"},"password":"secret","known":"{{secret.existing_ref}}","metadata":"prefix-vault-private","id":"ORD-7","amount":42,"enabled":true}`}
+	q := &recording.Request{ReqHeaders: map[string]string{"Content-Type": "application/json"}, ReqBody: `{"credentials":{"value":"ancestor-private"},"password":"secret","known":"{{secret.existing_ref}}","metadata":"prefix-vault-private","id":"ORD-7","amount":42,"enabled":true}`}
 	seedRecRequest(t, app, q)
 	text := mustTool(t, c, "rec_save_tool", map[string]any{"request_id": q.ID, "pack": "safe pack", "create_pack": true, "name": "safe_saved", "params": []any{
 		map[string]any{"from": "body:credentials.value", "name": "credential_value", "description": "ancestor-private"},
@@ -860,7 +865,7 @@ func TestRecSecuritySaveSchemasAndTemplates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rejectRecLiterals(t, string(compactJSON(tool)), "ancestor-private", "vault-private")
+	rejectRecLiterals(t, string(execution.CompactJSON(tool)), "ancestor-private", "vault-private")
 	body := decodeRec(t, tool.Body)
 	if body["known"] != "{{secret.existing_ref}}" || body["amount"] != float64(42) || body["enabled"] != true {
 		t.Fatalf("template structure or reference corrupted: %s", tool.Body)
@@ -880,41 +885,21 @@ func TestRecSecuritySaveSchemasAndTemplates(t *testing.T) {
 		}
 	}
 	_, listed := c.call("tools/list", map[string]any{})
-	rejectRecLiterals(t, string(compactJSON(listed)), "ancestor-private", "vault-private")
-	if err := app.store.SetSetting("mcp_mode", ModeTiered); err != nil {
+	rejectRecLiterals(t, string(execution.CompactJSON(listed)), "ancestor-private", "vault-private")
+	if err := app.store.SetSetting("mcp_mode", mcp.ModeTiered); err != nil {
 		t.Fatal(err)
 	}
 	loaded := mustTool(t, c, "load_pack", map[string]any{"pack": "safe pack"})
 	rejectRecLiterals(t, loaded, "ancestor-private", "vault-private")
 }
 
-func TestRecSecurityParameterizeParsedValues(t *testing.T) {
-	q := &ReqRecord{ReqHeaders: map[string]string{"Content-Type": "application/json"}, ReqBody: `{"credentials":{"value":123},"password":"secret","known":"{{secret.existing}}","normal":99,"enabled":true}`}
-	tool := &Tool{URL: "https://example.com/?token=123", Body: q.ReqBody}
-	if err := parameterizeRawSecrets(tool, q); err != nil {
-		t.Fatal(err)
-	}
-	body := decodeRec(t, tool.Body)
-	if body["known"] != "{{secret.existing}}" || body["normal"] != float64(99) || body["enabled"] != true {
-		t.Fatalf("typed values or refs changed: %s", tool.Body)
-	}
-	if body["credentials"].(map[string]any)["value"] == float64(123) {
-		t.Fatal("sensitive numeric field not parameterized")
-	}
-	for _, p := range tool.Params {
-		if p.Default != "" || !p.Required {
-			t.Fatalf("secret parameter kept default: %+v", p)
-		}
-	}
-}
-
 func TestRecSecuritySaveTypedSecrets(t *testing.T) {
 	app, _, c := startRecServer(t)
-	q := &ReqRecord{ReqHeaders: map[string]string{"Content-Type": "application/json"}, ReqBody: `{"pin":7,"credentials":{"value":12345},"normal":42,"enabled":true}`}
+	q := &recording.Request{ReqHeaders: map[string]string{"Content-Type": "application/json"}, ReqBody: `{"pin":7,"credentials":{"value":12345},"normal":42,"enabled":true}`}
 	seedRecRequest(t, app, q)
 	detail := decodeRec(t, mustTool(t, c, "rec_get_request", map[string]any{"request_id": q.ID}))
 	body := decodeRec(t, detail["req_body"].(string))
-	if body["pin"] != secretMask || body["credentials"] != secretMask {
+	if body["pin"] != vault.Mask || body["credentials"] != vault.Mask {
 		t.Fatalf("typed secret fields survived: %v", body)
 	}
 	mustTool(t, c, "rec_save_tool", map[string]any{"request_id": q.ID, "pack": "typed", "create_pack": true, "name": "typed_secrets"})
@@ -948,14 +933,14 @@ func TestRecSecuritySaveTypedSecrets(t *testing.T) {
 
 func TestRecParamSourcesAndPackResolution(t *testing.T) {
 	app, _, c := startRecServer(t)
-	ops := &Pack{Name: "Ops", Enabled: true}
-	lower := &Pack{Name: "ops", Enabled: false}
-	for _, p := range []*Pack{ops, lower} {
+	ops := &store.Pack{Name: "Ops", Enabled: true}
+	lower := &store.Pack{Name: "ops", Enabled: false}
+	for _, p := range []*store.Pack{ops, lower} {
 		if err := app.store.SavePack(p); err != nil {
 			t.Fatal(err)
 		}
 	}
-	q := &ReqRecord{URL: "https://example.com/search?id=query-id", ReqHeaders: map[string]string{"Content-Type": "application/json"}, ReqBody: `{"id":"body-id"}`}
+	q := &recording.Request{URL: "https://example.com/search?id=query-id", ReqHeaders: map[string]string{"Content-Type": "application/json"}, ReqBody: `{"id":"body-id"}`}
 	seedRecRequest(t, app, q)
 	for _, tc := range []struct {
 		specs []any
@@ -988,33 +973,31 @@ func TestRecParamSourcesAndPackResolution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	params := map[string]Param{}
+	params := map[string]domain.Param{}
 	for _, p := range tool.Params {
 		params[p.Name] = p
 	}
 	if params["query_id"].Description != "query description" || params["query_id"].Default != "query-default" || !params["query_id"].Required || params["body_id"].Description != "body description" || params["body_id"].Default != "body-default" || params["body_id"].Required {
 		t.Fatalf("overrides applied to wrong source: %+v", params)
 	}
-	if p, _, msg := app.lookupTargetPack(fmt.Sprint(ops.ID), false); msg != "" || p.ID != ops.ID {
-		t.Fatalf("numeric pack match: %v %s", p, msg)
-	}
+	// Numeric pack-reference resolution is asserted by analysis.TestLookupTargetPackNumericID.
 }
 
 func TestRecSaveAtomicAndInlineNotifications(t *testing.T) {
-	for _, mode := range []string{ModeFlat, ModeTiered} {
+	for _, mode := range []string{mcp.ModeFlat, mcp.ModeTiered} {
 		t.Run(mode, func(t *testing.T) {
 			app, _, c := startRecServer(t)
 			if err := app.store.SetSetting("mcp_mode", mode); err != nil {
 				t.Fatal(err)
 			}
-			p := &Pack{Name: "target", Enabled: true}
+			p := &store.Pack{Name: "target", Enabled: true}
 			if err := app.store.SavePack(p); err != nil {
 				t.Fatal(err)
 			}
-			if mode == ModeTiered {
+			if mode == mcp.ModeTiered {
 				mustTool(t, c, "load_pack", map[string]any{"pack": "target"})
 			}
-			q := &ReqRecord{}
+			q := &recording.Request{}
 			seedRecRequest(t, app, q)
 			msgs, reply := c.call("tools/call", map[string]any{"name": "rec_save_tool", "arguments": map[string]any{"request_id": q.ID, "pack": "target", "name": "inline_saved"}})
 			if reply["result"].(map[string]any)["isError"] == true {
@@ -1033,7 +1016,7 @@ func TestRecSaveAtomicAndInlineNotifications(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := app.store.db.Exec(`CREATE TRIGGER reject_rec_member BEFORE INSERT ON pack_tools BEGIN SELECT RAISE(ABORT,'membership failed'); END`); err != nil {
+			if _, err := app.store.DB().Exec(`CREATE TRIGGER reject_rec_member BEFORE INSERT ON pack_tools BEGIN SELECT RAISE(ABORT,'membership failed'); END`); err != nil {
 				t.Fatal(err)
 			}
 			for _, name := range []string{"new_failed", "inline_saved"} {
@@ -1049,7 +1032,7 @@ func TestRecSaveAtomicAndInlineNotifications(t *testing.T) {
 			if err != nil || got.Description != old.Description {
 				t.Fatalf("overwrite survived rollback: %+v %v", got, err)
 			}
-			if _, err := app.store.db.Exec(`CREATE TRIGGER reject_rec_pack BEFORE INSERT ON packs BEGIN SELECT RAISE(ABORT,'pack failed'); END`); err != nil {
+			if _, err := app.store.DB().Exec(`CREATE TRIGGER reject_rec_pack BEFORE INSERT ON packs BEGIN SELECT RAISE(ABORT,'pack failed'); END`); err != nil {
 				t.Fatal(err)
 			}
 			text, bad := c.tool("rec_save_tool", map[string]any{"request_id": q.ID, "pack": "new pack", "create_pack": true, "name": "pack_failed"})
@@ -1065,35 +1048,35 @@ func TestRecSaveAtomicAndInlineNotifications(t *testing.T) {
 
 func TestRecSettingsAtomic(t *testing.T) {
 	app, handler, c := startRecServer(t)
-	stream := make(chan []byte, 4)
-	session := app.session(c.sid)
-	session.stream = stream
-	if _, err := app.store.db.Exec(`CREATE TRIGGER reject_rec_setting BEFORE INSERT ON settings WHEN NEW.key='rec_analysis' BEGIN SELECT RAISE(ABORT,'setting failed'); END`); err != nil {
+	session := app.mcpSessions.Session(c.sid)
+	stream, detach := session.OpenStream()
+	defer detach()
+	if _, err := app.store.DB().Exec(`CREATE TRIGGER reject_rec_setting BEFORE INSERT ON settings WHEN NEW.key='rec_analysis' BEGIN SELECT RAISE(ABORT,'setting failed'); END`); err != nil {
 		t.Fatal(err)
 	}
 	code, _ := apiRaw(t, handler, "PUT", "https://example.com/api/settings", `{"mcp_mode":"flat","rec_analysis":false}`)
-	if code != 500 || app.mcpMode() != ModeTiered || !app.recAnalysisEnabled() {
+	if code != 500 || app.mcpServer().Mode() != mcp.ModeTiered || !app.recAnalysis().Enabled() {
 		t.Fatal("partial settings update")
 	}
 	if len(stream) != 0 {
 		t.Fatal("broadcast on failed settings transaction")
 	}
-	if _, err := app.store.db.Exec(`DROP TRIGGER reject_rec_setting`); err != nil {
+	if _, err := app.store.DB().Exec(`DROP TRIGGER reject_rec_setting`); err != nil {
 		t.Fatal(err)
 	}
 	code, _ = apiRaw(t, handler, "PUT", "https://example.com/api/settings", `{"mcp_mode":"invalid","rec_analysis":false}`)
-	if code != 400 || !app.recAnalysisEnabled() || len(stream) != 0 {
+	if code != 400 || !app.recAnalysis().Enabled() || len(stream) != 0 {
 		t.Fatal("invalid settings changed state")
 	}
 	code, _ = apiRaw(t, handler, "PUT", "https://example.com/api/settings", `{"mcp_mode":"flat","rec_analysis":false}`)
-	if code != 200 || app.mcpMode() != ModeFlat || app.recAnalysisEnabled() || len(stream) != 1 {
+	if code != 200 || app.mcpServer().Mode() != mcp.ModeFlat || app.recAnalysis().Enabled() || len(stream) != 1 {
 		t.Fatal("settings not committed and broadcast together")
 	}
 }
 
 func TestRecExistingPackNameCollision(t *testing.T) {
 	app, handler, c := startRecServer(t)
-	r, err := app.store.db.Exec(`INSERT INTO packs(name,description,enabled,created_at) VALUES(?,?,1,?)`, recPackName, "legacy user pack", now())
+	r, err := app.store.DB().Exec(`INSERT INTO packs(name,description,enabled,created_at) VALUES(?,?,1,?)`, store.RecordingPackName, "legacy user pack", now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1101,22 +1084,22 @@ func TestRecExistingPackNameCollision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &Pack{ID: id, Name: recPackName, Enabled: true, Description: "updated legacy pack"}
+	p := &store.Pack{ID: id, Name: store.RecordingPackName, Enabled: true, Description: "updated legacy pack"}
 	if err := app.store.SavePack(p); err != nil {
 		t.Fatalf("existing pack cannot update: %v", err)
 	}
-	code, _ := apiRaw(t, handler, "PUT", fmt.Sprintf("https://example.com/api/packs/%d", id), string(compactJSON(p)))
+	code, _ := apiRaw(t, handler, "PUT", fmt.Sprintf("https://example.com/api/packs/%d", id), string(execution.CompactJSON(p)))
 	if code != 200 {
 		t.Fatalf("REST update failed: %d", code)
 	}
-	if err := app.store.SavePack(&Pack{Name: recPackName, Enabled: true}); err == nil {
+	if err := app.store.SavePack(&store.Pack{Name: store.RecordingPackName, Enabled: true}); err == nil {
 		t.Fatal("new reserved pack allowed")
 	}
-	text := mustTool(t, c, "load_pack", map[string]any{"pack": recPackName})
+	text := mustTool(t, c, "load_pack", map[string]any{"pack": store.RecordingPackName})
 	if decodeRec(t, text)["pack_id"] != float64(id) {
 		t.Fatalf("legacy pack shadowed: %s", text)
 	}
-	text = mustTool(t, c, "load_pack", map[string]any{"pack": recPackID})
+	text = mustTool(t, c, "load_pack", map[string]any{"pack": store.RecordingPackID})
 	if decodeRec(t, text)["builtin"] != true {
 		t.Fatalf("builtin id ambiguous: %s", text)
 	}
@@ -1124,7 +1107,7 @@ func TestRecExistingPackNameCollision(t *testing.T) {
 	builtin, user := false, false
 	for _, item := range listed["packs"].([]any) {
 		row := item.(map[string]any)
-		if row["id"] == float64(recPackID) {
+		if row["id"] == float64(store.RecordingPackID) {
 			builtin = row["builtin"] == true
 		}
 		if row["id"] == float64(id) {
@@ -1134,17 +1117,44 @@ func TestRecExistingPackNameCollision(t *testing.T) {
 	if !builtin || !user {
 		t.Fatalf("collision not distinguishable: %v", listed)
 	}
-	q := &ReqRecord{}
+	q := &recording.Request{}
 	seedRecRequest(t, app, q)
-	text = mustTool(t, c, "rec_save_tool", map[string]any{"request_id": q.ID, "pack": recPackName, "name": "legacy_target"})
+	text = mustTool(t, c, "rec_save_tool", map[string]any{"request_id": q.ID, "pack": store.RecordingPackName, "name": "legacy_target"})
 	if decodeRec(t, text)["pack_id"] != float64(id) {
 		t.Fatalf("legacy save target shadowed: %s", text)
 	}
-	if err := app.store.SetSetting(settingRecAnalysis, "off"); err != nil {
+	if err := app.store.SetSetting(analysis.SettingEnabled, "off"); err != nil {
 		t.Fatal(err)
 	}
-	text = mustTool(t, c, "load_pack", map[string]any{"pack": recPackName})
+	text = mustTool(t, c, "load_pack", map[string]any{"pack": store.RecordingPackName})
 	if decodeRec(t, text)["pack_id"] != float64(id) {
 		t.Fatalf("disabled builtin shadows legacy pack: %s", text)
 	}
+}
+
+// Independent test-side expectations for sanitizer placeholders and leaked-literal
+// encodings; production constants and helpers remain private to analysis.
+const (
+	recHiddenBody        = "[body hidden: could not be safely sanitized]"
+	recStructuredOmitted = "[structured value omitted]"
+	recOmittedFileValue  = "[file omitted]"
+)
+
+func testLiteralForms(lit string) []string {
+	b, _ := json.Marshal(lit)
+	escaped := string(b[1 : len(b)-1])
+	quoted := strconv.Quote(lit)
+	return []string{lit, url.QueryEscape(lit), url.PathEscape(lit), escaped, quoted[1 : len(quoted)-1], html.EscapeString(lit)}
+}
+
+// recSaveTool drives rec_save_tool through the analysis service's public MCP entry.
+func recSaveTool(a *App, args map[string]any) (string, bool) {
+	res, _ := a.recAnalysis().Call(&mcp.Call{}, "rec_save_tool", args).(map[string]any)
+	content, _ := res["content"].([]map[string]any)
+	text := ""
+	if len(content) > 0 {
+		text, _ = content[0]["text"].(string)
+	}
+	isErr, _ := res["isError"].(bool)
+	return text, isErr
 }
