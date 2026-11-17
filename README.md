@@ -2,7 +2,7 @@
 
 把网页上的业务操作录制下来，整理成 AI 可调用的 MCP 工具。单个可执行文件，解压即用，数据只保存在本机。
 
-当前版本：**v0.5.12**。安装包见 [Releases](https://github.com/Juddy724/action2mcp/releases/latest)；更完整的使用说明在解压后的 README.md 里。
+当前版本：**v0.6.0**。安装包见 [Releases](https://github.com/Juddy724/action2mcp/releases/latest)；更完整的使用说明在解压后的 README.md 里。0.6.0 只调整源码包布局和版本号，数据库、命令行和 MCP 行为与 0.5.12 相同。
 
 ## 界面预览
 
@@ -30,12 +30,12 @@ AI 调用需要审批时，控制台会弹出卡片；历史记录里的执行�
 
 ## 下载与启动
 
-| 平台 | 安装包 |
+| 平台 | 安装包 (v0.6.0) |
 |---|---|
-| macOS (Apple 芯片) | [Action2MCP-0.5.12-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.12/Action2MCP-0.5.12-macOS-AppleSilicon.zip) |
-| macOS (Intel) | [Action2MCP-0.5.12-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.12/Action2MCP-0.5.12-macOS-Intel.zip) |
-| Windows x64 | [Action2MCP-0.5.12-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.12/Action2MCP-0.5.12-Windows-x64.zip) |
-| Linux x64 | [Action2MCP-0.5.12-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.5.12/Action2MCP-0.5.12-Linux-x64.zip) |
+| macOS (Apple 芯片) | [Action2MCP-0.6.0-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.6.0/Action2MCP-0.6.0-macOS-AppleSilicon.zip) |
+| macOS (Intel) | [Action2MCP-0.6.0-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.6.0/Action2MCP-0.6.0-macOS-Intel.zip) |
+| Windows x64 | [Action2MCP-0.6.0-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.6.0/Action2MCP-0.6.0-Windows-x64.zip) |
+| Linux x64 | [Action2MCP-0.6.0-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.6.0/Action2MCP-0.6.0-Linux-x64.zip) |
 
 解压后运行 `start.command`（macOS）、`start.bat`（Windows）或 `start.sh`（Linux），然后打开 [http://localhost:7788](http://localhost:7788)。电脑上需要已安装 Google Chrome 或 Microsoft Edge；录制会打开一个专用浏览器窗口，和日常使用的浏览器互不影响。
 
@@ -50,7 +50,7 @@ AI 调用需要审批时，控制台会弹出卡片；历史记录里的执行�
 - **登录中心**：为每个网站保存登录方式（企业微信 / 单点登录、账号密码填表或重放、手动登录）。AI 调用时如果发现登录过期，会在后台自动重新登录再重试。录制时如果走了企业微信扫码，结束录制后可以识别并加入登录中心。等待登录最多 5 分钟，可以取消，关闭窗口也会结束等待。
 - **配置管理**：账号、密码等加密保存在本机。工具和登录配置里用 `{{secret.名称}}` 引用。程序会按已登记的密钥（配置项、足够长的 Cookie 等）在 MCP 工具说明、调用结果、错误、审批预览、审计和导出里做脱敏，但这是尽力而为的扫描，受长度和解码深度等上限约束，不能保证任意位置的敏感信息都不会出现。控制台本人可以查看和编辑这些配置。
 - **中间件**：登记 MySQL / OceanBase、Redis、RocketMQ / Kafka / RabbitMQ，以及 WebSocket 终端或 SQL 控制台，加入已开启的流程包后，AI 会看到 `db_query`、`redis_command`、`mq_send`、`pod_read_log`、`ws_sql_query` 等通用工具。每种操作的权限可单独开关，**默认只读**。连接密码同样进入配置管理。
-- **工具审批**：在工具编辑页选择「不审批」或「每次都审批」。`POST` / `PUT` / `PATCH` / `DELETE` / `WS` 默认每次都审批。AI 经 MCP 调用时，控制台弹出待审批卡片，可以批准、改参数后批准，或拒绝并写下原因。等待超时默认 300 秒，可在设置里改为 30–1800 秒。
+- **工具审批**：在工具编辑页的「审批模式」选择不审批（off）或每次都审批（always）；写入工具默认每次都审批（`POST` / `PUT` / `PATCH` / `DELETE` / `WS`）。WebSocket SQL 控制台的审批模式可在中间件里配置为每次审批（默认）或关闭；关闭后守卫仍然生效。AI 经 MCP 调用时，控制台弹出待审批卡片，可以批准、改参数后批准，或拒绝并写下原因。等待超时默认 300 秒，可在「接入 AI / 设置」里改为 30–1800 秒。
 - **WebSocket SQL 控制台**：把数据平台的「一条 WebSocket 消息执行 SQL」登记为中间件，AI 用 `ws_sql_query`（中间件名、数据源别名、SQL）查询，和直连数据库的 `db_query` 不是同一个工具。一个库由数据源 ID、envId、envType 三个值确定。`{{header.cookie}}` 从登录中心的 Cookie 罐取值；登录令牌用已收获的请求头注入，不要写进配置。
 - **HTML 结果与写操作标注**：JSON 不会做 HTML 清洗，但仍受结果长度截断、已知密钥脱敏，以及（默认开启的）失败检测约束；明确的 JSON 失败会被标成工具错误。HTML 默认去掉脚本、样式和可识别的导航，转成保留结构的紧凑 Markdown；也可以改回原始 HTML，或只取某个 CSS 选择器区域。清洗后几乎为空（例如页面全靠脚本渲染）会退回原始 HTML 并附说明。页面里的错误提示也会被标成工具错误。写操作工具的 MCP 说明以「【写操作，仅在用户明确要求时调用】」开头；很多站点用 POST 做查询，可在「操作类型」里改成只读。这些选项只能在控制台改，AI 不能改。
 
@@ -81,9 +81,9 @@ AI 调用需要审批时，控制台会弹出卡片；历史记录里的执行�
 
 ## 工具审批的范围与限制
 
-- 审批只约束通过 MCP 发起的 AI 调用。能够直接访问本机 HTTP 接口的客户端仍可能绕过审批，它不能代替本机访问权限管理。
-- 请求一旦发出就无法撤回。
-- MCP 会话结束或 stdio 桥退出，不保证取消正在等待的审批；这类调用会继续等到你拒绝或超时。
+- 审批只约束通过 MCP 发起的 AI 调用；能直接访问 localhost HTTP 的客户端仍可伪造请求，审批不能代替本机访问权限管理。
+- 请求已经发出后无法撤回。
+- MCP 会话 DELETE 和 stdio 桥退出不保证取消待审批调用；这类调用会继续等待用户拒绝或超时。
 - 参数按整体替换：未提交的参数保留原值；非秘密参数原样展示、原样替换。秘密参数整体遮罩，未改动的 `******` 保留原值，输入完整新值则替换整个参数。
 - 大整数精度与现有 MCP JSON 的 float64 解码路径一致，超出其精确范围的整数可能丢失精度。
 
@@ -93,7 +93,8 @@ AI 调用需要审批时，控制台会弹出卡片；历史记录里的执行�
 
 ```
 go test ./...
-python3 build.py   # 生成 dist/ 下四个平台的 zip
+go build -o a2m ./cmd/a2m
+python3 build.py   # 生成 dist/ 下四个平台的 zip；内部同样执行 go test ./... 与 go build ./cmd/a2m
 ```
 
 你的数据（录制记录、工具、密钥）只保存在本地 `data/` 目录，不会进入仓库。

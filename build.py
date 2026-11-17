@@ -5,7 +5,7 @@ import os, shutil, subprocess, zipfile, stat
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.join(ROOT, "packaging")
 DIST = os.path.join(ROOT, "dist")
-VERSION = "0.5.12"
+VERSION = "0.6.0"
 
 TARGETS = [
     ("windows", "amd64", "Windows-x64"),
@@ -49,12 +49,12 @@ def add(z, path, arc, exe=False):
 def main():
     shutil.rmtree(DIST, ignore_errors=True)
     os.makedirs(DIST)
-    subprocess.check_call(["go", "test", "-count=1", "."], cwd=ROOT)
+    subprocess.check_call(["go", "test", "-count=1", "./..."], cwd=ROOT)
     for goos, arch, label in TARGETS:
         binname = "a2m.exe" if goos == "windows" else "a2m"
         out = os.path.join(DIST, f"build-{goos}-{arch}", binname)
         env = dict(os.environ, CGO_ENABLED="0", GOOS=goos, GOARCH=arch)
-        subprocess.check_call(["go", "build", "-trimpath", "-ldflags", "-s -w", "-o", out, "."], cwd=ROOT, env=env)
+        subprocess.check_call(["go", "build", "-trimpath", "-ldflags", "-s -w", "-o", out, "./cmd/a2m"], cwd=ROOT, env=env)
         folder = f"Action2MCP-{VERSION}-{label}"
         zpath = os.path.join(DIST, folder + ".zip")
         rd = os.path.join(DIST, f"build-{goos}-{arch}", "README.md")
