@@ -1,6 +1,10 @@
 package app
 
 import (
+	"action2mcp/internal/domain"
+	"action2mcp/internal/mcp"
+	"action2mcp/internal/mwconfig"
+	"action2mcp/internal/store"
 	"bufio"
 	"database/sql"
 	"encoding/json"
@@ -112,19 +116,19 @@ func TestTieredDiscovery(t *testing.T) {
 	app.vault.Upsert("svc_password", "secret", secret, upstream.URL, "")
 	echo := &Tool{Approval: "off", Name: "echo_login", Title: "回显", Method: "POST", URL: upstream.URL + "/echo",
 		Headers: map[string]string{"Content-Type": "application/json"},
-		Body:    `{"kw":"{{kw}}","pw":"{{secret.svc_password}}"}`, Params: []Param{{Name: "kw", Type: "string", Required: true}}}
+		Body:    `{"kw":"{{kw}}","pw":"{{secret.svc_password}}"}`, Params: []domain.Param{{Name: "kw", Type: "string", Required: true}}}
 	other := &Tool{Name: "hidden_tool", Title: "隐藏", Method: "GET", URL: upstream.URL + "/h"}
 	for _, x := range []*Tool{echo, other} {
 		if err := app.store.SaveTool(x); err != nil {
 			t.Fatal(err)
 		}
 	}
-	db := &Middleware{Name: "订单库", Type: "mysql", Config: MWConfig{Host: "127.0.0.1", Port: 1, User: "u"}}
+	db := &mwconfig.Middleware{Name: "订单库", Type: "mysql", Config: mwconfig.MWConfig{Host: "127.0.0.1", Port: 1, User: "u"}}
 	if err := app.store.SaveMiddleware(db); err != nil {
 		t.Fatal(err)
 	}
-	p1 := &Pack{Name: "回显包", Description: "回显测试", Scenarios: "需要回显时", Enabled: true, ToolIDs: []int64{echo.ID}, MiddlewareIDs: []int64{db.ID}}
-	p2 := &Pack{Name: "关闭的包", Enabled: false, ToolIDs: []int64{other.ID}}
+	p1 := &store.Pack{Name: "回显包", Description: "回显测试", Scenarios: "需要回显时", Enabled: true, ToolIDs: []int64{echo.ID}, MiddlewareIDs: []int64{db.ID}}
+	p2 := &store.Pack{Name: "关闭的包", Enabled: false, ToolIDs: []int64{other.ID}}
 	app.store.SavePack(p1)
 	app.store.SavePack(p2)
 
@@ -264,7 +268,7 @@ func TestTieredDiscovery(t *testing.T) {
 	}
 	// flat mode switch restores the 0.3.0 behaviour
 	app.store.SetPackEnabled(p1.ID, true)
-	app.store.SetSetting("mcp_mode", ModeFlat)
+	app.store.SetSetting("mcp_mode", mcp.ModeFlat)
 	if names = c.toolNames(); has(names, "list_packs") || !has(names, "echo_login") {
 		t.Fatalf("flat mode: %v", names)
 	}
@@ -273,7 +277,7 @@ func TestTieredDiscovery(t *testing.T) {
 // A 0.3.0 database (no packs.scenarios, no settings table) opens and keeps its data.
 func TestMigrateFrom030(t *testing.T) {
 	dir := t.TempDir()
-	p := filepath.Join(dir, "a2m.db")
+	p := filepath.Join(dir, "a2m.DB()")
 	db, err := sql.Open("sqlite", p)
 	if err != nil {
 		t.Fatal(err)
@@ -292,7 +296,7 @@ func TestMigrateFrom030(t *testing.T) {
 		}
 	}
 	db.Close()
-	st, err := OpenStore(p)
+	st, err := store.OpenStore(p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,12 +312,12 @@ func TestMigrateFrom030(t *testing.T) {
 	if packs[0].Scenarios != "查订单" {
 		t.Fatal("scenarios not saved")
 	}
-	if st.GetSetting("mcp_mode", ModeTiered) != ModeTiered {
+	if st.GetSetting("mcp_mode", mcp.ModeTiered) != mcp.ModeTiered {
 		t.Fatal("default mode")
 	}
-	st.db.Close()
-	if st, err = OpenStore(p); err != nil { // idempotent
+	st.DB().Close()
+	if st, err = store.OpenStore(p); err != nil { // idempotent
 		t.Fatal(err)
 	}
-	st.db.Close()
+	st.DB().Close()
 }

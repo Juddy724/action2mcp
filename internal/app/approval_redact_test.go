@@ -1,6 +1,10 @@
 package app
 
 import (
+	"action2mcp/internal/approval"
+	"action2mcp/internal/domain"
+	"action2mcp/internal/execution"
+	"action2mcp/internal/vault"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -40,7 +44,7 @@ func TestApprovalStaticTokenWithMaskedInteger(t *testing.T) {
 				io.WriteString(w, "ok")
 			}))
 			tool, _ := saveApprovalTool(t, a, upstream, "always")
-			tool.Params = []Param{{Name: "label", Type: "integer", Required: true}}
+			tool.Params = []domain.Param{{Name: "label", Type: "integer", Required: true}}
 			tool.Body = `{"password":{{label}},"token":"` + token + `"}`
 			if kind == "form" {
 				tool.Headers["Content-Type"] = "application/x-www-form-urlencoded"
@@ -56,17 +60,17 @@ func TestApprovalStaticTokenWithMaskedInteger(t *testing.T) {
 			}
 			assertSafe := func(value any) {
 				t.Helper()
-				text := string(compactJSON(value))
+				text := string(execution.CompactJSON(value))
 				if strings.Contains(text, token) || strings.Contains(text, label) {
 					t.Fatal("approval display leaked a private value")
 				}
 			}
-			assertPreview := func(preview RequestPreview) {
+			assertPreview := func(preview domain.RequestPreview) {
 				t.Helper()
 				assertSafe(preview)
 				if kind == "json" {
 					var body map[string]any
-					if json.Unmarshal([]byte(preview.Body), &body) != nil || body["password"] != secretMask || body["token"] != secretMask {
+					if json.Unmarshal([]byte(preview.Body), &body) != nil || body["password"] != vault.Mask || body["token"] != vault.Mask {
 						t.Fatal("preview must contain valid JSON with both sensitive fields masked")
 					}
 					return
@@ -80,27 +84,27 @@ func TestApprovalStaticTokenWithMaskedInteger(t *testing.T) {
 					raw = u.RawQuery
 				}
 				values, err := url.ParseQuery(raw)
-				if err != nil || values.Get("password") != secretMask || values.Get("token") != secretMask {
+				if err != nil || values.Get("password") != vault.Mask || values.Get("token") != vault.Mask {
 					t.Fatal("preview must mask both sensitive assignments")
 				}
 			}
-			assertRecord := func(record ApprovalRecord) {
+			assertRecord := func(record approval.Record) {
 				t.Helper()
 				assertSafe(record)
 				assertPreview(record.Preview)
-				if record.ArgsDisplay["label"] != secretMask || len(record.Params) != 1 || !record.Params[0].Secret {
+				if record.ArgsDisplay["label"] != vault.Mask || len(record.Params) != 1 || !record.Params[0].Secret {
 					t.Fatal("approval card did not mask the renamed secret argument")
 				}
-				if record.Status != "pending" && record.FinalArgsDisplay["label"] != secretMask {
+				if record.Status != "pending" && record.FinalArgsDisplay["label"] != vault.Mask {
 					t.Fatal("approval history did not mask the final argument")
 				}
 			}
 			args := map[string]any{"label": float64(n)}
-			prepared, err := a.Prepare(tool, args)
+			prepared, err := a.executor().Prepare(tool, args)
 			if err != nil {
 				t.Fatal("cannot prepare static token fixture")
 			}
-			if prepared.request.Body != wantBody || prepared.request.URL != wantURL {
+			if renderForTest(t, tool, args).Body != wantBody || renderForTest(t, tool, args).URL != wantURL {
 				t.Fatal("execution render changed the static token or unquoted integer")
 			}
 			assertPreview(prepared.Preview)
@@ -112,11 +116,11 @@ func TestApprovalStaticTokenWithMaskedInteger(t *testing.T) {
 			assertStored := func() {
 				t.Helper()
 				var previewJSON, argsJSON, finalJSON string
-				if err := a.store.db.QueryRow(`SELECT preview_display,args_display,final_args_display FROM approvals WHERE id=?`, pending.ID).Scan(&previewJSON, &argsJSON, &finalJSON); err != nil {
+				if err := a.store.DB().QueryRow(`SELECT preview_display,args_display,final_args_display FROM approvals WHERE id=?`, pending.ID).Scan(&previewJSON, &argsJSON, &finalJSON); err != nil {
 					t.Fatal("cannot read stored approval display")
 				}
 				assertSafe(previewJSON + argsJSON + finalJSON)
-				var stored ApprovalPreview
+				var stored approval.Preview
 				if json.Unmarshal([]byte(previewJSON), &stored) != nil {
 					t.Fatal("cannot decode stored approval preview")
 				}
@@ -128,14 +132,14 @@ func TestApprovalStaticTokenWithMaskedInteger(t *testing.T) {
 				t.Fatal("pending API did not return the approval")
 			}
 			assertRecord(pendingRows[0])
-			preview, err := a.PreviewApproval(pending.ID, pending.Nonce, nil)
+			preview, err := a.approvals().Preview(pending.ID, pending.Nonce, nil)
 			if err != nil {
 				t.Fatal("cannot preview pending approval")
 			}
 			assertPreview(preview.Preview)
 			w := approvalAPIRequest(t, handler, http.MethodPost, fmt.Sprintf("/api/approvals/%d/preview", pending.ID), origin, "application/json", map[string]any{"nonce": pending.Nonce})
 			assertSafe(w.Body.String())
-			var apiPreview ApprovalPreview
+			var apiPreview approval.Preview
 			requireApprovalAPIResponse(t, w, http.StatusOK, &apiPreview)
 			assertPreview(apiPreview.Preview)
 			if hits.Load() != 0 {
@@ -152,70 +156,5 @@ func TestApprovalStaticTokenWithMaskedInteger(t *testing.T) {
 			}
 			assertRecord(history[0])
 		})
-	}
-}
-
-func TestPreparedJSONMaskQuoting(t *testing.T) {
-	a := approvalTestApp(t)
-	for _, tc := range []struct {
-		name, body, want string
-	}{
-		{"unquoted", `{"value":{{label}}}`, `{"value":42}`},
-		{"array", `[{{label}}]`, `[42]`},
-		{"quoted", `{"value":"{{label}}"}`, `{"value":42}`},
-		{"inline", `{"value":"prefix {{label}} suffix"}`, `{"value":"prefix 42 suffix"}`},
-		{"escaped", `{"value":"escaped \" quote {{label}} suffix"}`, `{"value":"escaped \" quote 42 suffix"}`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			tool := &Tool{Method: "POST", URL: "https://example.com/", Body: tc.body,
-				Params: []Param{{Name: "label", Type: "integer", Required: true, Secret: true}}}
-			prepared, err := a.Prepare(tool, map[string]any{"label": 42})
-			if err != nil || !json.Valid([]byte(prepared.Preview.Body)) || !strings.Contains(prepared.Preview.Body, secretMask) {
-				t.Fatal("mask substitution broke preview JSON")
-			}
-			if prepared.request.Body != tc.want {
-				t.Fatal("preview mask quoting changed execution rendering")
-			}
-		})
-	}
-}
-
-func TestRedactPreviewMalformedAssignments(t *testing.T) {
-	secret := privateTestValue(t)
-	escaped := string(compactJSON(secret + `\"&,;`))
-	cases := []struct {
-		name, body, contentType, want string
-	}{
-		{"bare_mask", `{"password":******,"token":"` + secret + `"}`, "application/json", `{"password":"******","token":"******"}`},
-		{"json_like", `{password:` + secret + `,token:'` + secret + `',note:'visible'}`, "", `{password:"******",token:'******',note:'visible'}`},
-		{"assignments", `password="` + secret + `";token=` + secret + `&note=visible`, "text/plain", `password="******";token=******&note=visible`},
-		{"escaped_value", `{"broken":,"token":` + escaped + `,"note":"visible"}`, "application/json", `{"broken":,"token":"******","note":"visible"}`},
-		{"truncated", `{"password":"` + secret, "application/json", `{"password":"******"`},
-		{"composite", `{credentials:{value:'` + secret + `',note:'visible'},broken:}`, "", `{credentials:"******",broken:}`},
-		{"form", "password=" + secret + "&token=" + secret, "application/x-www-form-urlencoded", "password=******&token=******"},
-		{"encoded_form_key", "p%61ssword=" + secret + "&t%6fken=" + secret, "application/x-www-form-urlencoded", "p%61ssword=******&t%6fken=******"},
-		{"untyped_form", "password=" + secret + "&token=" + secret, "", "password=******&token=******"},
-		{"placeholders", `{"broken":,"password":{{secret.saved}},"token":"{{cfg.saved}}"}`, "", `{"broken":,"password":"{{secret.saved}}","token":"{{cfg.saved}}"}`},
-		{"quoted_non_key", `{"note":"password=` + secret + `,token=` + secret + `",broken:}`, "", `{"note":"password=` + secret + `,token=` + secret + `",broken:}`},
-		{"unquoted_non_key", "note=password=" + secret, "", "note=password=" + secret},
-		{"form_non_key", "note=password=" + secret, "application/x-www-form-urlencoded", "note=password=" + secret},
-		{"excluded_key", `{"passwordStrength":"` + secret + `",broken:}`, "", `{"passwordStrength":"` + secret + `",broken:}`},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			preview := redactPreview(RequestPreview{Body: tc.body, Headers: map[string]string{"Content-Type": tc.contentType}})
-			if preview.Body != tc.want {
-				t.Fatal("lexical redaction missed a sensitive assignment or changed a non-key value")
-			}
-		})
-	}
-	for _, prefix := range []string{"", "RUN "} {
-		body := string(compactJSON(map[string]any{"inner": prefix + `{"password":******,"token":"` + secret + `"}`}))
-		preview := redactPreview(RequestPreview{Body: body})
-		var outer map[string]string
-		var inner map[string]string
-		if json.Unmarshal([]byte(preview.Body), &outer) != nil || json.Unmarshal([]byte(strings.TrimPrefix(outer["inner"], prefix)), &inner) != nil || inner["password"] != secretMask || inner["token"] != secretMask {
-			t.Fatal("nested malformed JSON retained sensitive values")
-		}
 	}
 }

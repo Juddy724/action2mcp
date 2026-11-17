@@ -1,6 +1,13 @@
 package app
 
 import (
+	"action2mcp/internal/analysis"
+	"action2mcp/internal/approval"
+	"action2mcp/internal/domain"
+	"action2mcp/internal/execution"
+	"action2mcp/internal/mcp"
+	"action2mcp/internal/store"
+	"action2mcp/internal/vault"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -48,10 +55,10 @@ func requireApprovalAPIResponse(t *testing.T, w *httptest.ResponseRecorder, stat
 	}
 }
 
-func listApprovalAPI(t *testing.T, handler http.Handler, origin, status string) []ApprovalRecord {
+func listApprovalAPI(t *testing.T, handler http.Handler, origin, status string) []approval.Record {
 	t.Helper()
 	w := approvalAPIRequest(t, handler, http.MethodPost, "/api/approvals/list", origin, "application/json", map[string]any{"status": status, "limit": 100})
-	var rows []ApprovalRecord
+	var rows []approval.Record
 	requireApprovalAPIResponse(t, w, http.StatusOK, &rows)
 	return rows
 }
@@ -92,7 +99,7 @@ func TestApprovalAPIRequestGuards(t *testing.T) {
 				{"origin-before-content-type", "", "127.0.0.1", "", 403},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
-					r := httptest.NewRequest(http.MethodPost, "http://127.0.0.1"+endpoint.path, bytes.NewReader(compactJSON(endpoint.body)))
+					r := httptest.NewRequest(http.MethodPost, "http://127.0.0.1"+endpoint.path, bytes.NewReader(execution.CompactJSON(endpoint.body)))
 					r.Host = tc.host
 					if tc.origin != "" {
 						r.Header.Set("Origin", tc.origin)
@@ -164,11 +171,11 @@ func TestApprovalAPIRejectRetryAndApprove(t *testing.T) {
 			args := map[string]any{"value": "initial"}
 			call := startApprovalCall(a, ctx, args)
 			pendingApprovals(t, a, 1)
-			var pending ApprovalRecord
+			var pending approval.Record
 			for _, host := range []string{"127.0.0.1", "localhost", "[::1]"} {
 				for _, contentType := range []string{"application/json", "application/json; charset=utf-8"} {
 					w := approvalAPIRequest(t, handler, http.MethodPost, "/api/approvals/list", fmt.Sprintf("http://%s:%d", host, a.cfg.Port), contentType, map[string]any{"status": "pending", "limit": 1})
-					var rows []ApprovalRecord
+					var rows []approval.Record
 					requireApprovalAPIResponse(t, w, http.StatusOK, &rows)
 					if len(rows) != 1 || rows[0].Nonce == "" || rows[0].PreviewHash == "" || rows[0].ArgsDisplay["value"] != "initial" {
 						t.Fatal("list did not return the pending approval and its confirmation fields")
@@ -179,7 +186,7 @@ func TestApprovalAPIRejectRetryAndApprove(t *testing.T) {
 			previewPath := fmt.Sprintf("/api/approvals/%d/preview", pending.ID)
 			decidePath := fmt.Sprintf("/api/approvals/%d/decide", pending.ID)
 			w := approvalAPIRequest(t, handler, http.MethodPost, previewPath, origin, "application/json; charset=utf-8", map[string]any{"args": args, "nonce": pending.Nonce})
-			var preview ApprovalPreview
+			var preview approval.Preview
 			requireApprovalAPIResponse(t, w, http.StatusOK, &preview)
 			if preview.PreviewHash != pending.PreviewHash || preview.Preview.Method != "POST" || preview.Preview.Body != `{"value":"initial"}` {
 				t.Fatal("preview does not match the listed request")
@@ -308,7 +315,7 @@ func TestApprovalAPIRedactionAndJSONEscaping(t *testing.T) {
 			if legacy {
 				tool.Body = `{"value":"{{value}}","credentials":{"value":"{{label}}"}}`
 			}
-			tool.Params = append(tool.Params, Param{Name: "label", Type: "string", Required: true, Secret: !legacy})
+			tool.Params = append(tool.Params, domain.Param{Name: "label", Type: "string", Required: true, Secret: !legacy})
 			if err := a.store.SaveTool(tool); err != nil {
 				t.Fatal("cannot save secret parameter fixture")
 			}
@@ -327,9 +334,9 @@ func TestApprovalAPIRedactionAndJSONEscaping(t *testing.T) {
 			call := startApprovalCall(a, ctx, map[string]any{"value": script, "label": secret})
 			pendingApprovals(t, a, 1)
 			w := approvalAPIRequest(t, handler, http.MethodPost, "/api/approvals/list", origin, "application/json", map[string]any{"status": "pending"})
-			var rows []ApprovalRecord
+			var rows []approval.Record
 			assertSafeJSON(w, http.StatusOK, &rows)
-			if len(rows) != 1 || rows[0].Title != script || rows[0].ArgsDisplay["value"] != script || rows[0].ArgsDisplay["label"] != secretMask || len(rows[0].Params) != 2 || !rows[0].Params[1].Secret {
+			if len(rows) != 1 || rows[0].Title != script || rows[0].ArgsDisplay["value"] != script || rows[0].ArgsDisplay["label"] != vault.Mask || len(rows[0].Params) != 2 || !rows[0].Params[1].Secret {
 				t.Fatal("pending API did not preserve text and redact the secret")
 			}
 			if !bytes.Contains(w.Body.Bytes(), []byte(`\u003cscript\u003ealert(1)\u003c/script\u003e`)) {
@@ -339,7 +346,7 @@ func TestApprovalAPIRedactionAndJSONEscaping(t *testing.T) {
 			assertStored := func(final bool) {
 				t.Helper()
 				var argsJSON, finalJSON, previewJSON, other string
-				err := a.store.db.QueryRow(`SELECT args_display,final_args_display,preview_display,tool || title || client || params_json || feedback || result FROM approvals WHERE id=?`, pending.ID).Scan(&argsJSON, &finalJSON, &previewJSON, &other)
+				err := a.store.DB().QueryRow(`SELECT args_display,final_args_display,preview_display,tool || title || client || params_json || feedback || result FROM approvals WHERE id=?`, pending.ID).Scan(&argsJSON, &finalJSON, &previewJSON, &other)
 				if err != nil {
 					t.Fatal("cannot read stored approval")
 				}
@@ -348,23 +355,23 @@ func TestApprovalAPIRedactionAndJSONEscaping(t *testing.T) {
 					t.Fatal("approval row contains a raw secret or nonce")
 				}
 				var args, finalArgs map[string]string
-				var preview ApprovalPreview
-				if json.Unmarshal([]byte(argsJSON), &args) != nil || args["label"] != secretMask || json.Unmarshal([]byte(previewJSON), &preview) != nil || !strings.Contains(preview.Preview.Body, secretMask) {
+				var preview approval.Preview
+				if json.Unmarshal([]byte(argsJSON), &args) != nil || args["label"] != vault.Mask || json.Unmarshal([]byte(previewJSON), &preview) != nil || !strings.Contains(preview.Preview.Body, vault.Mask) {
 					t.Fatal("stored args or preview are not redacted")
 				}
-				if final && (json.Unmarshal([]byte(finalJSON), &finalArgs) != nil || finalArgs["label"] != secretMask) {
+				if final && (json.Unmarshal([]byte(finalJSON), &finalArgs) != nil || finalArgs["label"] != vault.Mask) {
 					t.Fatal("stored final args are not redacted")
 				}
 			}
 			assertStored(false)
-			args := map[string]any{"value": script + " updated", "label": ApprovalSecretUnchanged}
+			args := map[string]any{"value": script + " updated", "label": approval.SecretUnchanged}
 			previewPath := fmt.Sprintf("/api/approvals/%d/preview", pending.ID)
 			decidePath := fmt.Sprintf("/api/approvals/%d/decide", pending.ID)
 			w = approvalAPIRequest(t, handler, http.MethodPost, previewPath, origin, "application/json", map[string]any{"args": args, "nonce": pending.Nonce})
-			var preview ApprovalPreview
+			var preview approval.Preview
 			assertSafeJSON(w, http.StatusOK, &preview)
 			var previewBody map[string]any
-			if json.Unmarshal([]byte(preview.Preview.Body), &previewBody) != nil || previewBody["value"] != args["value"] || !strings.Contains(preview.Preview.Body, secretMask) {
+			if json.Unmarshal([]byte(preview.Preview.Body), &previewBody) != nil || previewBody["value"] != args["value"] || !strings.Contains(preview.Preview.Body, vault.Mask) {
 				t.Fatal("preview did not preserve the text and redact the secret")
 			}
 			w = approvalAPIRequest(t, handler, http.MethodPost, decidePath, origin, "application/json", map[string]any{"action": "edit", "args": args, "nonce": pending.Nonce, "preview_hash": pending.PreviewHash})
@@ -392,9 +399,9 @@ func TestApprovalAPIRedactionAndJSONEscaping(t *testing.T) {
 				t.Fatal("cannot remove tool before reading history")
 			}
 			w = approvalAPIRequest(t, handler, http.MethodPost, "/api/approvals/list", origin, "application/json", map[string]any{"status": "all"})
-			var history []ApprovalRecord
+			var history []approval.Record
 			assertSafeJSON(w, http.StatusOK, &history)
-			if len(history) != 1 || history[0].Status != "edited" || history[0].Nonce != "" || history[0].Title != script || history[0].ArgsDisplay["label"] != secretMask || history[0].FinalArgsDisplay["label"] != secretMask || history[0].FinalArgsDisplay["value"] != args["value"] || bytes.Contains(w.Body.Bytes(), []byte(`"nonce"`)) {
+			if len(history) != 1 || history[0].Status != "edited" || history[0].Nonce != "" || history[0].Title != script || history[0].ArgsDisplay["label"] != vault.Mask || history[0].FinalArgsDisplay["label"] != vault.Mask || history[0].FinalArgsDisplay["value"] != args["value"] || bytes.Contains(w.Body.Bytes(), []byte(`"nonce"`)) {
 				t.Fatal("history did not retain redacted snapshots without a nonce")
 			}
 		})
@@ -402,7 +409,7 @@ func TestApprovalAPIRedactionAndJSONEscaping(t *testing.T) {
 }
 
 func TestApprovalAPIMCPDiscoveryHasNoApprovalTools(t *testing.T) {
-	for _, mode := range []string{ModeFlat, ModeTiered} {
+	for _, mode := range []string{mcp.ModeFlat, mcp.ModeTiered} {
 		t.Run(mode, func(t *testing.T) {
 			a := approvalTestApp(t)
 			tool, pack := saveApprovalTool(t, a, newApprovalTarget(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})), "always")
@@ -410,7 +417,7 @@ func TestApprovalAPIMCPDiscoveryHasNoApprovalTools(t *testing.T) {
 			if err := a.store.SaveTool(tool); err != nil {
 				t.Fatal(err)
 			}
-			if err := a.store.SetSettings(map[string]string{"mcp_mode": mode, settingRecAnalysis: "on"}); err != nil {
+			if err := a.store.SetSettings(map[string]string{"mcp_mode": mode, analysis.SettingEnabled: "on"}); err != nil {
 				t.Fatal(err)
 			}
 			c := &recTestClient{t: t, handler: a.Handler()}
@@ -428,7 +435,7 @@ func TestApprovalAPIMCPDiscoveryHasNoApprovalTools(t *testing.T) {
 			}
 			names := c.toolNames()
 			checkNames(names)
-			if mode == ModeFlat {
+			if mode == mcp.ModeFlat {
 				if !has(names, tool.Name) || !has(names, "rec_save_tool") {
 					t.Fatal("flat discovery did not include recorded and built-in tools")
 				}
@@ -440,10 +447,10 @@ func TestApprovalAPIMCPDiscoveryHasNoApprovalTools(t *testing.T) {
 			for _, load := range []struct {
 				id       int64
 				expected string
-			}{{pack.ID, tool.Name}, {recPackID, "rec_save_tool"}} {
+			}{{pack.ID, tool.Name}, {store.RecordingPackID, "rec_save_tool"}} {
 				text, isError := c.tool("load_pack", map[string]any{"pack": load.id})
 				var output struct {
-					Tools []toolBrief `json:"tools"`
+					Tools []mcp.ToolBrief `json:"tools"`
 				}
 				if isError || json.Unmarshal([]byte(text), &output) != nil {
 					t.Fatal("load_pack did not return a successful JSON tool list")
@@ -598,7 +605,7 @@ func TestApprovalAPILegacyRoutesRemainLocalOnly(t *testing.T) {
 				{"foreign-origin", "localhost", "https://example.com"},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
-					r := httptest.NewRequest(endpoint.method, "http://127.0.0.1"+endpoint.path, bytes.NewReader(compactJSON(endpoint.body)))
+					r := httptest.NewRequest(endpoint.method, "http://127.0.0.1"+endpoint.path, bytes.NewReader(execution.CompactJSON(endpoint.body)))
 					r.Host = tc.host
 					r.Header.Set("Content-Type", "application/json")
 					if tc.origin != "" {

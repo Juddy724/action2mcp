@@ -1,6 +1,10 @@
 package app
 
 import (
+	"action2mcp/internal/domain"
+	"action2mcp/internal/execution"
+
+	"action2mcp/internal/store"
 	"context"
 	"encoding/json"
 	"errors"
@@ -65,13 +69,13 @@ func (c *countingWS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c.messages = append(c.messages, msg)
 	c.all = append(c.all, msg)
 	c.mu.Unlock()
-	_, tail, ok := splitCommandJSON(msg)
+	_, tail, ok := execution.SplitCommandJSON(msg)
 	sql := ""
 	token := ""
 	if ok {
 		var v any
 		json.Unmarshal([]byte(tail), &v)
-		if s, err := extractJSONString(msg, "data.sql"); err == nil {
+		if s, err := execution.ExtractJSONString(msg, "data.sql"); err == nil {
 			sql = s
 		}
 		if m, ok := v.(map[string]any); ok {
@@ -156,174 +160,34 @@ func writeExec(conn *websocket.Conn, success bool, message string, cols, rows []
 func wsTestTool(url, tokenRef string) *Tool {
 	return &Tool{
 		Name: "console_sql", Title: "SQL", Method: "WS", URL: url, Approval: "always",
-		Params: []Param{{Name: "sql", Type: "string", Required: true}},
+		Params: []domain.Param{{Name: "sql", Type: "string", Required: true}},
 		Config: ToolConfig{
 			Messages: []string{`execute {"data":{"sql":"{{sql}}","spaceCode":"s","dsId":1,"envId":2,"envType":"PROD","dbType":"mysql"},"token":"` + tokenRef + `"}`},
 			SQLGuard: &SQLGuardConfig{Enabled: true, Param: "sql", Path: "data.sql", MaxRows: 200},
 			Collect:  &WSCollectConfig{ResultCmd: "execResult", CloseCmds: []string{"close"}, SuccessPath: "data.success", DonePath: "data.done", MessagePath: "data.message", TimeoutMS: 5000, MaxBytes: 65536},
-			Auth:     &WSAuthConfig{RetryRelogin: true, FailMessageMatch: defaultAuthKeywords},
+			Auth:     &WSAuthConfig{RetryRelogin: true, FailMessageMatch: execution.DefaultAuthKeywords()},
 		},
-	}
-}
-
-func TestWSPrepareDoesNotDial(t *testing.T) {
-	fake := newCountingWS(2)
-	s := fake.start(t)
-	a := approvalTestApp(t)
-	if err := a.HarvestRequestHeader("", s.URL, "sso-epctoken", fake.token); err != nil {
-		t.Fatal(err)
-	}
-	tool := wsTestTool(fake.wsURL(s.URL), "{{header.sso-epctoken}}")
-	if err := a.store.SaveTool(tool); err != nil {
-		t.Fatal(err)
-	}
-	p, err := a.Prepare(tool, map[string]any{"sql": "SELECT id FROM t WHERE id=1 LIMIT 10"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.wsSQL != "SELECT id FROM t WHERE id=1 LIMIT 10" {
-		t.Fatalf("sql=%s", p.wsSQL)
-	}
-	if strings.Contains(p.Preview.Body, fake.token) || strings.Contains(strings.Join(p.wsMessages, ""), fake.token) {
-		t.Fatal("preview leaked token")
-	}
-	fake.mu.Lock()
-	defer fake.mu.Unlock()
-	if fake.conns != 0 || fake.business != 0 {
-		t.Fatalf("dialed before send: conns=%d biz=%d", fake.conns, fake.business)
-	}
-}
-
-func TestWSSendExplainThenBusiness(t *testing.T) {
-	fake := newCountingWS(2)
-	s := fake.start(t)
-	a := approvalTestApp(t)
-	if err := a.HarvestRequestHeader("", s.URL, "sso-epctoken", fake.token); err != nil {
-		t.Fatal(err)
-	}
-	tool := wsTestTool(fake.wsURL(s.URL), "{{header.sso-epctoken}}")
-	if err := a.store.SaveTool(tool); err != nil {
-		t.Fatal(err)
-	}
-	res, err := a.Execute(tool, map[string]any{"sql": "SELECT id FROM t WHERE id=1 LIMIT 10"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.Outcome != outcomeSuccess {
-		t.Fatalf("outcome=%s err=%s body=%s", res.Outcome, res.Error, res.Body)
-	}
-	if strings.Contains(res.Body, fake.token) {
-		t.Fatal("result leaked token")
-	}
-	if !strings.Contains(res.Body, `"name":"id"`) {
-		t.Fatalf("columns missing: %s", res.Body)
-	}
-	fake.mu.Lock()
-	defer fake.mu.Unlock()
-	if fake.explain != 1 || fake.business != 1 || fake.conns != 2 {
-		t.Fatalf("explain=%d business=%d conns=%d msgs=%v", fake.explain, fake.business, fake.conns, fake.all)
-	}
-	joined := strings.Join(fake.all, "\n")
-	if !strings.Contains(joined, fake.token) {
-		t.Fatalf("server did not receive harvested token: %v", fake.all)
-	}
-	if strings.Contains(joined, "{{header.") {
-		t.Fatalf("unresolved placeholder sent: %v", fake.all)
-	}
-}
-
-func TestWSGuardRejectsSendsNothing(t *testing.T) {
-	fake := newCountingWS(2)
-	s := fake.start(t)
-	a := approvalTestApp(t)
-	if err := a.HarvestRequestHeader("", s.URL, "sso-epctoken", fake.token); err != nil {
-		t.Fatal(err)
-	}
-	tool := wsTestTool(fake.wsURL(s.URL), "{{header.sso-epctoken}}")
-	if err := a.store.SaveTool(tool); err != nil {
-		t.Fatal(err)
-	}
-	for _, sql := range []string{
-		"SELECT id FROM t",
-		"SELECT id FROM t LIMIT 201",
-		"INSERT INTO t VALUES (1)",
-		"SELECT SLEEP(1) FROM t LIMIT 1",
-		"SELECT `sum`(id) FROM t LIMIT 1",
-		"SELECT * FROM t AS `<derived2>` LIMIT 1",
-		"SELECT id FROM t WHERE id>0 /*!99999 LIMIT 1 */",
-	} {
-		_, err := a.Prepare(tool, map[string]any{"sql": sql})
-		if err == nil {
-			t.Fatalf("prepare accepted %s", sql)
-		}
-	}
-	// Send-time reject: type=ALL after prepare of a valid SQL
-	fake.typeALL = true
-	res, err := a.Execute(tool, map[string]any{"sql": "SELECT id FROM t WHERE id=1 LIMIT 10"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.Outcome != outcomeGuardRejected {
-		t.Fatalf("outcome=%s err=%s", res.Outcome, res.Error)
-	}
-	fake.mu.Lock()
-	defer fake.mu.Unlock()
-	if fake.business != 0 {
-		t.Fatalf("business messages=%d %v", fake.business, fake.all)
-	}
-}
-
-func TestWSTruncationAndMaxRows(t *testing.T) {
-	fake := newCountingWS(250)
-	s := fake.start(t)
-	a := approvalTestApp(t)
-	if err := a.HarvestRequestHeader("", s.URL, "sso-epctoken", fake.token); err != nil {
-		t.Fatal(err)
-	}
-	tool := wsTestTool(fake.wsURL(s.URL), "{{header.sso-epctoken}}")
-	tool.Config.SQLGuard.MaxRows = 10
-	if err := a.store.SaveTool(tool); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := a.Prepare(tool, map[string]any{"sql": "SELECT id FROM t LIMIT 200"}); err == nil {
-		t.Fatal("LIMIT 200 should fail max_rows=10")
-	}
-	res, err := a.Execute(tool, map[string]any{"sql": "SELECT id FROM t LIMIT 10"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !res.Truncated || !strings.Contains(res.Body, "只返回前 10 行") {
-		t.Fatalf("truncation: %+v %s", res.Truncated, res.Body)
-	}
-	var payload map[string]any
-	json.Unmarshal([]byte(res.Body), &payload)
-	rows, _ := payload["rows"].([]any)
-	if len(rows) != 10 {
-		t.Fatalf("rows=%d", len(rows))
-	}
-	if res.Outcome != outcomeSuccess {
-		t.Fatalf("outcome=%s", res.Outcome)
 	}
 }
 
 func TestWSConsolePortRejected(t *testing.T) {
 	a := approvalTestApp(t)
 	a.cfg.Port = 7788
-	if err := a.HarvestRequestHeader("", "http://127.0.0.1:7788/mcp", "sso-epctoken", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"); err != nil {
+	if err := a.loginRuntime().HarvestRequestHeader("", "http://127.0.0.1:7788/mcp", "sso-epctoken", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"); err != nil {
 		t.Fatal(err)
 	}
 	tool := wsTestTool("ws://127.0.0.1:7788/mcp", "{{header.sso-epctoken}}")
 	if err := a.store.SaveTool(tool); err != nil {
 		t.Fatal(err)
 	}
-	res, err := a.Execute(tool, map[string]any{"sql": "SELECT id FROM t LIMIT 1"})
+	res, err := a.executor().Execute(tool, map[string]any{"sql": "SELECT id FROM t LIMIT 1"})
 	msg := ""
 	if err != nil {
 		msg = err.Error()
 	} else if res != nil {
 		msg = res.Error + res.Body
 	}
-	if !strings.Contains(msg, "控制台") && !errors.Is(err, errConsoleRequest) {
+	if !strings.Contains(msg, "控制台") && !errors.Is(err, execution.ErrConsoleRequest) {
 		t.Fatalf("expected console rejection, got err=%v res=%+v", err, res)
 	}
 }
@@ -332,20 +196,20 @@ func TestWSApprovalBlocksUntilApproved(t *testing.T) {
 	fake := newCountingWS(1)
 	s := fake.start(t)
 	a := approvalTestApp(t)
-	if err := a.HarvestRequestHeader("", s.URL, "sso-epctoken", fake.token); err != nil {
+	if err := a.loginRuntime().HarvestRequestHeader("", s.URL, "sso-epctoken", fake.token); err != nil {
 		t.Fatal(err)
 	}
 	tool := wsTestTool(fake.wsURL(s.URL), "{{header.sso-epctoken}}")
 	if err := a.store.SaveTool(tool); err != nil {
 		t.Fatal(err)
 	}
-	pack := &Pack{Name: "sql包", Enabled: true, ToolIDs: []int64{tool.ID}}
+	pack := &store.Pack{Name: "sql包", Enabled: true, ToolIDs: []int64{tool.ID}}
 	if err := a.store.SavePack(pack); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan approvalReply, 1)
 	go func() {
-		v, err := a.invokeTool(context.Background(), &mcpCtx{}, tool.Name, map[string]any{"sql": "SELECT id FROM t WHERE id=1 LIMIT 1"})
+		v, err := invokeTool(a, context.Background(), tool.Name, map[string]any{"sql": "SELECT id FROM t WHERE id=1 LIMIT 1"})
 		done <- unpackApprovalReply(v, err)
 	}()
 	rec := pendingApprovals(t, a, 1)[0]
@@ -374,27 +238,27 @@ func TestWSApprovalEditRerunsGuard(t *testing.T) {
 	fake := newCountingWS(1)
 	s := fake.start(t)
 	a := approvalTestApp(t)
-	if err := a.HarvestRequestHeader("", s.URL, "sso-epctoken", fake.token); err != nil {
+	if err := a.loginRuntime().HarvestRequestHeader("", s.URL, "sso-epctoken", fake.token); err != nil {
 		t.Fatal(err)
 	}
 	tool := wsTestTool(fake.wsURL(s.URL), "{{header.sso-epctoken}}")
 	if err := a.store.SaveTool(tool); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.store.SavePack(&Pack{Name: "sql包", Enabled: true, ToolIDs: []int64{tool.ID}}); err != nil {
+	if err := a.store.SavePack(&store.Pack{Name: "sql包", Enabled: true, ToolIDs: []int64{tool.ID}}); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan approvalReply, 1)
 	go func() {
-		v, err := a.invokeTool(context.Background(), &mcpCtx{}, tool.Name, map[string]any{"sql": "SELECT id FROM t WHERE id=1 LIMIT 1"})
+		v, err := invokeTool(a, context.Background(), tool.Name, map[string]any{"sql": "SELECT id FROM t WHERE id=1 LIMIT 1"})
 		done <- unpackApprovalReply(v, err)
 	}()
 	rec := pendingApprovals(t, a, 1)[0]
-	_, err := a.PreviewApproval(rec.ID, rec.Nonce, map[string]any{"sql": "SELECT id FROM t"})
+	_, err := a.approvals().Preview(rec.ID, rec.Nonce, map[string]any{"sql": "SELECT id FROM t"})
 	if err == nil {
 		t.Fatal("preview of unguarded SQL should fail")
 	}
-	if err := a.DecideApproval(rec.ID, rec.Nonce, "edit", map[string]any{"sql": "SELECT id FROM t LIMIT 201"}, "", rec.PreviewHash); err == nil {
+	if err := a.approvals().Decide(rec.ID, rec.Nonce, "edit", map[string]any{"sql": "SELECT id FROM t LIMIT 201"}, "", rec.PreviewHash); err == nil {
 		t.Fatal("edit to LIMIT 201 should fail")
 	}
 	fake.mu.Lock()
@@ -414,24 +278,24 @@ func TestWSReloginBudgetOnce(t *testing.T) {
 	fake := newCountingWS(1)
 	s := fake.start(t)
 	a := approvalTestApp(t)
-	if err := a.HarvestRequestHeader("", s.URL, "sso-epctoken", "expired-token-aaaaaaaaaaaaaaaaaaaa"); err != nil {
+	if err := a.loginRuntime().HarvestRequestHeader("", s.URL, "sso-epctoken", "expired-token-aaaaaaaaaaaaaaaaaaaa"); err != nil {
 		t.Fatal(err)
 	}
 	fake.failToken = "expired-token-aaaaaaaaaaaaaaaaaaaa"
 	hooks := 0
 	a.wsReloginHook = func() error {
 		hooks++
-		return a.HarvestRequestHeader("", s.URL, "sso-epctoken", fake.token)
+		return a.loginRuntime().HarvestRequestHeader("", s.URL, "sso-epctoken", fake.token)
 	}
 	tool := wsTestTool(fake.wsURL(s.URL), "{{header.sso-epctoken}}")
 	if err := a.store.SaveTool(tool); err != nil {
 		t.Fatal(err)
 	}
-	res, err := a.Execute(tool, map[string]any{"sql": "SELECT id FROM t WHERE id=1 LIMIT 1"})
+	res, err := a.executor().Execute(tool, map[string]any{"sql": "SELECT id FROM t WHERE id=1 LIMIT 1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Outcome != outcomeSuccess || !res.Relogged || hooks != 1 {
+	if res.Outcome != execution.OutcomeSuccess || !res.Relogged || hooks != 1 {
 		t.Fatalf("outcome=%s relog=%v hooks=%d err=%s body=%s", res.Outcome, res.Relogged, hooks, res.Error, res.Body)
 	}
 	fake.mu.Lock()
@@ -442,19 +306,19 @@ func TestWSReloginBudgetOnce(t *testing.T) {
 	fake.mu.Unlock()
 
 	hookCalls := 0
-	if err := a.HarvestRequestHeader("", s.URL, "sso-epctoken", fake.failToken); err != nil {
+	if err := a.loginRuntime().HarvestRequestHeader("", s.URL, "sso-epctoken", fake.failToken); err != nil {
 		t.Fatal(err)
 	}
 	a.wsReloginHook = func() error {
 		hookCalls++
-		return a.HarvestRequestHeader("", s.URL, "sso-epctoken", fake.failToken)
+		return a.loginRuntime().HarvestRequestHeader("", s.URL, "sso-epctoken", fake.failToken)
 	}
 	beforeBiz := fake.business
-	res, err = a.Execute(tool, map[string]any{"sql": "SELECT id FROM t WHERE id=1 LIMIT 1"})
+	res, err = a.executor().Execute(tool, map[string]any{"sql": "SELECT id FROM t WHERE id=1 LIMIT 1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Outcome != outcomeAuthFailed {
+	if res.Outcome != execution.OutcomeAuthFailed {
 		t.Fatalf("expected auth_failed, got %s %s", res.Outcome, res.Error)
 	}
 	if hookCalls != 1 {

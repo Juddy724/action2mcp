@@ -1,6 +1,10 @@
 package app
 
 import (
+	"action2mcp/internal/execution"
+
+	"action2mcp/internal/mwconfig"
+	"action2mcp/internal/store"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -18,17 +22,17 @@ func jarSID(rawURL, value string) Cookie {
 	return Cookie{Name: "sid", Value: value, Domain: u.Hostname(), Path: "/", Session: true}
 }
 
-func bindCookieHeader(m *Middleware) {
+func bindCookieHeader(m *mwconfig.Middleware) {
 	if m.Config.WSHeaders == nil {
 		m.Config.WSHeaders = map[string]string{}
 	}
 	m.Config.WSHeaders["Cookie"] = "{{header.cookie}}"
 }
 
-func saveSQLConsoleCookie(t *testing.T, a *App, fake *countingWS, httpURL, cookieVal string, harvestToken bool) *Middleware {
+func saveSQLConsoleCookie(t *testing.T, a *App, fake *countingWS, httpURL, cookieVal string, harvestToken bool) *mwconfig.Middleware {
 	t.Helper()
 	if harvestToken {
-		if err := a.HarvestRequestHeader("", httpURL, "sso-epctoken", fake.token); err != nil {
+		if err := a.loginRuntime().HarvestRequestHeader("", httpURL, "sso-epctoken", fake.token); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -37,7 +41,7 @@ func saveSQLConsoleCookie(t *testing.T, a *App, fake *countingWS, httpURL, cooki
 	if err := a.store.SaveMiddleware(m); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.store.SavePack(&Pack{Name: "sql包", Enabled: true, MiddlewareIDs: []int64{m.ID}}); err != nil {
+	if err := a.store.SavePack(&store.Pack{Name: "sql包", Enabled: true, MiddlewareIDs: []int64{m.ID}}); err != nil {
 		t.Fatal(err)
 	}
 	if cookieVal != "" {
@@ -80,7 +84,7 @@ func TestSQLConsoleCookieJarTestConnection(t *testing.T) {
 	a := approvalTestApp(t)
 	cookieVal := "sess_" + privateTestValue(t)
 	m := saveSQLConsoleCookie(t, a, fake, s.URL, cookieVal, true)
-	msg, err := a.TestMiddleware(context.Background(), m)
+	msg, err := a.middlewares().Test(context.Background(), m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,18 +107,18 @@ func TestSQLConsoleCookieJarMissingCookie(t *testing.T) {
 	s := fake.start(t)
 	a := approvalTestApp(t)
 	m := saveSQLConsoleCookie(t, a, fake, s.URL, "", true)
-	msg, err := a.TestMiddleware(context.Background(), m)
+	msg, err := a.middlewares().Test(context.Background(), m)
 	if err == nil {
 		t.Fatalf("expected missing cookie error, got %q", msg)
 	}
 	assertMissingCookieMsg(t, err.Error())
-	text, isErr := a.callMWTool(context.Background(), "tester", wsSQLQueryTool, map[string]any{"middleware": m.Name, "database": "orders", "sql": "SELECT id FROM t WHERE id=1 LIMIT 1"})
+	text, isErr := a.middlewares().Call(context.Background(), "tester", mwconfig.WSSQLQueryTool, map[string]any{"middleware": m.Name, "database": "orders", "sql": "SELECT id FROM t WHERE id=1 LIMIT 1"})
 	if !isErr {
 		t.Fatalf("call should fail closed, got %q", text)
 	}
 	assertMissingCookieMsg(t, text)
 	assertCookieHidden(t, text+err.Error(), "", fake.token)
-	pending, _ := a.store.listApprovals("pending", 20)
+	pending, _ := a.store.Approvals.List("pending", 20)
 	if len(pending) != 0 {
 		t.Fatalf("missing cookie should not create an approval card: %+v", pending)
 	}
@@ -131,17 +135,17 @@ func TestSQLConsoleCookieJarMissingToken(t *testing.T) {
 	a := approvalTestApp(t)
 	cookieVal := "sess_" + privateTestValue(t)
 	m := saveSQLConsoleCookie(t, a, fake, s.URL, cookieVal, false)
-	_, err := a.TestMiddleware(context.Background(), m)
+	_, err := a.middlewares().Test(context.Background(), m)
 	if err == nil || (!strings.Contains(err.Error(), "请求头") && !strings.Contains(err.Error(), "登录")) {
 		t.Fatalf("expected missing token error, got %v", err)
 	}
 	assertCookieHidden(t, err.Error(), cookieVal, fake.token)
-	text, isErr := a.callMWTool(context.Background(), "tester", wsSQLQueryTool, map[string]any{"middleware": m.Name, "database": "orders", "sql": "SELECT id FROM t WHERE id=1 LIMIT 1"})
+	text, isErr := a.middlewares().Call(context.Background(), "tester", mwconfig.WSSQLQueryTool, map[string]any{"middleware": m.Name, "database": "orders", "sql": "SELECT id FROM t WHERE id=1 LIMIT 1"})
 	if !isErr || (!strings.Contains(text, "请求头") && !strings.Contains(text, "登录")) {
 		t.Fatalf("expected token fail-closed, got isErr=%v text=%q", isErr, text)
 	}
 	assertCookieHidden(t, text, cookieVal, fake.token)
-	pending, _ := a.store.listApprovals("pending", 20)
+	pending, _ := a.store.Approvals.List("pending", 20)
 	if len(pending) != 0 {
 		t.Fatalf("missing token should not create an approval card: %+v", pending)
 	}
@@ -159,21 +163,21 @@ func TestSQLConsoleCookieJarCallRedacts(t *testing.T) {
 	cookieVal := "sess_" + privateTestValue(t)
 	m := saveSQLConsoleCookie(t, a, fake, s.URL, cookieVal, true)
 
-	tool, err := m.sqlConsoleTool(m.enabledDatasources()[0])
+	tool, err := m.SQLConsoleTool(firstDatasource(t, m))
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := a.Prepare(tool, map[string]any{"sql": "SELECT id FROM t WHERE id=1 LIMIT 10", "database": "orders"})
+	prepared, err := a.executor().Prepare(tool, map[string]any{"sql": "SELECT id FROM t WHERE id=1 LIMIT 10", "database": "orders"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	redactSQLConsolePreview(prepared, m, "orders", nil)
+	prepared.RedactConsole(m.Name, "orders", nil)
 	prev, _ := json.Marshal(prepared.Preview)
 	assertCookieHidden(t, string(prev), cookieVal, fake.token)
 
 	done := make(chan approvalReply, 1)
 	go func() {
-		v, invErr := a.invokeTool(context.Background(), &mcpCtx{}, wsSQLQueryTool, map[string]any{"middleware": m.Name, "database": "orders", "sql": "SELECT id FROM t WHERE id=1 LIMIT 10"})
+		v, invErr := invokeTool(a, context.Background(), mwconfig.WSSQLQueryTool, map[string]any{"middleware": m.Name, "database": "orders", "sql": "SELECT id FROM t WHERE id=1 LIMIT 10"})
 		done <- unpackApprovalReply(v, invErr)
 	}()
 	rec := pendingApprovals(t, a, 1)[0]
@@ -200,34 +204,12 @@ func TestSQLConsoleCookieJarCallRedacts(t *testing.T) {
 	assertCookieHidden(t, string(audit), cookieVal, fake.token)
 }
 
-func TestRequiredSiteHeadersSkipsCookieJarRef(t *testing.T) {
-	a := approvalTestApp(t)
-	m := sqlConsoleTestMW("sqlconsole", "wss://sql.example.com/api/ws")
-	bindCookieHeader(m)
-	if err := a.store.SaveMiddleware(m); err != nil {
-		t.Fatal(err)
-	}
-	site := a.store.EnsureSite(m.Config.URL)
-	if site == nil {
-		t.Fatal("expected site for wss URL")
-	}
-	need := a.requiredSiteHeaders(site)
-	for _, n := range need {
-		if strings.EqualFold(n, "cookie") {
-			t.Fatalf("required headers should exclude cookie: %v", need)
-		}
-	}
-	if len(need) != 1 || need[0] != "sso-epctoken" {
-		t.Fatalf("required headers=%v", need)
-	}
-}
-
 func TestWSToolHeaderCookieBinding(t *testing.T) {
 	fake := newCountingWS(2)
 	s := fake.start(t)
 	a := approvalTestApp(t)
 	cookieVal := "sess_" + privateTestValue(t)
-	if err := a.HarvestRequestHeader("", s.URL, "sso-epctoken", fake.token); err != nil {
+	if err := a.loginRuntime().HarvestRequestHeader("", s.URL, "sso-epctoken", fake.token); err != nil {
 		t.Fatal(err)
 	}
 	a.store.ReplaceCookies([]Cookie{jarSID(s.URL, cookieVal)})
@@ -236,17 +218,17 @@ func TestWSToolHeaderCookieBinding(t *testing.T) {
 	if err := a.store.SaveTool(tool); err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := a.Prepare(tool, map[string]any{"sql": "SELECT id FROM t WHERE id=1 LIMIT 10"})
+	prepared, err := a.executor().Prepare(tool, map[string]any{"sql": "SELECT id FROM t WHERE id=1 LIMIT 10"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	prev, _ := json.Marshal(prepared.Preview)
 	assertCookieHidden(t, string(prev), cookieVal, fake.token)
-	res, err := a.Send(prepared)
+	res, err := a.executor().Send(prepared)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Outcome != outcomeSuccess {
+	if res.Outcome != execution.OutcomeSuccess {
 		t.Fatalf("outcome=%s err=%s body=%s", res.Outcome, res.Error, res.Body)
 	}
 	assertCookieHidden(t, res.Body+res.Error, cookieVal, fake.token)
@@ -262,7 +244,7 @@ func TestResolveCookieJarWSS(t *testing.T) {
 	cookieVal := "sess_" + privateTestValue(t)
 	a.store.ReplaceCookies([]Cookie{{Name: "sid", Value: cookieVal, Domain: "sql.example.com", Path: "/", Secure: true, Session: true}})
 	var secrets []string
-	got, err := a.resolveCookieJar("wss://sql.example.com/api/ws/execute", &secrets)
+	got, err := a.executor().ResolveWSReference("header.cookie", "wss://sql.example.com/api/ws/execute", &secrets)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,10 +255,10 @@ func TestResolveCookieJarWSS(t *testing.T) {
 	if !strings.Contains(joined, cookieVal) {
 		t.Fatal("cookie was not registered as a secret")
 	}
-	if _, err := a.GetSiteHeader("wss://sql.example.com/api/ws/execute", "cookie"); err == nil {
+	if _, err := a.loginRuntime().GetSiteHeader("wss://sql.example.com/api/ws/execute", "cookie"); err == nil {
 		t.Fatal("harvested site_headers should not contain cookie")
 	}
-	v, err := a.resolveWSRef("HEADER.COOKIE", "wss://sql.example.com/api/ws/execute", &secrets)
+	v, err := a.executor().ResolveWSReference("HEADER.COOKIE", "wss://sql.example.com/api/ws/execute", &secrets)
 	if err != nil || v != got {
 		t.Fatalf("case-insensitive header.cookie: v=%q err=%v", v, err)
 	}
@@ -294,7 +276,7 @@ func TestNormalizeCookieHeaderBinding(t *testing.T) {
 	}
 	for in, want := range cases {
 		h := map[string]string{"cookie": in, "sso-epctoken": "{{header.sso-epctoken}}"}
-		normalizeCookieHeaderBinding(h)
+		mwconfig.NormalizeCookieHeaderBinding(h)
 		if _, ok := h["cookie"]; ok {
 			t.Fatalf("lowercase cookie key should have been canonicalized: %v", h)
 		}
@@ -309,7 +291,7 @@ func TestNormalizeCookieHeaderBinding(t *testing.T) {
 
 func TestMigrateWSToolNormalizesCookieBinding(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "v7-cookie.db")
+	path := filepath.Join(dir, "v7-cookie.DB()")
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
@@ -326,11 +308,11 @@ PRAGMA user_version=7;`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := OpenStore(path)
+	st, err := store.OpenStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.db.Close()
+	defer st.DB().Close()
 	mw, err := st.GetMiddlewareByName("demo_sql")
 	if err != nil {
 		t.Fatal(err)

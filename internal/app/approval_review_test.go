@@ -1,6 +1,12 @@
 package app
 
 import (
+	"action2mcp/internal/approval"
+	"action2mcp/internal/domain"
+	"action2mcp/internal/execution"
+	"action2mcp/internal/recording"
+	"action2mcp/internal/store"
+	"action2mcp/internal/vault"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -26,15 +32,15 @@ func TestApprovalStickySourceFloor(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			requests := []*ReqRecord{}
+			requests := []*recording.Request{}
 			for i := 1; i <= 2; i++ {
-				q := &ReqRecord{RecordingID: recID, Seq: i, Method: "GET", URL: fmt.Sprintf("%s/api/%d", upstream.URL, i), ResourceType: "Fetch", Status: 200}
+				q := &recording.Request{RecordingID: recID, Seq: i, Method: "GET", URL: fmt.Sprintf("%s/api/%d", upstream.URL, i), ResourceType: "Fetch", Status: 200}
 				if err := a.store.InsertRequest(q); err != nil {
 					t.Fatal(err)
 				}
 				requests = append(requests, q)
 			}
-			pack := &Pack{Name: "来源下限测试包", Enabled: true}
+			pack := &store.Pack{Name: "来源下限测试包", Enabled: true}
 			if err := a.store.SavePack(pack); err != nil {
 				t.Fatal(err)
 			}
@@ -48,13 +54,13 @@ func TestApprovalStickySourceFloor(t *testing.T) {
 			wantSource := requests[0].ID
 			switch change {
 			case "overwrite_source":
-				if _, bad := a.recSaveTool(nil, map[string]any{"request_id": requests[1].ID, "name": tool.Name, "pack": pack.Name, "overwrite": true}); bad {
+				if _, bad := recSaveTool(a, map[string]any{"request_id": requests[1].ID, "name": tool.Name, "pack": pack.Name, "overwrite": true}); bad {
 					t.Fatal("source overwrite failed")
 				}
 				wantSource = requests[1].ID
 			case "import_without_source":
-				file := compactJSON(map[string]any{"format": "action2mcp", "tools": []map[string]any{{"name": tool.Name, "method": "GET", "url": tool.URL, "approval": "off"}}})
-				if _, err := a.Import(file); err != nil {
+				file := execution.CompactJSON(map[string]any{"format": "action2mcp", "tools": []map[string]any{{"name": tool.Name, "method": "GET", "url": tool.URL, "approval": "off"}}})
+				if _, err := a.transfer().Import(file); err != nil {
 					t.Fatal(err)
 				}
 			case "console_lower", "console_raise_lower":
@@ -79,7 +85,7 @@ func TestApprovalStickySourceFloor(t *testing.T) {
 				t.Fatal("overwrite policy is incorrect")
 			}
 			// Exact review scenario: A moved from R1 to R2, then R1 is saved as B.
-			if _, bad := a.recSaveTool(nil, map[string]any{"request_id": requests[0].ID, "name": "approval_call", "pack": pack.Name}); bad {
+			if _, bad := recSaveTool(a, map[string]any{"request_id": requests[0].ID, "name": "approval_call", "pack": pack.Name}); bad {
 				t.Fatal("renamed source save failed")
 			}
 			derived, err := a.store.GetToolByName("approval_call")
@@ -102,28 +108,28 @@ func TestApprovalStickySourceFloor(t *testing.T) {
 }
 
 func TestApprovalFloorBackfillAndHistoricalSources(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "floors.db")
-	s, err := OpenStore(path)
+	path := filepath.Join(t.TempDir(), "floors.DB()")
+	s, err := store.OpenStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { s.db.Close() }()
+	defer func() { s.DB().Close() }()
 	tool := &Tool{Name: "historical", Method: "GET", URL: "https://example.com/api", SourceReqID: 1, Approval: "always"}
 	if err := s.SaveTool(tool); err != nil {
 		t.Fatal(err)
 	}
 	// Simulate a pre-floor 0.5.3 database, then backfill twice without lowering it.
-	if _, err := s.db.Exec(`DELETE FROM source_approval_floor; DELETE FROM tool_approval_sources`); err != nil {
+	if _, err := s.DB().Exec(`DELETE FROM source_approval_floor; DELETE FROM tool_approval_sources`); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
-		s.db.Close()
-		s, err = OpenStore(path)
+		s.DB().Close()
+		s, err = store.OpenStore(path)
 		if err != nil {
 			t.Fatal(err)
 		}
 		var floor string
-		if err := s.db.QueryRow(`SELECT approval FROM source_approval_floor WHERE source_request_id=1`).Scan(&floor); err != nil || floor != "always" {
+		if err := s.DB().QueryRow(`SELECT approval FROM source_approval_floor WHERE source_request_id=1`).Scan(&floor); err != nil || floor != "always" {
 			t.Fatal("backfill lost the persistent floor")
 		}
 		tool.Approval = "off"
@@ -139,12 +145,12 @@ func TestApprovalFloorBackfillAndHistoricalSources(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	s.db.Close()
-	s, err = OpenStore(path)
+	s.DB().Close()
+	s, err = store.OpenStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pack := &Pack{Name: "历史来源包", Enabled: true}
+	pack := &store.Pack{Name: "历史来源包", Enabled: true}
 	if err := s.SavePack(pack); err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +160,7 @@ func TestApprovalFloorBackfillAndHistoricalSources(t *testing.T) {
 	}
 	for _, source := range []int64{1, 2, 3, 4} {
 		var floor string
-		if err := s.db.QueryRow(`SELECT approval FROM source_approval_floor WHERE source_request_id=?`, source).Scan(&floor); err != nil || floor != "always" {
+		if err := s.DB().QueryRow(`SELECT approval FROM source_approval_floor WHERE source_request_id=?`, source).Scan(&floor); err != nil || floor != "always" {
 			t.Fatal("write did not raise all involved source floors")
 		}
 	}
@@ -176,7 +182,7 @@ func TestApprovalFloorBackfillAndHistoricalSources(t *testing.T) {
 		}
 	}
 	var invalid int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM source_approval_floor WHERE source_request_id<=0`).Scan(&invalid); err != nil || invalid != 0 {
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM source_approval_floor WHERE source_request_id<=0`).Scan(&invalid); err != nil || invalid != 0 {
 		t.Fatal("nonpositive source IDs participated in the floor")
 	}
 }
@@ -189,7 +195,7 @@ func TestApprovalOverwriteTargetByID(t *testing.T) {
 			if err := a.store.SaveTool(tool); err != nil {
 				t.Fatal(err)
 			}
-			pack := &Pack{Name: "覆盖目标包", Enabled: true}
+			pack := &store.Pack{Name: "覆盖目标包", Enabled: true}
 			if err := a.store.SavePack(pack); err != nil {
 				t.Fatal(err)
 			}
@@ -197,7 +203,7 @@ func TestApprovalOverwriteTargetByID(t *testing.T) {
 			if renamed {
 				incoming.Name = "old" // ID/name were resolved before the console rename.
 				tool.Name = "console_renamed"
-				if err := a.persistTool(tool); err != nil {
+				if err := a.tools().Persist(tool); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -218,7 +224,7 @@ func TestApprovalRecSaveMidflightRename(t *testing.T) {
 	if err := a.store.SaveTool(tool); err != nil {
 		t.Fatal(err)
 	}
-	pack := &Pack{Name: "交错重命名包", Enabled: true}
+	pack := &store.Pack{Name: "交错重命名包", Enabled: true}
 	if err := a.store.SavePack(pack); err != nil {
 		t.Fatal(err)
 	}
@@ -226,16 +232,16 @@ func TestApprovalRecSaveMidflightRename(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	q := &ReqRecord{RecordingID: recID, Seq: 1, Method: "GET", URL: tool.URL, ResourceType: "Fetch", Status: 200}
+	q := &recording.Request{RecordingID: recID, Seq: 1, Method: "GET", URL: tool.URL, ResourceType: "Fetch", Status: 200}
 	if err := a.store.InsertRequest(q); err != nil {
 		t.Fatal(err)
 	}
 	// EnsureSite runs after rec_save_tool's name lookup but before its write tx.
 	// A trigger makes this interleaving deterministic without sleeps or hooks.
-	if _, err := a.store.db.Exec(fmt.Sprintf(`CREATE TRIGGER rename_during_save AFTER INSERT ON sites BEGIN UPDATE tools SET name='console_renamed',rev=rev+1 WHERE id=%d; END`, tool.ID)); err != nil {
+	if _, err := a.store.DB().Exec(fmt.Sprintf(`CREATE TRIGGER rename_during_save AFTER INSERT ON sites BEGIN UPDATE tools SET name='console_renamed',rev=rev+1 WHERE id=%d; END`, tool.ID)); err != nil {
 		t.Fatal(err)
 	}
-	if _, bad := a.recSaveTool(nil, map[string]any{"request_id": q.ID, "name": "old", "pack": pack.Name, "overwrite": true}); bad {
+	if _, bad := recSaveTool(a, map[string]any{"request_id": q.ID, "name": "old", "pack": pack.Name, "overwrite": true}); bad {
 		t.Fatal("interleaved rec_save_tool overwrite failed")
 	}
 	stored, err := a.store.GetTool(tool.ID)
@@ -265,8 +271,8 @@ func TestApprovalUnquotedSecretAPIAndHistory(t *testing.T) {
 			}))
 			tool, _ := saveApprovalTool(t, a, upstream, "always")
 			tool.Body = `{"password":{{label}},"value":"{{value}}"}`
-			tool.Params = append(tool.Params, Param{Name: "label", Type: "integer", Required: true})
-			if !paramIsSecret(tool, tool.Params[1]) {
+			tool.Params = append(tool.Params, domain.Param{Name: "label", Type: "integer", Required: true})
+			if !execution.ParamIsSecret(tool, tool.Params[1]) {
 				t.Fatal("unquoted renamed integer secret was missed")
 			}
 			if err := a.store.SaveTool(tool); err != nil {
@@ -281,12 +287,12 @@ func TestApprovalUnquotedSecretAPIAndHistory(t *testing.T) {
 			call := startApprovalCall(a, ctx, map[string]any{"value": "old", "label": value})
 			pendingApprovals(t, a, 1)
 			pending := listApprovalAPI(t, handler, origin, "pending")[0]
-			if pending.ArgsDisplay["label"] != secretMask || !pending.Params[1].Secret {
+			if pending.ArgsDisplay["label"] != vault.Mask || !pending.Params[1].Secret {
 				t.Fatal("unquoted secret leaked into card fields")
 			}
 			diff := map[string]any{"label": replacement}
 			w := approvalAPIRequest(t, handler, http.MethodPost, fmt.Sprintf("/api/approvals/%d/preview", pending.ID), origin, "application/json", map[string]any{"args": diff, "nonce": pending.Nonce})
-			var preview ApprovalPreview
+			var preview approval.Preview
 			requireApprovalAPIResponse(t, w, 200, &preview)
 			w = approvalAPIRequest(t, handler, http.MethodPost, fmt.Sprintf("/api/approvals/%d/decide", pending.ID), origin, "application/json",
 				map[string]any{"action": "edit", "args": diff, "nonce": pending.Nonce, "preview_hash": preview.PreviewHash})
@@ -297,10 +303,10 @@ func TestApprovalUnquotedSecretAPIAndHistory(t *testing.T) {
 			}
 			history := listApprovalAPI(t, handler, origin, "all")
 			var stored string
-			if err := a.store.db.QueryRow(`SELECT args_display || final_args_display || preview_display || params_json || result FROM approvals WHERE id=?`, pending.ID).Scan(&stored); err != nil {
+			if err := a.store.DB().QueryRow(`SELECT args_display || final_args_display || preview_display || params_json || result FROM approvals WHERE id=?`, pending.ID).Scan(&stored); err != nil {
 				t.Fatal(err)
 			}
-			all := string(compactJSON(pending)) + string(compactJSON(preview)) + string(compactJSON(history)) + reply.text + stored
+			all := string(execution.CompactJSON(pending)) + string(execution.CompactJSON(preview)) + string(execution.CompactJSON(history)) + reply.text + stored
 			if strings.Contains(all, secret) || strings.Contains(all, replacement) {
 				t.Fatal("raw unquoted secret leaked into approval output")
 			}
@@ -326,7 +332,7 @@ func TestApprovalPartialEditsKeepOriginalVerbatimArgs(t *testing.T) {
 	}))
 	tool, _ := saveApprovalTool(t, a, upstream, "always")
 	tool.Body = `{"value":"{{value}}","count":{{count}}}`
-	tool.Params = append(tool.Params, Param{Name: "count", Type: "integer", Required: true})
+	tool.Params = append(tool.Params, domain.Param{Name: "count", Type: "integer", Required: true})
 	if err := a.store.SaveTool(tool); err != nil {
 		t.Fatal(err)
 	}
@@ -338,28 +344,35 @@ func TestApprovalPartialEditsKeepOriginalVerbatimArgs(t *testing.T) {
 		t.Fatal("non-secret parameter must be displayed verbatim")
 	}
 	requirePrivateApprovalValuesAbsent(t, r.Preview, secret)
-	unchanged, err := a.PreviewApproval(r.ID, r.Nonce, nil)
+	unchanged, err := a.approvals().Preview(r.ID, r.Nonce, nil)
 	if err != nil || unchanged.PreviewHash != r.PreviewHash {
 		t.Fatal("empty preview diff did not preserve originals")
 	}
 	diff := map[string]any{"count": "2"}
-	preview, err := a.PreviewApproval(r.ID, r.Nonce, diff)
+	preview, err := a.approvals().Preview(r.ID, r.Nonce, diff)
 	if err != nil {
 		t.Fatal("partial preview failed")
 	}
-	a.approvalMu.Lock()
-	p := a.approvals[r.ID]
-	merged, err := a.editApprovalArgs(p, diff)
-	unchangedOriginal := p.args["count"] == float64(1) && p.args["value"] == original
-	a.approvalMu.Unlock()
+	originalArgs := map[string]any{"count": float64(1), "value": original, "extra": "original"}
+	merged, err := approval.EditArgs(originalArgs, diff, func(name string, value any) bool {
+		param := domain.Param{Name: name}
+		for _, candidate := range tool.Params {
+			if candidate.Name == name {
+				param = candidate
+			}
+		}
+		return a.executor().ParamIsSecret(tool, param, value)
+	})
+	unchangedOriginal := originalArgs["count"] == float64(1) && originalArgs["value"] == original
+
 	if err != nil || !unchangedOriginal || merged["value"] != original || merged["extra"] != "original" {
 		t.Fatal("partial merge lost or mutated an original argument")
 	}
-	expected, err := a.Prepare(tool, map[string]any{"value": original, "count": "2", "extra": "original"})
+	expected, err := a.executor().Prepare(tool, map[string]any{"value": original, "count": "2", "extra": "original"})
 	if err != nil || expected.PreviewHash != preview.PreviewHash {
 		t.Fatal("preview did not merge the partial edit with raw originals")
 	}
-	if err := a.DecideApproval(r.ID, r.Nonce, "edit", diff, "", preview.PreviewHash); err != nil {
+	if err := a.approvals().Decide(r.ID, r.Nonce, "edit", diff, "", preview.PreviewHash); err != nil {
 		t.Fatal("partial decision failed")
 	}
 	if getApprovalReply(t, call).isError {
@@ -378,7 +391,7 @@ func TestApprovalTerminalWriteFailureRepairsOrphan(t *testing.T) {
 			a.approvalTimeout = 150 * time.Millisecond
 			var hits atomic.Int32
 			saveApprovalTool(t, a, newApprovalTarget(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1) })), "always")
-			if _, err := a.store.db.Exec(`CREATE TRIGGER fail_terminal BEFORE UPDATE OF status ON approvals WHEN OLD.status='pending' BEGIN SELECT RAISE(FAIL,'injected terminal failure'); END`); err != nil {
+			if _, err := a.store.DB().Exec(`CREATE TRIGGER fail_terminal BEFORE UPDATE OF status ON approvals WHEN OLD.status='pending' BEGIN SELECT RAISE(FAIL,'injected terminal failure'); END`); err != nil {
 				t.Fatal(err)
 			}
 			call := startApprovalCall(a, context.Background(), map[string]any{"value": "one"})
@@ -387,11 +400,11 @@ func TestApprovalTerminalWriteFailureRepairsOrphan(t *testing.T) {
 				t.Fatal("terminal write failure changed the timeout result")
 			}
 			var status string
-			if err := a.store.db.QueryRow(`SELECT status FROM approvals WHERE id=?`, r.ID).Scan(&status); err != nil || status != "pending" {
+			if err := a.store.DB().QueryRow(`SELECT status FROM approvals WHERE id=?`, r.ID).Scan(&status); err != nil || status != "pending" {
 				t.Fatal("fixture did not leave a failed terminal write")
 			}
-			requireApprovalStatus(t, a.DecideApproval(r.ID, r.Nonce, "approve", nil, "", r.PreviewHash), 409)
-			if _, err := a.store.db.Exec(`DROP TRIGGER fail_terminal`); err != nil {
+			requireApprovalStatus(t, a.approvals().Decide(r.ID, r.Nonce, "approve", nil, "", r.PreviewHash), 409)
+			if _, err := a.store.DB().Exec(`DROP TRIGGER fail_terminal`); err != nil {
 				t.Fatal(err)
 			}
 			if repair == "list" {
@@ -401,12 +414,13 @@ func TestApprovalTerminalWriteFailureRepairsOrphan(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			calls := []<-chan approvalReply{startApprovalCall(a, ctx, map[string]any{"value": "new"})}
-			// Observe memory directly so the next_call case cannot be repaired by List.
+			// Observe persistence without List so next_call repair cannot be caused by polling.
 			deadline := time.Now().Add(5 * time.Second)
 			for {
-				a.approvalMu.Lock()
-				live := len(a.approvals)
-				a.approvalMu.Unlock()
+				var live int
+				if err := a.store.DB().QueryRow(`SELECT COUNT(*) FROM approvals WHERE status='pending' AND id<>?`, r.ID).Scan(&live); err != nil {
+					t.Fatal(err)
+				}
 				if live == 1 {
 					break
 				}
@@ -415,13 +429,13 @@ func TestApprovalTerminalWriteFailureRepairsOrphan(t *testing.T) {
 				}
 				time.Sleep(time.Millisecond)
 			}
-			if err := a.store.db.QueryRow(`SELECT status FROM approvals WHERE id=?`, r.ID).Scan(&status); err != nil || status != "cancelled" {
+			if err := a.store.DB().QueryRow(`SELECT status FROM approvals WHERE id=?`, r.ID).Scan(&status); err != nil || status != "cancelled" {
 				t.Fatal("orphan pending row was not repaired")
 			}
-			for i := 1; i < maxPendingApprovals; i++ {
+			for i := 1; i < approval.MaxPending; i++ {
 				calls = append(calls, startApprovalCall(a, ctx, map[string]any{"value": "new"}))
 			}
-			pendingApprovals(t, a, maxPendingApprovals)
+			pendingApprovals(t, a, approval.MaxPending)
 			extra := getApprovalReply(t, startApprovalCall(a, ctx, map[string]any{"value": "extra"}))
 			if !extra.isError || !strings.Contains(extra.text, "待审批调用过多") {
 				t.Fatal("live pending cap was not enforced")
@@ -430,7 +444,7 @@ func TestApprovalTerminalWriteFailureRepairsOrphan(t *testing.T) {
 			for _, call := range calls {
 				getApprovalReply(t, call)
 			}
-			requireApprovalStatus(t, a.DecideApproval(r.ID, r.Nonce, "approve", nil, "", r.PreviewHash), 409)
+			requireApprovalStatus(t, a.approvals().Decide(r.ID, r.Nonce, "approve", nil, "", r.PreviewHash), 409)
 			if hits.Load() != 0 {
 				t.Fatal("orphan repair or cancellation executed a request")
 			}

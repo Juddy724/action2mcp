@@ -1,6 +1,8 @@
 package app
 
 import (
+	"action2mcp/internal/execution"
+	"action2mcp/internal/recording"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -8,17 +10,17 @@ import (
 
 func TestBuildWSDraftBindsTokenAndSQL(t *testing.T) {
 	token := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	sent := wsEnv([]wsStoredFrame{{Op: 1, Text: `execute {"data":{"sql":"SELECT id FROM t WHERE id=1 LIMIT 10","spaceCode":"s"},"token":"` + token + `"}`}}, false, "", "")
-	recv := wsEnv([]wsStoredFrame{
+	sent := recording.NewEnvelope([]recording.Frame{{Op: 1, Text: `execute {"data":{"sql":"SELECT id FROM t WHERE id=1 LIMIT 10","spaceCode":"s"},"token":"` + token + `"}`}}, false, "", "")
+	recv := recording.NewEnvelope([]recording.Frame{
 		{Op: 1, Text: `execResult {"data":{"success":true,"done":true}}`},
 		{Op: 1, Text: `close {}`},
 	}, false, "closed", "")
 	sb, _ := json.Marshal(sent)
 	rb, _ := json.Marshal(recv)
-	q := &ReqRecord{Method: "WS", URL: "wss://sql.example.com/api/ws/execute", ResourceType: "WebSocket", Status: 101,
+	q := &recording.Request{Method: "WS", URL: "wss://sql.example.com/api/ws/execute", ResourceType: "WebSocket", Status: 101,
 		ReqHeaders: map[string]string{"sso-epctoken": token, "Content-Type": "application/json"},
 		ReqBody:    string(sb), RespBody: string(rb)}
-	cands := SuggestParams(q)
+	cands := execution.SuggestParams(q)
 	var sqlCand Candidate
 	for _, c := range cands {
 		if strings.HasSuffix(c.Path, "data.sql") || strings.HasSuffix(c.Path, ":data.sql") {
@@ -32,7 +34,7 @@ func TestBuildWSDraftBindsTokenAndSQL(t *testing.T) {
 	if sqlCand.Path == "" {
 		t.Fatalf("sql candidate missing: %+v", cands)
 	}
-	tool, err := BuildDraft(q, []Candidate{sqlCand})
+	tool, err := execution.BuildDraft(q, []Candidate{sqlCand})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +48,7 @@ func TestBuildWSDraftBindsTokenAndSQL(t *testing.T) {
 	if !strings.Contains(msg, "{{header.sso-epctoken}}") || !strings.Contains(msg, "{{sql}}") {
 		t.Fatalf("bindings missing: %s", msg)
 	}
-	if err := validateWSCredentialBindings(tool); err != nil {
+	if err := execution.ValidateWSCredentialBindings(tool); err != nil {
 		t.Fatal(err)
 	}
 	tool.Name = "ws_sql"
@@ -55,7 +57,7 @@ func TestBuildWSDraftBindsTokenAndSQL(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(a.Shutdown)
-	if err := a.persistTool(tool); err != nil {
+	if err := a.tools().Persist(tool); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := a.store.GetToolByName("ws_sql")
@@ -67,15 +69,15 @@ func TestBuildWSDraftBindsTokenAndSQL(t *testing.T) {
 	bad.ID = 0
 	bad.Name = "ws_sql_bad"
 	bad.Config.Messages = []string{`execute {"data":{"sql":"{{sql}}"},"token":"` + token + `"}`}
-	if err := a.persistTool(&bad); err == nil {
+	if err := a.tools().Persist(&bad); err == nil {
 		t.Fatal("literal token should be rejected")
 	}
 }
 
 func TestBuildWSDraftRejectsTruncated(t *testing.T) {
-	env := wsEnv([]wsStoredFrame{{Op: 1, Text: `execute {"data":{"sql":"SELECT 1 LIMIT 1"}}`}}, true, "", "")
+	env := recording.NewEnvelope([]recording.Frame{{Op: 1, Text: `execute {"data":{"sql":"SELECT 1 LIMIT 1"}}`}}, true, "", "")
 	b, _ := json.Marshal(env)
-	_, err := BuildWSDraft(&ReqRecord{Method: "WS", URL: "wss://sql.example.com/ws", ReqBody: string(b)}, nil)
+	_, err := execution.BuildWSDraft(&recording.Request{Method: "WS", URL: "wss://sql.example.com/ws", ReqBody: string(b)}, nil)
 	if err == nil || !strings.Contains(err.Error(), "截断") {
 		t.Fatalf("err=%v", err)
 	}

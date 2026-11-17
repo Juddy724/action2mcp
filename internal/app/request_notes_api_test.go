@@ -1,6 +1,8 @@
 package app
 
 import (
+	"action2mcp/internal/recording"
+
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -23,7 +25,7 @@ func TestRequestNotesAPI(t *testing.T) {
 	if err := a.store.SetRecordingSummary(recID, "查询订单和业务日志以定位线上问题。"); err != nil {
 		t.Fatal(err)
 	}
-	reqs := []*ReqRecord{
+	reqs := []*recording.Request{
 		{RecordingID: recID, Seq: 1, Method: "GET", URL: "https://example.com/api/orders", ResourceType: "Fetch", Status: 200},
 		{RecordingID: recID, Seq: 2, Method: "GET", URL: "https://example.com/api/logs", ResourceType: "Fetch", Status: 200, Noise: true, NoiseReason: "埋点/日志"},
 	}
@@ -44,12 +46,12 @@ func TestRequestNotesAPI(t *testing.T) {
 		}
 		return w
 	}
-	getRecording := func() (Recording, []ReqRecord) {
+	getRecording := func() (recording.Recording, []recording.Request) {
 		t.Helper()
 		w := call("GET", fmt.Sprintf("/api/recordings/%d", recID), "", http.StatusOK)
 		var d struct {
-			Recording Recording   `json:"recording"`
-			Requests  []ReqRecord `json:"requests"`
+			Recording recording.Recording `json:"recording"`
+			Requests  []recording.Request `json:"requests"`
 		}
 		if err := json.Unmarshal(w.Body.Bytes(), &d); err != nil {
 			t.Fatal(err)
@@ -59,7 +61,7 @@ func TestRequestNotesAPI(t *testing.T) {
 		}
 		return d.Recording, d.Requests
 	}
-	checkRequest := func(index int, noise bool, note *RequestNote) {
+	checkRequest := func(index int, noise bool, note *recording.Note) {
 		t.Helper()
 		_, rows := getRecording()
 		q := rows[index]
@@ -68,7 +70,7 @@ func TestRequestNotesAPI(t *testing.T) {
 		}
 		w := call("GET", fmt.Sprintf("/api/requests/%d", q.ID), "", 200)
 		var detail struct {
-			Request ReqRecord `json:"request"`
+			Request recording.Request `json:"request"`
 		}
 		if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil {
 			t.Fatal(err)
@@ -97,7 +99,7 @@ func TestRequestNotesAPI(t *testing.T) {
 	}
 	checkRequest(0, false, nil)
 	checkRequest(1, true, nil)
-	agent := RequestNote{RequestID: reqs[1].ID, RecordingID: recID, Purpose: "查询业务日志", Category: "query", Useful: new(true), NoiseOverride: new(false), Source: "agent"}
+	agent := recording.Note{RequestID: reqs[1].ID, RecordingID: recID, Purpose: "查询业务日志", Category: "query", Useful: new(true), NoiseOverride: new(false), Source: "agent"}
 	if err := a.store.SetRequestNote(agent); err != nil {
 		t.Fatal(err)
 	}
@@ -114,10 +116,10 @@ func TestRequestNotesAPI(t *testing.T) {
 	for index, original := range reqs {
 		for _, override := range []*bool{new(true), new(false), nil} {
 			// Spoofed ids/source/timestamp cannot change console authorship.
-			n := RequestNote{RequestID: 99999, RecordingID: 99999, Purpose: "按订单号查询处理进度", Category: "query", Useful: new(false), NoiseOverride: override, Source: "agent", UpdatedAt: "2000-01-01 00:00:00"}
+			n := recording.Note{RequestID: 99999, RecordingID: 99999, Purpose: "按订单号查询处理进度", Category: "query", Useful: new(false), NoiseOverride: override, Source: "agent", UpdatedAt: "2000-01-01 00:00:00"}
 			path := fmt.Sprintf("/api/requests/%d/note", original.ID)
 			w := call("PUT", path, js(n), 200)
-			var saved RequestNote
+			var saved recording.Note
 			if err := json.Unmarshal(w.Body.Bytes(), &saved); err != nil {
 				t.Fatal(err)
 			}
@@ -140,7 +142,7 @@ func TestRequestNotesAPI(t *testing.T) {
 			if rec.UsefulCount != count {
 				t.Fatalf("effective count = %d, want %d", rec.UsefulCount, count)
 			}
-			var listed []Recording
+			var listed []recording.Recording
 			if err := json.Unmarshal(call("GET", "/api/recordings", "", 200).Body.Bytes(), &listed); err != nil || len(listed) != 1 || listed[0].UsefulCount != count {
 				t.Fatalf("recording list count: %+v, %v", listed, err)
 			}
@@ -173,21 +175,21 @@ func TestRequestNoteOverrideTakesPrecedenceForLogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	q := &ReqRecord{RecordingID: recID, Method: "POST", URL: "https://example.com/login", ReqBody: "username=alice&password=example-password", Noise: true, NoiseReason: "埋点/日志"}
+	q := &recording.Request{RecordingID: recID, Method: "POST", URL: "https://example.com/login", ReqBody: "username=alice&password=example-password", Noise: true, NoiseReason: "埋点/日志"}
 	if err := a.store.InsertRequest(q); err != nil {
 		t.Fatal(err)
 	}
 	h := a.Handler()
 	for _, override := range []*bool{nil, new(true), new(false)} {
-		if err := a.store.SetRequestNote(RequestNote{RequestID: q.ID, RecordingID: recID, Category: "auth", NoiseOverride: override, Source: "agent"}); err != nil {
+		if err := a.store.SetRequestNote(recording.Note{RequestID: q.ID, RecordingID: recID, Category: "auth", NoiseOverride: override, Source: "agent"}); err != nil {
 			t.Fatal(err)
 		}
 		for _, path := range []string{fmt.Sprintf("/api/recordings/%d", recID), fmt.Sprintf("/api/requests/%d", q.ID)} {
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost"+path, nil))
 			var d struct {
-				Requests []ReqRecord `json:"requests"`
-				Request  ReqRecord   `json:"request"`
+				Requests []recording.Request `json:"requests"`
+				Request  recording.Request   `json:"request"`
 			}
 			if err := json.Unmarshal(w.Body.Bytes(), &d); err != nil || w.Code != 200 {
 				t.Fatalf("login response: %s, %v", w.Body.String(), err)

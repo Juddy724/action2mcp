@@ -1,6 +1,9 @@
 package app
 
 import (
+	"action2mcp/internal/mcp"
+	"action2mcp/internal/store"
+	"action2mcp/internal/vault"
 	"encoding/json"
 	"net/http/httptest"
 	"strings"
@@ -23,20 +26,20 @@ func TestPackGuide(t *testing.T) {
 		t.Fatal(err)
 	}
 	guide := marker + " 密文 " + secret + " 不能出现。引用 {{secret.svc_password}} 保持原样。"
-	p := &Pack{Name: "回显包", Description: "回显", Scenarios: "需要回显时", Guide: guide, Enabled: true, ToolIDs: []int64{tool.ID}}
+	p := &store.Pack{Name: "回显包", Description: "回显", Scenarios: "需要回显时", Guide: guide, Enabled: true, ToolIDs: []int64{tool.ID}}
 	if err := app.store.SavePack(p); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.store.SavePack(&Pack{Name: "空说明", Enabled: true}); err != nil {
+	if err := app.store.SavePack(&store.Pack{Name: "空说明", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.store.SavePack(&Pack{Name: "关闭的包", Guide: "隐藏说明MARKER", Enabled: false}); err != nil {
+	if err := app.store.SavePack(&store.Pack{Name: "关闭的包", Guide: "隐藏说明MARKER", Enabled: false}); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.store.SavePack(&Pack{Name: "刚好", Guide: strings.Repeat("a", maxPackGuideBytes), Enabled: true}); err != nil {
+	if err := app.store.SavePack(&store.Pack{Name: "刚好", Guide: strings.Repeat("a", packGuideLimitBytes), Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.store.SavePack(&Pack{Name: "太大", Guide: strings.Repeat("a", maxPackGuideBytes+1)}); err == nil {
+	if err := app.store.SavePack(&store.Pack{Name: "太大", Guide: strings.Repeat("a", packGuideLimitBytes+1)}); err == nil {
 		t.Fatal("oversize guide accepted")
 	}
 
@@ -66,7 +69,7 @@ func TestPackGuide(t *testing.T) {
 		t.Fatalf("empty guide: %s", empty)
 	}
 
-	app.store.SetSetting("mcp_mode", ModeFlat)
+	app.store.SetSetting("mcp_mode", mcp.ModeFlat)
 	flat := &mcpTestClient{t: t, url: srv.URL + "/mcp"}
 	_, finit := flat.call("initialize", map[string]any{"protocolVersion": "2025-06-18"})
 	finstr := finit["result"].(map[string]any)["instructions"].(string)
@@ -74,7 +77,7 @@ func TestPackGuide(t *testing.T) {
 		t.Fatalf("flat instructions: %s", finstr)
 	}
 
-	exp, err := app.Export()
+	exp, err := app.transfer().Export()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,35 +98,35 @@ func TestPackGuide(t *testing.T) {
 	if !strings.Contains(stored, secret) {
 		t.Fatal("stored guide was scrubbed in place")
 	}
-	keep, err := app.Import([]byte(`{"format":"action2mcp","packs":[{"name":"回显包","description":"imported","enabled":true,"tools":["echo_login"]}]}`))
+	keep, err := app.transfer().Import([]byte(`{"format":"action2mcp","packs":[{"name":"回显包","description":"imported","enabled":true,"tools":["echo_login"]}]}`))
 	if err != nil || keep.PacksUpdated != 1 {
 		t.Fatalf("import missing guide: %+v %v", keep, err)
 	}
 	if g := packGuide(t, app, "回显包"); g != stored {
 		t.Fatalf("missing guide field cleared it: %q", g)
 	}
-	if _, err := app.Import(exp); err != nil {
+	if _, err := app.transfer().Import(exp); err != nil {
 		t.Fatal(err)
 	}
-	if g := packGuide(t, app, "回显包"); strings.Contains(g, secret) || !strings.Contains(g, secretMask) || !strings.Contains(g, "{{secret.svc_password}}") {
+	if g := packGuide(t, app, "回显包"); strings.Contains(g, secret) || !strings.Contains(g, vault.Mask) || !strings.Contains(g, "{{secret.svc_password}}") {
 		t.Fatalf("round trip guide: %q", g)
 	}
-	if _, err := app.Import([]byte(`{"format":"action2mcp","packs":[{"name":"回显包","description":"imported","enabled":true,"guide":"","tools":["echo_login"]}]}`)); err != nil {
+	if _, err := app.transfer().Import([]byte(`{"format":"action2mcp","packs":[{"name":"回显包","description":"imported","enabled":true,"guide":"","tools":["echo_login"]}]}`)); err != nil {
 		t.Fatal(err)
 	}
 	if g := packGuide(t, app, "回显包"); g != "" {
 		t.Fatalf("explicit empty guide did not clear: %q", g)
 	}
-	if _, err := app.Import([]byte(`{"format":"action2mcp","packs":[{"name":"回显包","enabled":true,"guide":"新说明","tools":["echo_login"]}]}`)); err != nil {
+	if _, err := app.transfer().Import([]byte(`{"format":"action2mcp","packs":[{"name":"回显包","enabled":true,"guide":"新说明","tools":["echo_login"]}]}`)); err != nil {
 		t.Fatal(err)
 	}
 	if g := packGuide(t, app, "回显包"); g != "新说明" {
 		t.Fatalf("guide = %q", g)
 	}
 	huge, _ := json.Marshal(map[string]any{"format": "action2mcp", "packs": []map[string]any{{
-		"name": "回显包", "enabled": true, "guide": strings.Repeat("b", maxPackGuideBytes+1), "tools": []string{"echo_login"},
+		"name": "回显包", "enabled": true, "guide": strings.Repeat("b", packGuideLimitBytes+1), "tools": []string{"echo_login"},
 	}}})
-	if _, err := app.Import(huge); err == nil {
+	if _, err := app.transfer().Import(huge); err == nil {
 		t.Fatal("oversize import accepted")
 	}
 	if g := packGuide(t, app, "回显包"); g != "新说明" {

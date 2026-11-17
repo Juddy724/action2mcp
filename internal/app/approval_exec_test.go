@@ -1,14 +1,16 @@
 package app
 
 import (
+	"action2mcp/internal/domain"
+	"action2mcp/internal/execution"
+	sitecfg "action2mcp/internal/site"
+	"action2mcp/internal/store"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -57,7 +59,7 @@ func TestPreparedCredentialEncodings(t *testing.T) {
 			a.httpClient = upstream.Client()
 			tool := &Tool{Method: "POST", URL: upstream.URL + "/?credential={{secret.encoding}}&literal={{value}}",
 				Headers: map[string]string{"X-Credential": "{{secret.encoding}}", "X-Config": "{{cfg.encoding}}", "Content-Type": "application/json"},
-				Params:  []Param{{Name: "value", Type: "string", Required: true}}, Body: `{"credential":"{{secret.encoding}}","literal":"{{value}}","inline":"prefix {{secret.encoding}} suffix"}`}
+				Params:  []domain.Param{{Name: "value", Type: "string", Required: true}}, Body: `{"credential":"{{secret.encoding}}","literal":"{{value}}","inline":"prefix {{secret.encoding}} suffix"}`}
 			if kind == "form" {
 				tool.Headers["Content-Type"] = "application/x-www-form-urlencoded"
 				tool.Body = "credential={{secret.encoding}}&literal={{value}}"
@@ -66,32 +68,32 @@ func TestPreparedCredentialEncodings(t *testing.T) {
 				if kind == "command" {
 					inner = "RUN " + inner
 				}
-				tool.Body = string(compactJSON(map[string]any{"inner": inner}))
+				tool.Body = string(execution.CompactJSON(map[string]any{"inner": inner}))
 			}
-			prepared, err := a.Prepare(tool, map[string]any{"value": literal})
+			prepared, err := a.executor().Prepare(tool, map[string]any{"value": literal})
 			if err != nil {
 				t.Fatal("prepare failed")
 			}
 			if !strings.Contains(prepared.Preview.URL, "{{secret.encoding}}") || !strings.Contains(prepared.Preview.Headers["X-Config"], "{{cfg.encoding}}") {
 				t.Fatal("preview resolved credentials")
 			}
-			if strings.Contains(string(compactJSON(prepared.Preview)), secret) {
+			if strings.Contains(string(execution.CompactJSON(prepared.Preview)), secret) {
 				t.Fatal("preview leaked secret")
 			}
 			for i := 0; i < 20; i++ {
-				next, err := a.Prepare(tool, map[string]any{"value": literal})
+				next, err := a.executor().Prepare(tool, map[string]any{"value": literal})
 				if err != nil || next.PreviewHash != prepared.PreviewHash {
 					t.Fatal("preview hash is unstable")
 				}
 			}
-			res, err := a.Send(prepared)
+			res, err := a.executor().Send(prepared)
 			if err != nil || res.Error != "" || !received.Load() {
 				t.Fatal("credential encoding or literal parameter forwarding failed")
 			}
 			if strings.Contains(res.Body, secret) || strings.Contains(res.URL, url.QueryEscape(secret)) || strings.Contains(res.Headers["X-Echo"], secret) {
 				t.Fatal("send leaked secret")
 			}
-			if _, err := a.Execute(tool, map[string]any{"value": literal}); err != nil {
+			if _, err := a.executor().Execute(tool, map[string]any{"value": literal}); err != nil {
 				t.Fatal("execute failed")
 			}
 		})
@@ -107,34 +109,34 @@ func TestParamIsSecret(t *testing.T) {
 	cases := []struct {
 		name  string
 		tool  Tool
-		param Param
+		param domain.Param
 		value any
 		want  bool
 	}{
-		{"flag", Tool{}, Param{Name: "label", Secret: true}, "", true},
-		{"name", Tool{}, Param{Name: "api_token"}, "", true},
-		{"description", Tool{}, Param{Name: "label", Description: "说明 " + removedSecretDesc}, "", true},
-		{"json", Tool{Body: `{"credentials":{"value":"{{label}}"}}`}, Param{Name: "label"}, "", true},
-		{"unquoted_json", Tool{Body: `{"password":{{label}}}`}, Param{Name: "label", Type: "integer"}, "", true},
-		{"quoted_json", Tool{Body: `{"password":"{{label}}"}`}, Param{Name: "label"}, "", true},
-		{"unquoted_nested_json", Tool{Body: `{"credentials":{"other":0,"value":{{label}}}}`}, Param{Name: "label"}, "", true},
-		{"json_like", Tool{Body: `{password:{{label}}}`}, Param{Name: "label"}, "", true},
-		{"json_like_quoted", Tool{Body: `{password:"{{label}}"}`}, Param{Name: "label"}, "", true},
-		{"nested_unquoted", Tool{Body: `{"inner":"{\"password\":{{label}}}"}`}, Param{Name: "label"}, "", true},
-		{"nested", Tool{Body: `{"inner":"{\"password\":\"{{label}}\"}"}`}, Param{Name: "label"}, "", true},
-		{"header", Tool{Headers: map[string]string{"Authorization": "Bearer {{ label }}"}}, Param{Name: "label"}, "", true},
-		{"query", Tool{URL: "https://example.com/?access_token={{label}}"}, Param{Name: "label"}, "", true},
-		{"form", Tool{Body: "password={{label}}"}, Param{Name: "label"}, "", true},
-		{"vault", Tool{}, Param{Name: "label"}, secret, true},
-		{"vault_default", Tool{}, Param{Name: "label", Default: secret}, "", true},
-		{"normal", Tool{Body: `{"label":"{{label}}"}`}, Param{Name: "label"}, "ordinary", false},
-		{"password_value", Tool{Body: `{"note":"password={{label}}","count":{{count}}}`}, Param{Name: "label"}, "ordinary", false},
-		{"form_value", Tool{Body: `note=password={{label}}`}, Param{Name: "label"}, "ordinary", false},
-		{"unrelated_placeholder", Tool{Body: `{"password":{{other}},"label":{{label}}}`}, Param{Name: "label"}, "ordinary", false},
+		{"flag", Tool{}, domain.Param{Name: "label", Secret: true}, "", true},
+		{"name", Tool{}, domain.Param{Name: "api_token"}, "", true},
+		{"description", Tool{}, domain.Param{Name: "label", Description: "说明 " + execution.RemovedSecretDescription}, "", true},
+		{"json", Tool{Body: `{"credentials":{"value":"{{label}}"}}`}, domain.Param{Name: "label"}, "", true},
+		{"unquoted_json", Tool{Body: `{"password":{{label}}}`}, domain.Param{Name: "label", Type: "integer"}, "", true},
+		{"quoted_json", Tool{Body: `{"password":"{{label}}"}`}, domain.Param{Name: "label"}, "", true},
+		{"unquoted_nested_json", Tool{Body: `{"credentials":{"other":0,"value":{{label}}}}`}, domain.Param{Name: "label"}, "", true},
+		{"json_like", Tool{Body: `{password:{{label}}}`}, domain.Param{Name: "label"}, "", true},
+		{"json_like_quoted", Tool{Body: `{password:"{{label}}"}`}, domain.Param{Name: "label"}, "", true},
+		{"nested_unquoted", Tool{Body: `{"inner":"{\"password\":{{label}}}"}`}, domain.Param{Name: "label"}, "", true},
+		{"nested", Tool{Body: `{"inner":"{\"password\":\"{{label}}\"}"}`}, domain.Param{Name: "label"}, "", true},
+		{"header", Tool{Headers: map[string]string{"Authorization": "Bearer {{ label }}"}}, domain.Param{Name: "label"}, "", true},
+		{"query", Tool{URL: "https://example.com/?access_token={{label}}"}, domain.Param{Name: "label"}, "", true},
+		{"form", Tool{Body: "password={{label}}"}, domain.Param{Name: "label"}, "", true},
+		{"vault", Tool{}, domain.Param{Name: "label"}, secret, true},
+		{"vault_default", Tool{}, domain.Param{Name: "label", Default: secret}, "", true},
+		{"normal", Tool{Body: `{"label":"{{label}}"}`}, domain.Param{Name: "label"}, "ordinary", false},
+		{"password_value", Tool{Body: `{"note":"password={{label}}","count":{{count}}}`}, domain.Param{Name: "label"}, "ordinary", false},
+		{"form_value", Tool{Body: `note=password={{label}}`}, domain.Param{Name: "label"}, "ordinary", false},
+		{"unrelated_placeholder", Tool{Body: `{"password":{{other}},"label":{{label}}}`}, domain.Param{Name: "label"}, "ordinary", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if a.paramIsSecret(&tc.tool, tc.param, tc.value) != tc.want {
+			if a.executor().ParamIsSecret(&tc.tool, tc.param, tc.value) != tc.want {
 				t.Fatal("wrong sensitive parameter classification")
 			}
 		})
@@ -149,11 +151,11 @@ func TestPreparedSendScrubsErrors(t *testing.T) {
 	}
 	a.httpClient = &http.Client{Transport: approvalRoundTripper(func(r *http.Request) (*http.Response, error) { return nil, errors.New("request failed: " + secret) })}
 	tool := &Tool{Method: "GET", URL: "http://127.0.0.1:19001/?value={{secret.error_value}}"}
-	prepared, err := a.Prepare(tool, nil)
+	prepared, err := a.executor().Prepare(tool, nil)
 	if err != nil {
 		t.Fatal("prepare failed")
 	}
-	result, err := a.Send(prepared)
+	result, err := a.executor().Send(prepared)
 	if err != nil || result.Error == "" {
 		t.Fatal("expected a scrubbed transport error")
 	}
@@ -161,10 +163,10 @@ func TestPreparedSendScrubsErrors(t *testing.T) {
 		t.Fatal("send error leaked secret")
 	}
 	tool.URL = "https://example.com/?value={{secret.missing}}"
-	if _, err := a.Prepare(tool, nil); err != nil {
+	if _, err := a.executor().Prepare(tool, nil); err != nil {
 		t.Fatal("prepare resolved a deferred credential")
 	}
-	if _, err := a.Execute(tool, nil); err == nil {
+	if _, err := a.executor().Execute(tool, nil); err == nil {
 		t.Fatal("send ignored missing credential")
 	}
 }
@@ -189,7 +191,7 @@ func TestApprovalCommitBoundary(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "other_enabled_pack":
-				if err := a.store.SavePack(&Pack{Name: "另一个开启包", Enabled: true, ToolIDs: []int64{tool.ID}}); err != nil {
+				if err := a.store.SavePack(&store.Pack{Name: "另一个开启包", Enabled: true, ToolIDs: []int64{tool.ID}}); err != nil {
 					t.Fatal(err)
 				}
 				fallthrough
@@ -207,7 +209,7 @@ func TestApprovalCommitBoundary(t *testing.T) {
 			if !reply.isError || reply.text != "工具或请求内容在审批期间变化，未执行，请重新调用" || hits.Load() != 0 {
 				t.Fatal("commit boundary did not stop execution")
 			}
-			rows, err := a.ListApprovals("all", 1)
+			rows, err := a.approvals().List("all", 1)
 			if err != nil || rows[0].Status != "approved" || rows[0].Result != "未执行：工具在审批期间被修改/关闭/请求内容已变化" {
 				t.Fatal("commit failure audit is incorrect")
 			}
@@ -220,7 +222,7 @@ func TestApprovalPreviewExpiryAndPreparedIntegrity(t *testing.T) {
 	upstream := newApprovalTarget(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	tool, _ := saveApprovalTool(t, a, upstream, "always")
 	tool.Body = `{"date":"{{date}}","value":"{{value}}"}`
-	tool.Params = append(tool.Params, Param{Name: "date", Type: "string", Default: "@today"})
+	tool.Params = append(tool.Params, domain.Param{Name: "date", Type: "string", Default: "@today"})
 	if err := a.store.SaveTool(tool); err != nil {
 		t.Fatal(err)
 	}
@@ -232,28 +234,18 @@ func TestApprovalPreviewExpiryAndPreparedIntegrity(t *testing.T) {
 	call := startApprovalCall(a, ctx, map[string]any{"value": "one"})
 	r := pendingApprovals(t, a, 1)[0]
 	day.Store(1)
-	err := a.DecideApproval(r.ID, r.Nonce, "approve", nil, "", r.PreviewHash)
+	err := a.approvals().Decide(r.ID, r.Nonce, "approve", nil, "", r.PreviewHash)
 	requireApprovalStatus(t, err, 409)
 	if !strings.Contains(err.Error(), "预览已过期") {
 		t.Fatal("expiry message missing")
 	}
 	pendingApprovals(t, a, 1)
-	preview, err := a.PreviewApproval(r.ID, r.Nonce, map[string]any{"value": "one"})
+	preview, err := a.approvals().Preview(r.ID, r.Nonce, map[string]any{"value": "one"})
 	if err != nil || preview.PreviewHash == r.PreviewHash {
 		t.Fatal("refresh did not update preview hash")
 	}
-	prepared, err := a.Prepare(tool, map[string]any{"value": "one"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	p := &pendingApproval{tool: tool, record: ApprovalRecord{ToolRev: tool.Rev}, prepared: prepared, confirmedHash: prepared.PreviewHash}
-	if !a.approvalCommitValid(p) {
-		t.Fatal("unchanged prepared request failed integrity check")
-	}
-	prepared.request.Body += " "
-	if a.approvalCommitValid(p) {
-		t.Fatal("modified prepared request passed integrity check")
-	}
+	// The prepared-request integrity half of the commit gate is owned by
+	// internal/invoke (TestCommitValidRequiresUnchangedPreparedRequest).
 	cancel()
 	getApprovalReply(t, call)
 }
@@ -297,15 +289,15 @@ func TestApprovalFrozenRequestSurvivesRelogin(t *testing.T) {
 	tool, _ := saveApprovalTool(t, a, upstream, "always")
 	tool.URL = upstream.URL + "/api?date={{date}}"
 	tool.Body = `{"date":"{{date}}","value":"{{value}}"}`
-	tool.Params = append(tool.Params, Param{Name: "date", Type: "string", Default: "@today"})
+	tool.Params = append(tool.Params, domain.Param{Name: "date", Type: "string", Default: "@today"})
 	tool.Headers["X-Credential"] = "{{secret.business}}"
 	if err := a.store.SaveTool(tool); err != nil {
 		t.Fatal(err)
 	}
 	site := a.store.EnsureSite(tool.URL)
-	site.Method = MethodForm
+	site.Method = sitecfg.MethodForm
 	site.EntryURL = upstream.URL + "/login"
-	site.Form = FormLogin{LoginURL: upstream.URL + "/login", Request: &LoginRequest{Method: "POST", URL: upstream.URL + "/login", Headers: map[string]string{"Content-Type": "application/json"}, Body: `{"password":"{{secret.business}}"}`}}
+	site.Form = sitecfg.FormLogin{LoginURL: upstream.URL + "/login", Request: &sitecfg.LoginRequest{Method: "POST", URL: upstream.URL + "/login", Headers: map[string]string{"Content-Type": "application/json"}, Body: `{"password":"{{secret.business}}"}`}}
 	if err := a.store.SaveSite(site); err != nil {
 		t.Fatal(err)
 	}
@@ -334,12 +326,12 @@ func TestToolConsoleGuardAndRedirect(t *testing.T) {
 	a.httpClient = upstream.Client()
 	a.cfg.Port = 19002
 	tool := &Tool{Method: "GET", URL: upstream.URL + "/ok"}
-	if res, err := a.Execute(tool, nil); err != nil || res.Error != "" || hits.Load() != 1 {
+	if res, err := a.executor().Execute(tool, nil); err != nil || res.Error != "" || hits.Load() != 1 {
 		t.Fatal("different loopback port was blocked")
 	}
 	for _, raw := range []string{"http://127.0.0.1:19002/api", "http://127.0.0.1:019002/api", upstream.URL + "/redirect"} {
 		tool.URL = raw
-		res, err := a.Execute(tool, nil)
+		res, err := a.executor().Execute(tool, nil)
 		message := ""
 		if err != nil {
 			message = err.Error()
@@ -353,26 +345,12 @@ func TestToolConsoleGuardAndRedirect(t *testing.T) {
 	if hits.Load() != 1 {
 		t.Fatal("guard contacted console destination")
 	}
-	var dialed atomic.Bool
-	a.httpClient = &http.Client{Transport: &http.Transport{DialContext: func(context.Context, string, string) (net.Conn, error) {
-		dialed.Store(true)
-		return nil, errors.New("unexpected dial")
-	}}}
-	client, closeIdle := a.toolHTTPClient()
-	defer closeIdle()
-	request, _ := http.NewRequest("GET", "http://127.0.0.1:"+strconv.Itoa(a.cfg.Port)+"/api", nil)
-	if _, err := client.Do(request); err == nil || dialed.Load() {
-		t.Fatal("replaced client bypassed transport guard")
-	}
-	transport := client.Transport.(toolTransport).base.(*http.Transport)
-	if _, err := transport.DialContext(context.Background(), "tcp", "127.0.0.1:19002"); !errors.Is(err, errConsoleRequest) || dialed.Load() {
-		t.Fatal("dial guard allowed local destination")
-	}
+
 }
 
 func TestStdioApprovalCallPolicy(t *testing.T) {
 	for _, method := range []string{"tools/call", "tools/list", "initialize", "ping"} {
-		timeout, attempts := stdioCallPolicy(compactJSON(map[string]any{"method": method}))
+		timeout, attempts := stdioCallPolicy(execution.CompactJSON(map[string]any{"method": method}))
 		if method == "tools/call" {
 			if timeout != 35*time.Minute || attempts != 1 {
 				t.Fatal("tools/call may retry or timeout during approval")

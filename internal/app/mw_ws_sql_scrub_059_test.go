@@ -1,6 +1,11 @@
 package app
 
 import (
+	"action2mcp/internal/execution"
+
+	"action2mcp/internal/mwconfig"
+	"action2mcp/internal/store"
+	"action2mcp/internal/vault"
 	"context"
 	"encoding/json"
 	"strings"
@@ -19,7 +24,7 @@ func assertNoConfigTokens(t *testing.T, blob, token string, ids ...string) {
 		if id == "" {
 			continue
 		}
-		if scrubConfigTokens(blob, []string{id}) != blob {
+		if vault.ScrubConfigTokens(blob, []string{id}) != blob {
 			t.Fatalf("leaked id token %q in %q", id, truncate(blob, 240))
 		}
 	}
@@ -60,18 +65,18 @@ func TestSQLConsoleResultNotOverScrubbed(t *testing.T) {
 		"C_6": 10, "C_7": envType,
 	}}
 
-	m := sqlConsoleTestMW("sqlconsole", fake.wsURL(s.URL), MWDatasource{
+	m := sqlConsoleTestMW("sqlconsole", fake.wsURL(s.URL), mwconfig.MWDatasource{
 		Alias: "orders", DSID: json.Number(dsID), EnvID: json.Number(envID),
 		EnvType: envType, Description: "订单测试库",
 	})
 	bindCookieHeader(m)
-	if err := a.HarvestRequestHeader("", s.URL, "sso-epctoken", fake.token); err != nil {
+	if err := a.loginRuntime().HarvestRequestHeader("", s.URL, "sso-epctoken", fake.token); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.store.SaveMiddleware(m); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.store.SavePack(&Pack{Name: "sql包", Enabled: true, MiddlewareIDs: []int64{m.ID}}); err != nil {
+	if err := a.store.SavePack(&store.Pack{Name: "sql包", Enabled: true, MiddlewareIDs: []int64{m.ID}}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := a.store.GetMiddleware(m.ID)
@@ -85,8 +90,8 @@ func TestSQLConsoleResultNotOverScrubbed(t *testing.T) {
 
 	// MCP schema, description and enum must list the alias and no identifiers.
 	var found map[string]any
-	for _, item := range a.mwToolList() {
-		if item["name"] == wsSQLQueryTool {
+	for _, item := range a.middlewares().ToolList() {
+		if item["name"] == mwconfig.WSSQLQueryTool {
 			found = item
 			break
 		}
@@ -105,7 +110,7 @@ func TestSQLConsoleResultNotOverScrubbed(t *testing.T) {
 
 	done := make(chan approvalReply, 1)
 	go func() {
-		v, invErr := a.invokeTool(context.Background(), &mcpCtx{}, wsSQLQueryTool, map[string]any{
+		v, invErr := invokeTool(a, context.Background(), mwconfig.WSSQLQueryTool, map[string]any{
 			"middleware": got.Name, "database": "orders", "sql": sqlText,
 		})
 		done <- unpackApprovalReply(v, invErr)
@@ -126,7 +131,7 @@ func TestSQLConsoleResultNotOverScrubbed(t *testing.T) {
 	if !strings.Contains(shownSQL, "LIMIT 10") {
 		t.Fatalf("approval SQL lost LIMIT 10 (over-scrub?): args=%q body=%q", rec.ArgsDisplay["sql"], rec.Preview.Body)
 	}
-	if strings.Contains(shownSQL, secretMask) && strings.Contains(shownSQL, "LIMIT 1"+secretMask) {
+	if strings.Contains(shownSQL, vault.Mask) && strings.Contains(shownSQL, "LIMIT 1"+vault.Mask) {
 		t.Fatalf("LIMIT 10 was corrupted by short-value scrub: %q", shownSQL)
 	}
 
@@ -156,14 +161,14 @@ func TestSQLConsoleResultNotOverScrubbed(t *testing.T) {
 	if strings.Contains(reply.text, longCookie) {
 		t.Fatal("long cookie leaked in result")
 	}
-	if !strings.Contains(reply.text, secretMask) {
+	if !strings.Contains(reply.text, vault.Mask) {
 		t.Fatal("expected the long token inside the note column to be masked")
 	}
-	if !strings.Contains(reply.text, "echo "+secretMask+" LIMIT 10") && !strings.Contains(reply.text, secretMask) {
+	if !strings.Contains(reply.text, "echo "+vault.Mask+" LIMIT 10") && !strings.Contains(reply.text, vault.Mask) {
 		t.Fatalf("token mask should sit next to intact LIMIT 10: %s", truncate(reply.text, 400))
 	}
 
-	history, err := a.ListApprovals("all", 10)
+	history, err := a.approvals().List("all", 10)
 	if err != nil || len(history) == 0 {
 		t.Fatalf("history: %v %d", err, len(history))
 	}
@@ -180,7 +185,7 @@ func TestSQLConsoleResultNotOverScrubbed(t *testing.T) {
 	if !strings.Contains(history[0].ArgsDisplay["sql"], "LIMIT 10") && (history[0].FinalArgsDisplay == nil || !strings.Contains(history[0].FinalArgsDisplay["sql"], "LIMIT 10")) {
 		t.Fatalf("approval-record SQL lost LIMIT 10: args=%v final=%v", history[0].ArgsDisplay, history[0].FinalArgsDisplay)
 	}
-	if strings.Contains(history[0].Result, "LIMIT 1"+secretMask) || strings.Contains(history[0].ArgsDisplay["sql"], "LIMIT 1"+secretMask) {
+	if strings.Contains(history[0].Result, "LIMIT 1"+vault.Mask) || strings.Contains(history[0].ArgsDisplay["sql"], "LIMIT 1"+vault.Mask) {
 		t.Fatalf("approval record corrupted LIMIT 10: result=%q args=%v", history[0].Result, history[0].ArgsDisplay)
 	}
 	if !strings.Contains(history[0].Result, customerID) && !strings.Contains(history[0].Result, approvalResultTruncMark) {
@@ -188,7 +193,7 @@ func TestSQLConsoleResultNotOverScrubbed(t *testing.T) {
 		t.Fatalf("approval result preview lost customer_id: %q", history[0].Result)
 	}
 
-	full, _, err := a.GetApprovalResult(history[0].ID)
+	full, _, err := a.approvals().Result(history[0].ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,14 +223,14 @@ func TestSQLConsoleErrorMasksConfigTokens(t *testing.T) {
 	a := approvalTestApp(t)
 	fake.failBusiness = "remote rejected dsId=901 envType=PROD space=spc_alpha token=" + fake.token
 
-	m := saveSQLConsole(t, a, fake, s.URL, MWDatasource{
+	m := saveSQLConsole(t, a, fake, s.URL, mwconfig.MWDatasource{
 		Alias: "orders", DSID: json.Number(dsID), EnvID: json.Number("707"),
 		EnvType: "PROD", Description: "订单测试库",
 	})
 
 	done := make(chan approvalReply, 1)
 	go func() {
-		v, invErr := a.invokeTool(context.Background(), &mcpCtx{}, wsSQLQueryTool, map[string]any{
+		v, invErr := invokeTool(a, context.Background(), mwconfig.WSSQLQueryTool, map[string]any{
 			"middleware": m.Name, "database": "orders", "sql": "SELECT id FROM t WHERE id=1 LIMIT 1",
 		})
 		done <- unpackApprovalReply(v, invErr)
@@ -234,7 +239,7 @@ func TestSQLConsoleErrorMasksConfigTokens(t *testing.T) {
 	blob := approvalVisibleBlob(rec)
 	port := strings.TrimPrefix(s.URL, "http://127.0.0.1:")
 	if strings.Contains(blob, port) || strings.Contains(blob, s.URL) || strings.Contains(blob, "707") || strings.Contains(blob, dsID) {
-		t.Fatalf("leak port=%s url=%s previewURL=%q headers=%v body=%q title=%q args=%v params=%s blob=%s", port, s.URL, rec.Preview.URL, rec.Preview.Headers, rec.Preview.Body, rec.Title, rec.ArgsDisplay, truncate(string(compactJSON(rec.Params)), 300), truncate(blob, 800))
+		t.Fatalf("leak port=%s url=%s previewURL=%q headers=%v body=%q title=%q args=%v params=%s blob=%s", port, s.URL, rec.Preview.URL, rec.Preview.Headers, rec.Preview.Body, rec.Title, rec.ArgsDisplay, truncate(string(execution.CompactJSON(rec.Params)), 300), truncate(blob, 800))
 	}
 	assertHiddenFromAI(t, blob, fake.token, dsID, "707", "PROD", "spc_alpha")
 	approveRecord(t, a, rec)
@@ -243,16 +248,16 @@ func TestSQLConsoleErrorMasksConfigTokens(t *testing.T) {
 		t.Fatalf("expected execution error, got %q", reply.text)
 	}
 	assertHiddenFromAI(t, reply.text, fake.token, dsID, "707", "PROD", "spc_alpha")
-	if !strings.Contains(reply.text, secretMask) {
+	if !strings.Contains(reply.text, vault.Mask) {
 		t.Fatalf("error should mask config tokens: %q", reply.text)
 	}
 
-	history, err := a.ListApprovals("all", 10)
+	history, err := a.approvals().List("all", 10)
 	if err != nil || len(history) == 0 {
 		t.Fatal("expected approval record")
 	}
 	assertHiddenFromAI(t, history[0].Result, fake.token, dsID, "707", "PROD", "spc_alpha")
-	full, _, err := a.GetApprovalResult(history[0].ID)
+	full, _, err := a.approvals().Result(history[0].ID)
 	if err != nil {
 		t.Fatal(err)
 	}

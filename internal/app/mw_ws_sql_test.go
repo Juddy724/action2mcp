@@ -1,6 +1,11 @@
 package app
 
 import (
+	"action2mcp/internal/approval"
+	"action2mcp/internal/execution"
+
+	"action2mcp/internal/mwconfig"
+	"action2mcp/internal/store"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -9,11 +14,11 @@ import (
 	"testing"
 )
 
-func withRowEnv(sources []MWDatasource) []MWDatasource {
-	out := make([]MWDatasource, len(sources))
+func withRowEnv(sources []mwconfig.MWDatasource) []mwconfig.MWDatasource {
+	out := make([]mwconfig.MWDatasource, len(sources))
 	copy(out, sources)
 	for i := range out {
-		if isEmptyJSONValue(out[i].EnvID) {
+		if mwconfig.IsEmptyJSONValue(out[i].EnvID) {
 			out[i].EnvID = json.Number("70007")
 		}
 		if strings.TrimSpace(out[i].EnvType) == "" {
@@ -23,17 +28,17 @@ func withRowEnv(sources []MWDatasource) []MWDatasource {
 	return out
 }
 
-func sqlConsoleTestMW(name, url string, sources ...MWDatasource) *Middleware {
+func sqlConsoleTestMW(name, url string, sources ...mwconfig.MWDatasource) *mwconfig.Middleware {
 	if len(sources) == 0 {
-		sources = []MWDatasource{{Alias: "orders", DSID: json.Number("90001"), Description: "订单测试库"}}
+		sources = []mwconfig.MWDatasource{{Alias: "orders", DSID: json.Number("90001"), Description: "订单测试库"}}
 	}
 	sources = withRowEnv(sources)
-	return &Middleware{Name: name, Type: "websocket", Config: MWConfig{
-		WSMode:      wsModeSQLConsole,
+	return &mwconfig.Middleware{Name: name, Type: "websocket", Config: mwconfig.MWConfig{
+		WSMode:      mwconfig.WSModeSQLConsole,
 		URL:         url,
 		WSMessages:  []string{`execute {"data":{"sql":"{{sql}}","spaceCode":"{{ds.space_code}}","dsId":"{{ds.ds_id}}","envId":"{{ds.env_id}}","envType":"{{ds.env_type}}","dbType":"{{ds.db_type}}"},"token":"{{header.sso-epctoken}}"}`},
 		SQLPath:     "data.sql",
-		SQLDefaults: MWSQLDefaults{SpaceCode: "spc_alpha", DBType: "mysql"},
+		SQLDefaults: mwconfig.MWSQLDefaults{SpaceCode: "spc_alpha", DBType: "mysql"},
 		Datasources: sources,
 		MaxRows:     200,
 		TimeoutSec:  15,
@@ -43,16 +48,16 @@ func sqlConsoleTestMW(name, url string, sources ...MWDatasource) *Middleware {
 	}}
 }
 
-func saveSQLConsole(t *testing.T, a *App, fake *countingWS, httpURL string, sources ...MWDatasource) *Middleware {
+func saveSQLConsole(t *testing.T, a *App, fake *countingWS, httpURL string, sources ...mwconfig.MWDatasource) *mwconfig.Middleware {
 	t.Helper()
-	if err := a.HarvestRequestHeader("", httpURL, "sso-epctoken", fake.token); err != nil {
+	if err := a.loginRuntime().HarvestRequestHeader("", httpURL, "sso-epctoken", fake.token); err != nil {
 		t.Fatal(err)
 	}
 	m := sqlConsoleTestMW("sqlconsole", fake.wsURL(httpURL), sources...)
 	if err := a.store.SaveMiddleware(m); err != nil {
 		t.Fatal(err)
 	}
-	pack := &Pack{Name: "sql包", Enabled: true, MiddlewareIDs: []int64{m.ID}}
+	pack := &store.Pack{Name: "sql包", Enabled: true, MiddlewareIDs: []int64{m.ID}}
 	if err := a.store.SavePack(pack); err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +83,7 @@ func assertHiddenFromAI(t *testing.T, blob, token string, ids ...string) {
 // approvalVisibleBlob is the approval record without its preview digest.
 // The digest is random hex, so a short numeric id such as 901 or 707 appears
 // inside it by chance even though that digest is not configuration text.
-func approvalVisibleBlob(rec ApprovalRecord) string {
+func approvalVisibleBlob(rec approval.Record) string {
 	rec.PreviewHash = ""
 	b, _ := json.Marshal(rec)
 	return string(b)
@@ -89,15 +94,15 @@ func TestSQLConsoleHappyPath(t *testing.T) {
 	s := fake.start(t)
 	a := approvalTestApp(t)
 	m := saveSQLConsole(t, a, fake, s.URL)
-	tool, err := m.sqlConsoleTool(m.enabledDatasources()[0])
+	tool, err := m.SQLConsoleTool(firstDatasource(t, m))
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := a.Execute(tool, map[string]any{"sql": "SELECT id FROM t WHERE id=1 LIMIT 10", "database": "orders"})
+	res, err := a.executor().Execute(tool, map[string]any{"sql": "SELECT id FROM t WHERE id=1 LIMIT 10", "database": "orders"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Outcome != outcomeSuccess {
+	if res.Outcome != execution.OutcomeSuccess {
 		t.Fatalf("outcome=%s err=%s body=%s", res.Outcome, res.Error, res.Body)
 	}
 	assertHiddenFromAI(t, res.Body, fake.token, "90001", "spc_alpha", "70007")
@@ -117,7 +122,7 @@ func TestSQLConsoleGuardRejectsSendsNothing(t *testing.T) {
 	s := fake.start(t)
 	a := approvalTestApp(t)
 	m := saveSQLConsole(t, a, fake, s.URL)
-	text, isErr := a.callMWTool(context.Background(), "tester", wsSQLQueryTool, map[string]any{"middleware": m.Name, "database": "orders", "sql": "SELECT id FROM t"})
+	text, isErr := a.middlewares().Call(context.Background(), "tester", mwconfig.WSSQLQueryTool, map[string]any{"middleware": m.Name, "database": "orders", "sql": "SELECT id FROM t"})
 	if !isErr || !strings.Contains(text, "LIMIT") {
 		t.Fatalf("expected LIMIT reject, got err=%v text=%s", isErr, text)
 	}
@@ -134,15 +139,15 @@ func TestSQLConsoleNoIndexRejects(t *testing.T) {
 	s := fake.start(t)
 	a := approvalTestApp(t)
 	m := saveSQLConsole(t, a, fake, s.URL)
-	tool, err := m.sqlConsoleTool(m.enabledDatasources()[0])
+	tool, err := m.SQLConsoleTool(firstDatasource(t, m))
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := a.Execute(tool, map[string]any{"sql": "SELECT id FROM t WHERE id=1 LIMIT 10", "database": "orders"})
+	res, err := a.executor().Execute(tool, map[string]any{"sql": "SELECT id FROM t WHERE id=1 LIMIT 10", "database": "orders"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Outcome != outcomeGuardRejected {
+	if res.Outcome != execution.OutcomeGuardRejected {
 		t.Fatalf("outcome=%s err=%s", res.Outcome, res.Error)
 	}
 	fake.mu.Lock()
@@ -160,31 +165,31 @@ func TestSQLConsoleTokenAbsentFailClosed(t *testing.T) {
 	if err := a.store.SaveMiddleware(m); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.store.SavePack(&Pack{Name: "sql包", Enabled: true, MiddlewareIDs: []int64{m.ID}}); err != nil {
+	if err := a.store.SavePack(&store.Pack{Name: "sql包", Enabled: true, MiddlewareIDs: []int64{m.ID}}); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := a.store.GetMiddleware(m.ID)
-	tool, err := got.sqlConsoleTool(got.enabledDatasources()[0])
+	tool, err := got.SQLConsoleTool(firstDatasource(t, got))
 	if err != nil {
 		t.Fatal(err)
 	}
-	text, isErr := a.callMWTool(context.Background(), "tester", wsSQLQueryTool, map[string]any{"middleware": m.Name, "database": "orders", "sql": "SELECT id FROM t WHERE id=1 LIMIT 1"})
+	text, isErr := a.middlewares().Call(context.Background(), "tester", mwconfig.WSSQLQueryTool, map[string]any{"middleware": m.Name, "database": "orders", "sql": "SELECT id FROM t WHERE id=1 LIMIT 1"})
 	if !isErr || (!strings.Contains(text, "请求头") && !strings.Contains(text, "登录")) {
 		t.Fatalf("AI path should fail closed before approval, got isErr=%v text=%q", isErr, text)
 	}
 	assertHiddenFromAI(t, text, fake.token, "90001", "spc_alpha", "70007")
-	pending, _ := a.store.listApprovals("pending", 20)
+	pending, _ := a.store.Approvals.List("pending", 20)
 	if len(pending) != 0 {
 		t.Fatalf("missing token should not create an approval card: %+v", pending)
 	}
-	res, err := a.Execute(tool, map[string]any{"sql": "SELECT id FROM t WHERE id=1 LIMIT 1", "database": "orders"})
+	res, err := a.executor().Execute(tool, map[string]any{"sql": "SELECT id FROM t WHERE id=1 LIMIT 1", "database": "orders"})
 	msg := ""
 	if err != nil {
 		msg = err.Error()
 	} else if res != nil {
 		msg = res.Error + res.Body + res.Outcome
 	}
-	if !strings.Contains(msg, "请求头") && !strings.Contains(msg, "auth") && (res == nil || res.Outcome != outcomeAuthFailed) {
+	if !strings.Contains(msg, "请求头") && !strings.Contains(msg, "auth") && (res == nil || res.Outcome != execution.OutcomeAuthFailed) {
 		t.Fatalf("expected fail-closed missing header, got err=%v res=%+v", err, res)
 	}
 	fake.mu.Lock()
@@ -198,8 +203,8 @@ func TestSQLConsoleUnknownAlias(t *testing.T) {
 	fake := newCountingWS(1)
 	s := fake.start(t)
 	a := approvalTestApp(t)
-	m := saveSQLConsole(t, a, fake, s.URL, MWDatasource{Alias: "orders", DSID: json.Number("90001"), Description: "订单库"}, MWDatasource{Alias: "tasks", DSID: json.Number("90002"), Description: "任务库"})
-	text, isErr := a.callMWTool(context.Background(), "tester", wsSQLQueryTool, map[string]any{"middleware": m.Name, "database": "missing", "sql": "SELECT id FROM t LIMIT 1"})
+	m := saveSQLConsole(t, a, fake, s.URL, mwconfig.MWDatasource{Alias: "orders", DSID: json.Number("90001"), Description: "订单库"}, mwconfig.MWDatasource{Alias: "tasks", DSID: json.Number("90002"), Description: "任务库"})
+	text, isErr := a.middlewares().Call(context.Background(), "tester", mwconfig.WSSQLQueryTool, map[string]any{"middleware": m.Name, "database": "missing", "sql": "SELECT id FROM t LIMIT 1"})
 	if !isErr || !strings.Contains(text, "missing") || !strings.Contains(text, "orders") || !strings.Contains(text, "tasks") {
 		t.Fatalf("unknown alias error should list allowed names: %s", text)
 	}
@@ -216,14 +221,14 @@ func TestSQLConsoleMultiDatasourceRouting(t *testing.T) {
 	s := fake.start(t)
 	a := approvalTestApp(t)
 	m := saveSQLConsole(t, a, fake, s.URL,
-		MWDatasource{Alias: "orders", DSID: json.Number("90001"), Description: "订单测试库"},
-		MWDatasource{Alias: "tasks", DSID: json.Number("90002"), Description: "任务库"},
+		mwconfig.MWDatasource{Alias: "orders", DSID: json.Number("90001"), Description: "订单测试库"},
+		mwconfig.MWDatasource{Alias: "tasks", DSID: json.Number("90002"), Description: "任务库"},
 	)
-	tool, err := m.sqlConsoleTool(mustDS(t, m, "tasks"))
+	tool, err := m.SQLConsoleTool(mustDS(t, m, "tasks"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.Execute(tool, map[string]any{"sql": "SELECT id FROM t WHERE id=1 LIMIT 1", "database": "tasks"}); err != nil {
+	if _, err := a.executor().Execute(tool, map[string]any{"sql": "SELECT id FROM t WHERE id=1 LIMIT 1", "database": "tasks"}); err != nil {
 		t.Fatal(err)
 	}
 	fake.mu.Lock()
@@ -237,9 +242,9 @@ func TestSQLConsoleMultiDatasourceRouting(t *testing.T) {
 	}
 }
 
-func mustDS(t *testing.T, m *Middleware, alias string) MWDatasource {
+func mustDS(t *testing.T, m *mwconfig.Middleware, alias string) mwconfig.MWDatasource {
 	t.Helper()
-	ds, err := m.lookupDatasource(alias)
+	ds, err := m.LookupDatasource(alias)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,12 +256,12 @@ func TestSQLConsoleSchemaListsAliasesNotIDs(t *testing.T) {
 	s := fake.start(t)
 	a := approvalTestApp(t)
 	m := saveSQLConsole(t, a, fake, s.URL,
-		MWDatasource{Alias: "orders", DSID: json.Number("90001"), Description: "订单测试库"},
-		MWDatasource{Alias: "tasks", DSID: json.Number("90002"), Description: "任务库"},
+		mwconfig.MWDatasource{Alias: "orders", DSID: json.Number("90001"), Description: "订单测试库"},
+		mwconfig.MWDatasource{Alias: "tasks", DSID: json.Number("90002"), Description: "任务库"},
 	)
 	var found map[string]any
-	for _, item := range a.mwToolList() {
-		if item["name"] == wsSQLQueryTool {
+	for _, item := range a.middlewares().ToolList() {
+		if item["name"] == mwconfig.WSSQLQueryTool {
 			found = item
 			break
 		}
@@ -299,10 +304,10 @@ func TestSQLConsoleApprovalPreviewHidesIDs(t *testing.T) {
 	fake := newCountingWS(1)
 	s := fake.start(t)
 	a := approvalTestApp(t)
-	m := saveSQLConsole(t, a, fake, s.URL, MWDatasource{Alias: "orders", DSID: json.Number("90001"), Description: "订单测试库"})
+	m := saveSQLConsole(t, a, fake, s.URL, mwconfig.MWDatasource{Alias: "orders", DSID: json.Number("90001"), Description: "订单测试库"})
 	done := make(chan approvalReply, 1)
 	go func() {
-		v, err := a.invokeTool(context.Background(), &mcpCtx{}, wsSQLQueryTool, map[string]any{"middleware": m.Name, "database": "orders", "sql": "SELECT id FROM t WHERE id=1 LIMIT 1"})
+		v, err := invokeTool(a, context.Background(), mwconfig.WSSQLQueryTool, map[string]any{"middleware": m.Name, "database": "orders", "sql": "SELECT id FROM t WHERE id=1 LIMIT 1"})
 		done <- unpackApprovalReply(v, err)
 	}()
 	rec := pendingApprovals(t, a, 1)[0]
@@ -336,7 +341,7 @@ func TestSQLConsoleTestConnectionNeverRunsSQL(t *testing.T) {
 	s := fake.start(t)
 	a := approvalTestApp(t)
 	m := saveSQLConsole(t, a, fake, s.URL)
-	msg, err := a.TestMiddleware(context.Background(), m)
+	msg, err := a.middlewares().Test(context.Background(), m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +360,7 @@ func TestSQLConsoleAuditHasNoIDs(t *testing.T) {
 	s := fake.start(t)
 	a := approvalTestApp(t)
 	m := saveSQLConsole(t, a, fake, s.URL)
-	_, _ = a.callMWTool(context.Background(), "tester", wsSQLQueryTool, map[string]any{"middleware": m.Name, "database": "orders", "sql": "SELECT id FROM t"})
+	_, _ = a.middlewares().Call(context.Background(), "tester", mwconfig.WSSQLQueryTool, map[string]any{"middleware": m.Name, "database": "orders", "sql": "SELECT id FROM t"})
 	rows := a.store.ListAudit(m.Name, 10)
 	if len(rows) == 0 {
 		t.Fatal("expected audit row")
@@ -366,7 +371,7 @@ func TestSQLConsoleAuditHasNoIDs(t *testing.T) {
 
 func TestMigrateWSToolToSQLMiddleware(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "v7.db")
+	path := filepath.Join(dir, "v7.DB()")
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
@@ -386,12 +391,12 @@ PRAGMA user_version=7;`)
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
-		st, err := OpenStore(path)
+		st, err := store.OpenStore(path)
 		if err != nil {
 			t.Fatal(err)
 		}
 		var ver int
-		if err := st.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil || ver != schemaUserVersion {
+		if err := st.DB().QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil || ver != wantSchemaUserVersion {
 			t.Fatalf("version=%d err=%v", ver, err)
 		}
 		if _, err := st.GetToolByName("demo_sql_query"); err == nil {
@@ -401,10 +406,10 @@ PRAGMA user_version=7;`)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !mw.Config.isSQLConsole() {
-			t.Fatalf("mode=%s", mw.Config.wsMode())
+		if !mw.Config.IsSQLConsole() {
+			t.Fatalf("mode=%s", mw.Config.EffectiveWSMode())
 		}
-		if mw.Config.sqlConsoleApproval() != "always" {
+		if mw.Config.SQLConsoleApproval() != "always" {
 			t.Fatalf("migrated approval=%q, want always", mw.Config.Approval)
 		}
 		if len(mw.Config.Datasources) != 1 || mw.Config.Datasources[0].Alias != "default" {
@@ -423,7 +428,7 @@ PRAGMA user_version=7;`)
 		if mw.Config.SQLDefaults.SpaceCode != "spc_alpha" || mw.Config.SQLDefaults.DBType != "mysql" {
 			t.Fatalf("defaults=%+v", mw.Config.SQLDefaults)
 		}
-		if !isEmptyJSONValue(mw.Config.SQLDefaults.legacyEnvID) || mw.Config.SQLDefaults.legacyEnvType != "" {
+		if mwconfig.SQLConsoleEnvNeedsPromote(mw.Config) { // owner predicate covers the private legacy keys
 			t.Fatalf("legacy default env keys should have been dropped: %+v", mw.Config.SQLDefaults)
 		}
 		raw, err := middlewareRawConfig(st, mw.ID)
@@ -449,22 +454,13 @@ PRAGMA user_version=7;`)
 		if len(packs) != 1 || len(packs[0].ToolIDs) != 0 || len(packs[0].MiddlewareIDs) != 1 || packs[0].MiddlewareIDs[0] != mw.ID {
 			t.Fatalf("pack membership not moved: %+v", packs)
 		}
-		st.db.Close()
+		st.DB().Close()
 	}
 }
 
-func TestSQLConsoleNameFromTool(t *testing.T) {
-	if sqlConsoleNameFromTool("demo_sql_query") != "demo_sql" {
-		t.Fatal(sqlConsoleNameFromTool("demo_sql_query"))
-	}
-	if sqlConsoleNameFromTool("other") != "other" {
-		t.Fatal(sqlConsoleNameFromTool("other"))
-	}
-}
-
-func middlewareRawConfig(st *Store, id int64) (string, error) {
+func middlewareRawConfig(st *store.Store, id int64) (string, error) {
 	var raw string
-	err := st.db.QueryRow(`SELECT config FROM middleware WHERE id=?`, id).Scan(&raw)
+	err := st.DB().QueryRow(`SELECT config FROM middleware WHERE id=?`, id).Scan(&raw)
 	return raw, err
 }
 
@@ -473,14 +469,14 @@ func TestSQLConsolePerRowEnvRouting(t *testing.T) {
 	s := fake.start(t)
 	a := approvalTestApp(t)
 	m := saveSQLConsole(t, a, fake, s.URL,
-		MWDatasource{Alias: "orders", DSID: json.Number("90001"), EnvID: json.Number("71001"), EnvType: "TEST", Description: "订单测试库"},
-		MWDatasource{Alias: "tasks", DSID: json.Number("90002"), EnvID: json.Number("72002"), EnvType: "PROD", Description: "任务库"},
+		mwconfig.MWDatasource{Alias: "orders", DSID: json.Number("90001"), EnvID: json.Number("71001"), EnvType: "TEST", Description: "订单测试库"},
+		mwconfig.MWDatasource{Alias: "tasks", DSID: json.Number("90002"), EnvID: json.Number("72002"), EnvType: "PROD", Description: "任务库"},
 	)
-	tool, err := m.sqlConsoleTool(mustDS(t, m, "tasks"))
+	tool, err := m.SQLConsoleTool(mustDS(t, m, "tasks"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.Execute(tool, map[string]any{"sql": "SELECT id FROM t WHERE id=1 LIMIT 1", "database": "tasks"}); err != nil {
+	if _, err := a.executor().Execute(tool, map[string]any{"sql": "SELECT id FROM t WHERE id=1 LIMIT 1", "database": "tasks"}); err != nil {
 		t.Fatal(err)
 	}
 	fake.mu.Lock()
@@ -502,10 +498,10 @@ func TestSQLConsolePerRowEnvRouting(t *testing.T) {
 
 func TestSQLConsoleValidateDatasourceUniqueness(t *testing.T) {
 	dup := sqlConsoleTestMW("sqlconsole", "ws://127.0.0.1:9/ws",
-		MWDatasource{Alias: "orders", DSID: json.Number("90001"), EnvID: json.Number("8"), EnvType: "PROD"},
-		MWDatasource{Alias: "tasks", DSID: json.Number("90001"), EnvID: json.Number("8"), EnvType: "prod"},
+		mwconfig.MWDatasource{Alias: "orders", DSID: json.Number("90001"), EnvID: json.Number("8"), EnvType: "PROD"},
+		mwconfig.MWDatasource{Alias: "tasks", DSID: json.Number("90001"), EnvID: json.Number("8"), EnvType: "prod"},
 	)
-	err := dup.normalize()
+	err := dup.Normalize()
 	if err == nil || !strings.Contains(err.Error(), "完全相同") {
 		t.Fatalf("expected unique triple error, got %v", err)
 	}
@@ -514,43 +510,43 @@ func TestSQLConsoleValidateDatasourceUniqueness(t *testing.T) {
 	}
 
 	alias := sqlConsoleTestMW("sqlconsole", "ws://127.0.0.1:9/ws",
-		MWDatasource{Alias: "Orders", DSID: json.Number("1"), EnvID: json.Number("8"), EnvType: "PROD"},
-		MWDatasource{Alias: "orders", DSID: json.Number("2"), EnvID: json.Number("9"), EnvType: "TEST"},
+		mwconfig.MWDatasource{Alias: "Orders", DSID: json.Number("1"), EnvID: json.Number("8"), EnvType: "PROD"},
+		mwconfig.MWDatasource{Alias: "orders", DSID: json.Number("2"), EnvID: json.Number("9"), EnvType: "TEST"},
 	)
-	if err := alias.normalize(); err == nil || !strings.Contains(err.Error(), "重复") {
+	if err := alias.Normalize(); err == nil || !strings.Contains(err.Error(), "重复") {
 		t.Fatalf("expected alias unique error, got %v", err)
 	}
 
 	missing := sqlConsoleTestMW("sqlconsole", "ws://127.0.0.1:9/ws",
-		MWDatasource{Alias: "orders", DSID: json.Number("90001"), EnvType: "PROD"},
+		mwconfig.MWDatasource{Alias: "orders", DSID: json.Number("90001"), EnvType: "PROD"},
 	)
 	missing.Config.Datasources[0].EnvID = nil
-	if err := missing.normalize(); err == nil || !strings.Contains(err.Error(), "envId") {
+	if err := missing.Normalize(); err == nil || !strings.Contains(err.Error(), "envId") {
 		t.Fatalf("expected missing envId error, got %v", err)
 	}
 
 	// Same dsId + envId but different envType is allowed.
 	ok := sqlConsoleTestMW("sqlconsole", "ws://127.0.0.1:9/ws",
-		MWDatasource{Alias: "orders_test", DSID: json.Number("90001"), EnvID: json.Number("8"), EnvType: "TEST"},
-		MWDatasource{Alias: "orders_prod", DSID: json.Number("90001"), EnvID: json.Number("8"), EnvType: "PROD"},
+		mwconfig.MWDatasource{Alias: "orders_test", DSID: json.Number("90001"), EnvID: json.Number("8"), EnvType: "TEST"},
+		mwconfig.MWDatasource{Alias: "orders_prod", DSID: json.Number("90001"), EnvID: json.Number("8"), EnvType: "PROD"},
 	)
-	if err := ok.normalize(); err != nil {
+	if err := ok.Normalize(); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestSQLConsoleEnvTypeDefaultsToPROD(t *testing.T) {
 	m := sqlConsoleTestMW("sqlconsole", "ws://127.0.0.1:9/ws",
-		MWDatasource{Alias: "orders", DSID: json.Number("90001"), EnvID: json.Number("70007")},
+		mwconfig.MWDatasource{Alias: "orders", DSID: json.Number("90001"), EnvID: json.Number("70007")},
 	)
 	m.Config.Datasources[0].EnvType = ""
-	if err := m.normalize(); err != nil {
+	if err := m.Normalize(); err != nil {
 		t.Fatal(err)
 	}
 	if m.Config.Datasources[0].EnvType != "PROD" {
 		t.Fatalf("envType=%q", m.Config.Datasources[0].EnvType)
 	}
-	vals := m.Config.Datasources[0].fieldValues(&m.Config)
+	vals := m.Config.Datasources[0].FieldValues(&m.Config)
 	if fmtSprint(vals["env_type"]) != "PROD" {
 		t.Fatalf("fieldValues env_type=%v", vals["env_type"])
 	}
@@ -558,7 +554,7 @@ func TestSQLConsoleEnvTypeDefaultsToPROD(t *testing.T) {
 
 func TestMigrateV8SQLConsoleEnvToRows(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "v8env.db")
+	path := filepath.Join(dir, "v8env.DB()")
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
@@ -577,12 +573,12 @@ PRAGMA user_version=8;`, cfg)
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
-		st, err := OpenStore(path)
+		st, err := store.OpenStore(path)
 		if err != nil {
 			t.Fatal(err)
 		}
 		var ver int
-		if err := st.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil || ver != schemaUserVersion {
+		if err := st.DB().QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil || ver != wantSchemaUserVersion {
 			t.Fatalf("version=%d err=%v", ver, err)
 		}
 		mw, err := st.GetMiddlewareByName("demo_sql")
@@ -592,14 +588,14 @@ PRAGMA user_version=8;`, cfg)
 		if len(mw.Config.Datasources) != 1 || mw.Config.Datasources[0].Alias != "default" {
 			t.Fatalf("datasources=%+v", mw.Config.Datasources)
 		}
-		if mw.Config.sqlConsoleApproval() != "always" {
+		if mw.Config.SQLConsoleApproval() != "always" {
 			t.Fatalf("v8 upgrade approval=%q, want always", mw.Config.Approval)
 		}
 		ds := mw.Config.Datasources[0]
 		if fmtSprint(ds.DSID) != "90001" || fmtSprint(ds.EnvID) != "70007" || ds.EnvType != "TEST" {
 			t.Fatalf("row not promoted: %+v", ds)
 		}
-		if !isEmptyJSONValue(mw.Config.SQLDefaults.legacyEnvID) || mw.Config.SQLDefaults.legacyEnvType != "" {
+		if mwconfig.SQLConsoleEnvNeedsPromote(mw.Config) { // owner predicate covers the private legacy keys
 			t.Fatalf("legacy keys still present: %+v", mw.Config.SQLDefaults)
 		}
 		raw, err := middlewareRawConfig(st, mw.ID)
@@ -618,21 +614,21 @@ PRAGMA user_version=8;`, cfg)
 				t.Fatalf("stored sql_defaults still has env_type: %s", raw)
 			}
 		}
-		st.db.Close()
+		st.DB().Close()
 	}
 }
 
 func TestSQLConsoleSavePromotesLegacyDefaults(t *testing.T) {
 	a := approvalTestApp(t)
 	raw := `{"url":"ws://127.0.0.1:9/ws","ws_mode":"sql_console","ws_messages":["execute {\"data\":{\"sql\":\"{{sql}}\"}}"],"sql_defaults":{"space_code":"spc_alpha","env_id":70007,"env_type":"TEST","db_type":"mysql"},"datasources":[{"alias":"default","ds_id":90001}],"max_rows":200,"timeout_sec":15,"perms":{"select":true}}`
-	c, err := decodeMWConfig(raw)
+	c, err := mwconfig.DecodeMWConfig(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if isEmptyJSONValue(c.SQLDefaults.legacyEnvID) || c.SQLDefaults.legacyEnvType != "TEST" {
+	if !mwconfig.SQLConsoleEnvNeedsPromote(c) { // private capture is asserted by the mwconfig owner test
 		t.Fatalf("expected to capture legacy defaults, got %+v", c.SQLDefaults)
 	}
-	m := &Middleware{Name: "legacy_sql", Type: "websocket", Config: c}
+	m := &mwconfig.Middleware{Name: "legacy_sql", Type: "websocket", Config: c}
 	if err := a.store.SaveMiddleware(m); err != nil {
 		t.Fatal(err)
 	}
@@ -660,4 +656,18 @@ func TestSQLConsoleSavePromotesLegacyDefaults(t *testing.T) {
 			t.Fatalf("saved sql_defaults still has env_type: %s", rawSaved)
 		}
 	}
+}
+
+// firstDatasource is the first enabled datasource, resolved through the public alias lookup.
+func firstDatasource(t *testing.T, m *mwconfig.Middleware) mwconfig.MWDatasource {
+	t.Helper()
+	aliases := m.DatasourceAliases()
+	if len(aliases) == 0 {
+		t.Fatal("no enabled datasource")
+	}
+	ds, err := m.LookupDatasource(aliases[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ds
 }

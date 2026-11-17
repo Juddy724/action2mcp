@@ -1,6 +1,8 @@
 package app
 
 import (
+	"action2mcp/internal/mwconfig"
+	"action2mcp/internal/store"
 	"bytes"
 	"context"
 	"database/sql"
@@ -13,7 +15,7 @@ import (
 	"testing"
 )
 
-func setSQLConsoleApproval(t *testing.T, a *App, m *Middleware, mode string) *Middleware {
+func setSQLConsoleApproval(t *testing.T, a *App, m *mwconfig.Middleware, mode string) *mwconfig.Middleware {
 	t.Helper()
 	m.Config.Approval = mode
 	if err := a.store.SaveMiddleware(m); err != nil {
@@ -23,7 +25,7 @@ func setSQLConsoleApproval(t *testing.T, a *App, m *Middleware, mode string) *Mi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Config.sqlConsoleApproval() != mode && mode != "" {
+	if got.Config.SQLConsoleApproval() != mode && mode != "" {
 		want := mode
 		if mode == "" {
 			want = "always"
@@ -38,7 +40,7 @@ func TestSQLConsoleApprovalDefaultsAlways(t *testing.T) {
 	s := fake.start(t)
 	a := approvalTestApp(t)
 	m := saveSQLConsole(t, a, fake, s.URL)
-	if m.Config.sqlConsoleApproval() != "always" {
+	if m.Config.SQLConsoleApproval() != "always" {
 		t.Fatalf("new middleware approval=%q, want always", m.Config.Approval)
 	}
 	raw, err := middlewareRawConfig(a.store, m.ID)
@@ -55,7 +57,7 @@ func TestSQLConsoleApprovalDefaultsAlways(t *testing.T) {
 
 	done := make(chan approvalReply, 1)
 	go func() {
-		v, err := a.invokeTool(context.Background(), &mcpCtx{}, wsSQLQueryTool, map[string]any{
+		v, err := invokeTool(a, context.Background(), mwconfig.WSSQLQueryTool, map[string]any{
 			"middleware": m.Name, "database": "orders", "sql": "SELECT id FROM t WHERE id=1 LIMIT 1",
 		})
 		done <- unpackApprovalReply(v, err)
@@ -85,13 +87,13 @@ func TestSQLConsoleApprovalOffRunsWithoutCard(t *testing.T) {
 	a := approvalTestApp(t)
 	m := setSQLConsoleApproval(t, a, saveSQLConsole(t, a, fake, s.URL), "off")
 
-	text, isErr := a.callMWTool(context.Background(), "tester", wsSQLQueryTool, map[string]any{
+	text, isErr := a.middlewares().Call(context.Background(), "tester", mwconfig.WSSQLQueryTool, map[string]any{
 		"middleware": m.Name, "database": "orders", "sql": "SELECT id FROM t WHERE id=1 LIMIT 1",
 	})
 	if isErr {
 		t.Fatalf("off call failed: %s", text)
 	}
-	pending, err := a.store.listApprovals("all", 20)
+	pending, err := a.store.Approvals.List("all", 20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,13 +135,13 @@ func TestSQLConsoleApprovalOffStillEnforcesGuard(t *testing.T) {
 			s := fake.start(t)
 			a := approvalTestApp(t)
 			m := setSQLConsoleApproval(t, a, saveSQLConsole(t, a, fake, s.URL), "off")
-			text, isErr := a.callMWTool(context.Background(), "tester", wsSQLQueryTool, map[string]any{
+			text, isErr := a.middlewares().Call(context.Background(), "tester", mwconfig.WSSQLQueryTool, map[string]any{
 				"middleware": m.Name, "database": "orders", "sql": tc.sql,
 			})
 			if !isErr || !strings.Contains(text, tc.want) {
 				t.Fatalf("expected %s reject, isErr=%v text=%s", tc.want, isErr, text)
 			}
-			pending, _ := a.store.listApprovals("all", 20)
+			pending, _ := a.store.Approvals.List("all", 20)
 			if len(pending) != 0 {
 				t.Fatalf("guard reject should not create an approval: %+v", pending)
 			}
@@ -154,7 +156,7 @@ func TestSQLConsoleApprovalOffStillEnforcesGuard(t *testing.T) {
 
 func TestMigrateV10SQLConsoleApprovalStaysAlways(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "v10.db")
+	path := filepath.Join(dir, "v10.DB()")
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
@@ -174,19 +176,19 @@ PRAGMA user_version=10;`, sqlConsole, terminal, mysql)
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
-		st, err := OpenStore(path)
+		st, err := store.OpenStore(path)
 		if err != nil {
 			t.Fatal(err)
 		}
 		var ver int
-		if err := st.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil || ver != schemaUserVersion {
-			t.Fatalf("version=%d err=%v want %d", ver, err, schemaUserVersion)
+		if err := st.DB().QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil || ver != wantSchemaUserVersion {
+			t.Fatalf("version=%d err=%v want %d", ver, err, wantSchemaUserVersion)
 		}
 		sqlMW, err := st.GetMiddlewareByName("demo_sql")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if sqlMW.Config.sqlConsoleApproval() != "always" {
+		if sqlMW.Config.SQLConsoleApproval() != "always" {
 			t.Fatalf("existing sql_console approval=%q", sqlMW.Config.Approval)
 		}
 		raw, err := middlewareRawConfig(st, sqlMW.ID)
@@ -227,13 +229,13 @@ PRAGMA user_version=10;`, sqlConsole, terminal, mysql)
 		if shop.Config.Approval != "" {
 			t.Fatalf("mysql middleware should have no approval, got %q", shop.Config.Approval)
 		}
-		st.db.Close()
+		st.DB().Close()
 	}
 }
 
 func TestMigrateV10PreservesHandSetOff(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "v10off.db")
+	path := filepath.Join(dir, "v10off.DB()")
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
@@ -246,16 +248,16 @@ PRAGMA user_version=10;`, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := OpenStore(path)
+	st, err := store.OpenStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.db.Close()
+	defer st.DB().Close()
 	mw, err := st.GetMiddlewareByName("demo_sql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mw.Config.sqlConsoleApproval() != "off" {
+	if mw.Config.SQLConsoleApproval() != "off" {
 		t.Fatalf("hand-set off was overwritten: %q", mw.Config.Approval)
 	}
 }
@@ -269,17 +271,17 @@ func TestSQLConsoleApprovalMCPCannotChangeOrSee(t *testing.T) {
 	m.Config.WSHeaders = map[string]string{"X-Token": "{{header.sso-epctoken}}"}
 	m = setSQLConsoleApproval(t, a, m, "always")
 
-	for _, item := range a.mwToolList() {
+	for _, item := range a.middlewares().ToolList() {
 		blob, _ := json.Marshal(item)
 		text := string(blob)
 		if strings.Contains(text, `"approval"`) || strings.Contains(text, "审批模式") ||
 			strings.Contains(text, "每次审批") || strings.Contains(text, "每次执行都要审批") ||
-			strings.Contains(text, "每次调用都要在控制台审批") || strings.Contains(text, `"off"`) && item["name"] == wsSQLQueryTool {
-			if item["name"] == wsSQLQueryTool {
+			strings.Contains(text, "每次调用都要在控制台审批") || strings.Contains(text, `"off"`) && item["name"] == mwconfig.WSSQLQueryTool {
+			if item["name"] == mwconfig.WSSQLQueryTool {
 				t.Fatalf("AI-facing tool schema leaked approval setting: %s", truncate(text, 400))
 			}
 		}
-		if item["name"] == wsSQLQueryTool && (strings.Contains(text, "审批") || strings.Contains(strings.ToLower(text), "approval")) {
+		if item["name"] == mwconfig.WSSQLQueryTool && (strings.Contains(text, "审批") || strings.Contains(strings.ToLower(text), "approval")) {
 			t.Fatalf("AI-facing description mentions approval: %s", truncate(text, 400))
 		}
 	}
@@ -287,7 +289,7 @@ func TestSQLConsoleApprovalMCPCannotChangeOrSee(t *testing.T) {
 	// invokeTool extra argument must not change the stored mode or skip approval.
 	done := make(chan approvalReply, 1)
 	go func() {
-		v, err := a.invokeTool(context.Background(), &mcpCtx{}, wsSQLQueryTool, map[string]any{
+		v, err := invokeTool(a, context.Background(), mwconfig.WSSQLQueryTool, map[string]any{
 			"middleware": m.Name, "database": "orders",
 			"sql": "SELECT id FROM t WHERE id=1 LIMIT 1", "approval": "off",
 		})
@@ -296,7 +298,7 @@ func TestSQLConsoleApprovalMCPCannotChangeOrSee(t *testing.T) {
 	rec := pendingApprovals(t, a, 1)[0]
 	_ = rec
 	got, _ := a.store.GetMiddleware(m.ID)
-	if got.Config.sqlConsoleApproval() != "always" {
+	if got.Config.SQLConsoleApproval() != "always" {
 		t.Fatalf("MCP args changed stored approval to %q", got.Config.Approval)
 	}
 	fake.mu.Lock()
@@ -306,7 +308,7 @@ func TestSQLConsoleApprovalMCPCannotChangeOrSee(t *testing.T) {
 	}
 	fake.mu.Unlock()
 	// cancel by rejecting so the goroutine finishes
-	if err := a.DecideApproval(rec.ID, rec.Nonce, "reject", nil, "test cleanup", rec.PreviewHash); err != nil {
+	if err := a.approvals().Decide(rec.ID, rec.Nonce, "reject", nil, "test cleanup", rec.PreviewHash); err != nil {
 		t.Fatal(err)
 	}
 	_ = getApprovalReply(t, done)
@@ -333,7 +335,7 @@ func TestSQLConsoleApprovalMCPCannotChangeOrSee(t *testing.T) {
 		t.Fatalf("foreign origin status=%d body=%s", w.Code, w.Body.Bytes())
 	}
 	got, _ = a.store.GetMiddleware(m.ID)
-	if got.Config.sqlConsoleApproval() != "always" {
+	if got.Config.SQLConsoleApproval() != "always" {
 		t.Fatalf("foreign origin changed approval to %q", got.Config.Approval)
 	}
 
@@ -351,7 +353,7 @@ func TestSQLConsoleApprovalMCPCannotChangeOrSee(t *testing.T) {
 		t.Fatalf("console save status=%d body=%s", w.Code, w.Body.Bytes())
 	}
 	got, _ = a.store.GetMiddleware(m.ID)
-	if got.Config.sqlConsoleApproval() != "off" {
+	if got.Config.SQLConsoleApproval() != "off" {
 		t.Fatalf("console did not save off, got %q", got.Config.Approval)
 	}
 	if got.Config.WSHeaders["X-Token"] != "{{header.sso-epctoken}}" {
@@ -359,14 +361,14 @@ func TestSQLConsoleApprovalMCPCannotChangeOrSee(t *testing.T) {
 	}
 
 	// After switching to off, a call runs immediately and still hides IDs.
-	text, isErr := a.callMWTool(context.Background(), "tester", wsSQLQueryTool, map[string]any{
+	text, isErr := a.middlewares().Call(context.Background(), "tester", mwconfig.WSSQLQueryTool, map[string]any{
 		"middleware": m.Name, "database": "orders", "sql": "SELECT id FROM t WHERE id=1 LIMIT 1",
 	})
 	if isErr {
 		t.Fatalf("off after console save failed: %s", text)
 	}
 	assertHiddenFromAI(t, text, fake.token, "90001", "spc_alpha", "70007")
-	pending, _ := a.store.listApprovals("pending", 20)
+	pending, _ := a.store.Approvals.List("pending", 20)
 	if len(pending) != 0 {
 		t.Fatalf("off still created a pending card: %+v", pending)
 	}
@@ -382,15 +384,15 @@ func TestSQLConsoleApprovalUnknownFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _ := a.store.GetMiddleware(m.ID)
-	if got.Config.sqlConsoleApproval() != "always" {
+	if got.Config.SQLConsoleApproval() != "always" {
 		t.Fatalf("unknown value should fail closed to always, got %q", got.Config.Approval)
 	}
 }
 
 func TestTerminalMiddlewareIgnoresApproval(t *testing.T) {
 	a := approvalTestApp(t)
-	m := &Middleware{Name: "pod_term", Type: "websocket", Config: MWConfig{
-		WSMode:       wsModeTerminal,
+	m := &mwconfig.Middleware{Name: "pod_term", Type: "websocket", Config: mwconfig.MWConfig{
+		WSMode:       mwconfig.WSModeTerminal,
 		URL:          "ws://127.0.0.1:9/term",
 		WSMessages:   []string{`{"type":"TERMINAL_COMMAND","text":"{{command}}"}`},
 		CommandAllow: []string{"ls"},

@@ -1,13 +1,14 @@
 package app
 
 import (
+	"action2mcp/internal/domain"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestTodayDefault(t *testing.T) {
-	tl := &Tool{Method: "POST", URL: "https://x/t-{{objectID}}.html", Headers: map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, Body: "dates%5B1%5D={{date}}&objectID%5B1%5D={{objectID}}", Params: []Param{{Name: "objectID", Type: "string", Required: true}, {Name: "date", Type: "string", Default: "@today"}}}
+	tl := &Tool{Method: "POST", URL: "https://x/t-{{objectID}}.html", Headers: map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, Body: "dates%5B1%5D={{date}}&objectID%5B1%5D={{objectID}}", Params: []domain.Param{{Name: "objectID", Type: "string", Required: true}, {Name: "date", Type: "string", Default: "@today"}}}
 	_, u, _, b, err := tl.Render(map[string]any{"objectID": "123"})
 	if err != nil || u != "https://x/t-123.html" || !strings.Contains(b, time.Now().Format("2006-01-02")) || !strings.Contains(b, "objectID%5B1%5D=123") {
 		t.Fatal(u, b, err)

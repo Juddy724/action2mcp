@@ -1,6 +1,8 @@
 package app
 
 import (
+	"action2mcp/internal/credential"
+	sitecfg "action2mcp/internal/site"
 	"strings"
 	"testing"
 )
@@ -15,16 +17,16 @@ func TestOriginMappingWSToHTTP(t *testing.T) {
 		{"sql.example.com", "https://sql.example.com"},
 	}
 	for _, c := range cases {
-		if got := credOrigin(c.in); got != c.want {
+		if got := credential.Origin(c.in); got != c.want {
 			t.Fatalf("credOrigin(%q)=%q want %q", c.in, got, c.want)
 		}
-		if got := originOf(c.in); got != c.want {
+		if got := credential.Origin(c.in); got != c.want {
 			t.Fatalf("originOf(%q)=%q want %q", c.in, got, c.want)
 		}
-		if got := browserOrigin(c.in); got != c.want {
-			t.Fatalf("browserOrigin(%q)=%q want %q", c.in, got, c.want)
+		if got := credential.Origin(c.in); got != c.want {
+			t.Fatalf("credential.Origin(%q)=%q want %q", c.in, got, c.want)
 		}
-		if got := normalizeOrigin(c.in); got != c.want {
+		if got := credential.NormalizeOrigin(c.in); got != c.want {
 			t.Fatalf("normalizeOrigin(%q)=%q want %q", c.in, got, c.want)
 		}
 	}
@@ -57,7 +59,7 @@ func TestSaveSiteMapsOriginAndRejectsWSLoginURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer a.Shutdown()
-	s := &Site{Origin: "wss://sql.example.com", Name: "sql", Method: MethodManual}
+	s := &sitecfg.Site{Origin: "wss://sql.example.com", Name: "sql", Method: sitecfg.MethodManual}
 	if err := a.store.SaveSite(s); err != nil {
 		t.Fatal(err)
 	}
@@ -80,12 +82,12 @@ func TestMigrateWSSiteOrigins(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer a.Shutdown()
-	_, err = a.store.db.Exec(`INSERT INTO sites(origin,config,status,last_login_at,last_check_at,last_error,login_count,created_at,updated_at)
+	_, err = a.store.DB().Exec(`INSERT INTO sites(origin,config,status,last_login_at,last_check_at,last_error,login_count,created_at,updated_at)
 VALUES('wss://sql.example.com', '{"name":"sql","entry_url":"wss://sql.example.com/console"}', 'unknown','','','',0,'','')`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.store.migrateWSSiteOrigins(); err != nil {
+	if err := a.store.MigrateWSSiteOrigins(); err != nil {
 		t.Fatal(err)
 	}
 	s := a.store.SiteByOrigin("https://sql.example.com")
@@ -96,7 +98,7 @@ VALUES('wss://sql.example.com', '{"name":"sql","entry_url":"wss://sql.example.co
 		t.Fatalf("entry %q", s.EntryURL)
 	}
 	var n int
-	if err := a.store.db.QueryRow(`SELECT COUNT(*) FROM sites WHERE origin LIKE 'ws%'`).Scan(&n); err != nil || n != 0 {
+	if err := a.store.DB().QueryRow(`SELECT COUNT(*) FROM sites WHERE origin LIKE 'ws%'`).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("leftover ws origins n=%d err=%v", n, err)
 	}
 }
@@ -107,16 +109,16 @@ func TestMigrateWSSiteOriginConflictKeepsHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer a.Shutdown()
-	keep := &Site{Origin: "https://sql.example.com", Name: "keep", Method: MethodManual}
+	keep := &sitecfg.Site{Origin: "https://sql.example.com", Name: "keep", Method: sitecfg.MethodManual}
 	if err := a.store.SaveSite(keep); err != nil {
 		t.Fatal(err)
 	}
-	_, err = a.store.db.Exec(`INSERT INTO sites(origin,config,status,last_login_at,last_check_at,last_error,login_count,created_at,updated_at)
+	_, err = a.store.DB().Exec(`INSERT INTO sites(origin,config,status,last_login_at,last_check_at,last_error,login_count,created_at,updated_at)
 VALUES('wss://sql.example.com', '{"name":"dup"}', 'unknown','','','',0,'','')`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.store.migrateWSSiteOrigins(); err != nil {
+	if err := a.store.MigrateWSSiteOrigins(); err != nil {
 		t.Fatal(err)
 	}
 	s := a.store.SiteByOrigin("https://sql.example.com")
@@ -124,7 +126,7 @@ VALUES('wss://sql.example.com', '{"name":"dup"}', 'unknown','','','',0,'','')`)
 		t.Fatalf("kept the wrong row: %+v", s)
 	}
 	var n int
-	a.store.db.QueryRow(`SELECT COUNT(*) FROM sites`).Scan(&n)
+	a.store.DB().QueryRow(`SELECT COUNT(*) FROM sites`).Scan(&n)
 	if n != 1 {
 		t.Fatalf("sites=%d", n)
 	}
