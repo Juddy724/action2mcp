@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // mcpRepository is the catalog surface the MCP server reads.
@@ -79,7 +80,7 @@ type rpcResp struct {
 
 var supportedProtocols = []string{"2025-06-18", "2025-03-26", "2024-11-05"}
 
-const instrCommon = "这些工具来自用户在浏览器中录制的真实业务操作（Action2MCP）。调用时会自动带上用户在专用浏览器里的登录态；登录过期时会按「登录中心」的配置自动重新登录（企业微信单点登录或配置管理里保存的账号）。流程包里如果加入了中间件（数据库 / Redis / 消息队列），会提供 db_query、redis_command、mq_send 等通用工具，参数 middleware 指定要操作哪一个；每个中间件的权限（增删改查等）由用户在控制台配置，未开启的权限会返回「无权限」错误，请不要尝试绕过。连接信息和密码不会提供给你。"
+const instrCommon = "这些工具来自用户在浏览器中录制的真实业务操作（Action2MCP）。调用时会自动带上用户在专用浏览器里的登录态；登录过期时会按「登录中心」的配置自动重新登录（企业微信单点登录或配置管理里保存的账号）。流程包里如果加入了中间件（数据库 / Redis / 消息队列），会提供 db_query、redis_command、mq_send 等通用工具，参数 middleware 指定要操作哪一个；每个中间件的权限（增删改查等）由用户在控制台配置，未开启的权限会返回「无权限」错误，请不要尝试绕过。需要审批的工具在调用时必须在参数 operation_note 中备注操作解释说明与影响分析（说明本次操作要做什么、为什么执行，以及会对业务数据或系统产生什么影响），供用户在控制台待审批列表中核对。连接信息和密码不会提供给你。"
 
 const instrTiered = "工具按「流程包」分组、按需加载（阶梯式）：1) 先调用 list_packs 查看有哪些流程包及适用场景；2) 按当前任务选一个包，调用 load_pack 加载。返回里的 guide 是这个包的使用说明，有内容时先按它确定工具顺序和参数来源，再调用工具；工具的名称、说明和参数也在这次返回里，并会出现在工具列表里；3) 如果你的工具列表没有刷新出来，用 call_pack_tool(tool, arguments) 调用；4) 用完可调用 unload_pack 卸载。Tools are grouped into packs and loaded on demand: call list_packs first, pick a pack, load_pack it, read its guide when present, then call its tools (or use call_pack_tool if your tool list does not refresh). "
 
@@ -173,35 +174,75 @@ func (a *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var out []rpcResp
 	sid := r.Header.Get("Mcp-Session-Id")
 	mc := &mcp.Call{}
+	canParallel := batch && len(reqs) > 1
 	for _, q := range reqs {
 		if q.Method == "initialize" {
-			sid = randID()
-			w.Header().Set("Mcp-Session-Id", sid)
-			var p struct {
-				ClientInfo struct {
-					Name    string `json:"name"`
-					Version string `json:"version"`
-				} `json:"clientInfo"`
-			}
-			json.Unmarshal(q.Params, &p)
-			s := a.sessions.Session(sid)
-			s.SetClientName(strings.TrimSpace(p.ClientInfo.Name + " " + p.ClientInfo.Version))
+			canParallel = false
+			break
 		}
+	}
+	if canParallel {
 		mc.Session = a.sessions.Session(sid)
 		if h := r.Header.Get("X-A2M-Client"); h != "" {
 			mc.Session.HintClientName(h)
 		}
-		res, e := a.dispatchMCP(r.Context(), q, mc)
-		if len(q.ID) == 0 || string(q.ID) == "null" {
-			continue // notification or response from client
+		results := make([]*rpcResp, len(reqs))
+		var wg sync.WaitGroup
+		for i, q := range reqs {
+			i, q := i, q
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				res, e := a.dispatchMCP(r.Context(), q, mc)
+				if len(q.ID) == 0 || string(q.ID) == "null" {
+					return
+				}
+				resp := &rpcResp{JSONRPC: "2.0", ID: q.ID}
+				if e != nil {
+					resp.Error = e
+				} else {
+					resp.Result = res
+				}
+				results[i] = resp
+			}()
 		}
-		resp := rpcResp{JSONRPC: "2.0", ID: q.ID}
-		if e != nil {
-			resp.Error = e
-		} else {
-			resp.Result = res
+		wg.Wait()
+		for _, resp := range results {
+			if resp != nil {
+				out = append(out, *resp)
+			}
 		}
-		out = append(out, resp)
+	} else {
+		for _, q := range reqs {
+			if q.Method == "initialize" {
+				sid = randID()
+				w.Header().Set("Mcp-Session-Id", sid)
+				var p struct {
+					ClientInfo struct {
+						Name    string `json:"name"`
+						Version string `json:"version"`
+					} `json:"clientInfo"`
+				}
+				json.Unmarshal(q.Params, &p)
+				s := a.sessions.Session(sid)
+				s.SetClientName(strings.TrimSpace(p.ClientInfo.Name + " " + p.ClientInfo.Version))
+			}
+			mc.Session = a.sessions.Session(sid)
+			if h := r.Header.Get("X-A2M-Client"); h != "" {
+				mc.Session.HintClientName(h)
+			}
+			res, e := a.dispatchMCP(r.Context(), q, mc)
+			if len(q.ID) == 0 || string(q.ID) == "null" {
+				continue // notification or response from client
+			}
+			resp := rpcResp{JSONRPC: "2.0", ID: q.ID}
+			if e != nil {
+				resp.Error = e
+			} else {
+				resp.Result = res
+			}
+			out = append(out, resp)
+		}
 	}
 	// Deliver notifications: on the session's GET SSE stream if one is open, otherwise inline in this
 	// POST response as SSE (when the client accepts it). Clients that support neither still get the
@@ -349,6 +390,7 @@ func (a *Server) invokeTool(ctx context.Context, mc *mcp.Call, name string, args
 		return nil, &rpcErr{-32602, msg}
 	}
 	var pending *invoke.Approved
+	var explanation string
 	if t.Approval == "always" {
 		var err error
 		args, err = approval.CopyArgs(args)
@@ -356,13 +398,14 @@ func (a *Server) invokeTool(ctx context.Context, mc *mcp.Call, name string, args
 			return mcp.TextResult(err.Error(), true), nil
 		}
 	}
+	args, explanation = execution.ExtractApprovalNote(t, args)
 	prepared, err := a.engine().Prepare(t, args)
 	if err != nil {
 		return mcp.TextResult("调用失败："+err.Error(), true), nil
 	}
 	prefix := ""
 	if t.Approval == "always" {
-		pending, err = a.approvals().Wait(ctx, t, args, prepared, client)
+		pending, err = a.approvals().Wait(ctx, t, args, prepared, client, explanation)
 		if err != nil {
 			return mcp.TextResult(err.Error(), true), nil
 		}
@@ -402,6 +445,9 @@ func (a *Server) recordedToolDefs(tools []*execution.Tool, packNames map[int64][
 		}
 		if ps := packNames[t.ID]; len(ps) > 0 {
 			desc += "（流程包：" + strings.Join(ps, "、") + "）"
+		}
+		if t.Approval == "always" {
+			desc += "（需审批：调用时必须在 operation_note 参数中说明本次操作的目的与影响）"
 		}
 		write, ann := toolOpKind(t)
 		if write {

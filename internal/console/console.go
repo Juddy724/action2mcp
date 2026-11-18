@@ -34,6 +34,7 @@ type Login interface {
 	OpenLoginWindow(site *site.Site) error
 	Relogin(site *site.Site, seenGen int64, force bool, interactive bool) error
 	ResetSiteFailures()
+	SmartOpenLogin(site *site.Site, force bool) (*login.OpenLoginResult, error)
 	Snapshot(origin string) login.Snapshot
 }
 

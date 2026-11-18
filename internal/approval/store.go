@@ -1,6 +1,7 @@
 package approval
 
 import (
+	"action2mcp/internal/domain"
 	"database/sql"
 	"encoding/json"
 	"strings"
@@ -15,6 +16,13 @@ type SQLStore struct{ db *sql.DB }
 func NewSQLStore(db *sql.DB) *SQLStore { return &SQLStore{db: db} }
 func now() string                      { return time.Now().Format("2006-01-02 15:04:05") }
 func js(v any) string                  { b, _ := json.Marshal(v); return string(b) }
+
+type storedPreview struct {
+	Preview     domain.RequestPreview `json:"preview"`
+	PreviewHash string                `json:"preview_hash"`
+	Explanation string                `json:"explanation,omitempty"`
+}
+
 func (s *SQLStore) Insert(r *Record) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -23,7 +31,7 @@ func (s *SQLStore) Insert(r *Record) error {
 	defer tx.Rollback()
 	res, err := tx.Exec(`INSERT INTO approvals(ts,tool,tool_id,tool_rev,client,args_display,final_args_display,status,feedback,decided_at,result,title,preview_display,params_json) VALUES(?,?,?,?,?,?,'','pending','','','',?,?,?)`,
 		r.TS, r.Tool, r.ToolID, r.ToolRev, r.Client, js(r.ArgsDisplay), r.Title,
-		js(Preview{r.Preview, r.PreviewHash}), js(r.Params))
+		js(storedPreview{r.Preview, r.PreviewHash, r.Explanation}), js(r.Params))
 	if err != nil {
 		return err
 	}
@@ -74,7 +82,7 @@ func (s *SQLStore) Finish(r *Record) error {
 	}
 	defer tx.Rollback()
 	res, err := tx.Exec(`UPDATE approvals SET status=?,feedback=?,decided_at=?,final_args_display=?,preview_display=?,result=? WHERE id=? AND status='pending'`,
-		r.Status, r.Feedback, r.DecidedAt, js(r.FinalArgsDisplay), js(Preview{r.Preview, r.PreviewHash}), r.Result, r.ID)
+		r.Status, r.Feedback, r.DecidedAt, js(r.FinalArgsDisplay), js(storedPreview{r.Preview, r.PreviewHash, r.Explanation}), r.Result, r.ID)
 	if err != nil {
 		return err
 	}
@@ -124,9 +132,9 @@ func (s *SQLStore) List(status string, limit int) ([]Record, error) {
 		r.ResultFull = ""
 		json.Unmarshal([]byte(args), &r.ArgsDisplay)
 		json.Unmarshal([]byte(final), &r.FinalArgsDisplay)
-		var p Preview
+		var p storedPreview
 		json.Unmarshal([]byte(preview), &p)
-		r.Preview, r.PreviewHash = p.Preview, p.PreviewHash
+		r.Preview, r.PreviewHash, r.Explanation = p.Preview, p.PreviewHash, p.Explanation
 		json.Unmarshal([]byte(params), &r.Params)
 		out = append(out, r)
 	}

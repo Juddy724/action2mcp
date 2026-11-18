@@ -459,15 +459,12 @@ func cmdStdio(dataDir string) error {
 			}
 		}()
 	}
-	for sc.Scan() {
-		line := bytes.TrimSpace(sc.Bytes())
-		if len(line) == 0 {
-			continue
-		}
+	var wg sync.WaitGroup
+	handleLine := func(line []byte) {
 		var resp *http.Response
 		var err error
 		timeout, attempts := stdioCallPolicy(line)
-		client.Timeout = timeout
+		reqClient := &http.Client{Timeout: timeout, Transport: client.Transport}
 		for attempt := 0; attempt < attempts; attempt++ {
 			req, _ := http.NewRequest("POST", endpoint, bytes.NewReader(line))
 			req.Header.Set("Content-Type", "application/json")
@@ -475,7 +472,7 @@ func cmdStdio(dataDir string) error {
 			if s := getSession(); s != "" {
 				req.Header.Set("Mcp-Session-Id", s)
 			}
-			resp, err = client.Do(req)
+			resp, err = reqClient.Do(req)
 			if err == nil {
 				break
 			}
@@ -485,30 +482,67 @@ func cmdStdio(dataDir string) error {
 		}
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "a2m mcp:", err)
-			continue
+			return
 		}
 		if s := resp.Header.Get("Mcp-Session-Id"); s != "" {
 			sessMu.Lock()
 			session = s
-			sessMu.Unlock()
+			started := streamStarted
 			if !streamStarted {
 				streamStarted = true
+			}
+			sessMu.Unlock()
+			if !started {
 				startStream()
 			}
 		}
 		if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
 			readSSE(resp.Body, write)
 			resp.Body.Close()
-			continue
+			return
 		}
 		b, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if resp.StatusCode == http.StatusAccepted {
-			continue
+			return
 		}
 		write(b)
 	}
+	for sc.Scan() {
+		raw := bytes.TrimSpace(sc.Bytes())
+		if len(raw) == 0 {
+			continue
+		}
+		line := append([]byte(nil), raw...)
+		if stdioAsyncCall(line) && getSession() != "" {
+			wg.Add(1)
+			go func(b []byte) {
+				defer wg.Done()
+				handleLine(b)
+			}(line)
+			continue
+		}
+		handleLine(line)
+	}
+	wg.Wait()
 	return nil
+}
+
+func stdioAsyncCall(line []byte) bool {
+	var q struct {
+		Method string `json:"method"`
+		Params struct {
+			Name string `json:"name"`
+		} `json:"params"`
+	}
+	if json.Unmarshal(line, &q) != nil || q.Method != "tools/call" {
+		return false
+	}
+	switch q.Params.Name {
+	case "list_packs", "load_pack", "unload_pack":
+		return false
+	}
+	return true
 }
 
 func stdioCallPolicy(line []byte) (time.Duration, int) {

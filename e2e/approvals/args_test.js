@@ -33,4 +33,12 @@ test('approval edits submit whole changed parameters and leave originals on the 
   session.fields[2].value = '1';
   session.fields[1].value = session.initial[1];
   assert.deepEqual(diff(), {});
+
+  const historyHTML = context.renderApprovalHistoryHTML([
+    { id: 1, ts: '2026-11-18 17:00:00', tool: 'pending_tool', title: '待处理', client: 'agent', status: 'pending', explanation: '不应出现在历史表' },
+    { id: 2, ts: '2026-11-18 16:59:00', decided_at: '2026-11-18 16:59:10', tool: 'done_tool', title: '已完成', client: 'agent', status: 'approved', explanation: '删除测试订单，影响：订单状态变为已删除', args_display: { id: '42' }, result: 'HTTP 200\nok' },
+  ]);
+  assert.equal(historyHTML.includes('pending_tool'), false);
+  assert.equal(historyHTML.includes('done_tool'), true);
+  assert.equal(historyHTML.includes('删除测试订单，影响：订单状态变为已删除'), true);
 });

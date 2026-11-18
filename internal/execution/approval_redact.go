@@ -10,7 +10,67 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
+
+const (
+	ApprovalNoteParam       = "operation_note"
+	ApprovalNoteDescription = "【必填】操作解释说明与影响分析：请简要说明本次操作要做什么、为什么执行，以及本次操作会对业务数据或系统产生什么影响（将展示在待审批列表中供用户核对）"
+	maxApprovalNoteBytes    = 4000
+)
+
+var approvalNoteKeys = []string{ApprovalNoteParam, "_approval_note", "approval_note", "explanation"}
+
+func cutNoteUTF8(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	for max > 0 && !utf8.RuneStart(s[max]) {
+		max--
+	}
+	return strings.TrimRight(s[:max], "\r\n") + "…"
+}
+
+// ExtractApprovalNote extracts the AI's operation explanation and impact note
+// from MCP arguments. Synthetic note keys that are not declared in t.Params are
+// removed from the returned business argument map so they do not pollute
+// ArgsDisplay, PreviewHash, or upstream requests.
+func ExtractApprovalNote(t *Tool, args map[string]any) (map[string]any, string) {
+	if len(args) == 0 {
+		return args, ""
+	}
+	declared := map[string]bool{}
+	if t != nil {
+		for _, p := range t.Params {
+			declared[p.Name] = true
+		}
+	}
+	var note string
+	var strip []string
+	for _, k := range approvalNoteKeys {
+		v, ok := args[k]
+		if !ok {
+			continue
+		}
+		if note == "" && v != nil {
+			note = cutNoteUTF8(strings.TrimSpace(domain.ArgumentText(v)), maxApprovalNoteBytes)
+		}
+		if !declared[k] {
+			strip = append(strip, k)
+		}
+	}
+	if len(strip) == 0 {
+		return args, note
+	}
+	cleaned := make(map[string]any, len(args))
+	for k, v := range args {
+		cleaned[k] = v
+	}
+	for _, k := range strip {
+		delete(cleaned, k)
+	}
+	return cleaned, note
+}
 
 // Embedded JSON may follow a command or arbitrary display text. References are
 // not JSON containers, even though their spelling also starts with a brace.
@@ -135,6 +195,30 @@ func (a *Engine) McpToolSecrets(t *Tool) []string {
 
 func (a *Engine) McpInputSchema(t *Tool) map[string]any {
 	schema := t.InputSchema()
+	if t != nil && t.Approval == "always" {
+		props, _ := schema["properties"].(map[string]any)
+		if props == nil {
+			props = map[string]any{}
+			schema["properties"] = props
+		}
+		if _, exists := props[ApprovalNoteParam]; !exists {
+			props[ApprovalNoteParam] = map[string]any{
+				"type":        "string",
+				"description": ApprovalNoteDescription,
+			}
+			req, _ := schema["required"].([]string)
+			hasReq := false
+			for _, r := range req {
+				if r == ApprovalNoteParam {
+					hasReq = true
+					break
+				}
+			}
+			if !hasReq {
+				schema["required"] = append(req, ApprovalNoteParam)
+			}
+		}
+	}
 	raw, err := json.Marshal(schema)
 	if err != nil {
 		return schema

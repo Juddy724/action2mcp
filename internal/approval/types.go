@@ -21,6 +21,7 @@ type Record struct {
 	ToolRev          int64                 `json:"tool_rev"`
 	Title            string                `json:"title"`
 	Client           string                `json:"client"`
+	Explanation      string                `json:"explanation,omitempty"`
 	ArgsDisplay      map[string]string     `json:"args_display"`
 	FinalArgsDisplay map[string]string     `json:"final_args_display,omitempty"`
 	Status           string                `json:"status"`

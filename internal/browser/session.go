@@ -79,12 +79,13 @@ type Session struct {
 	conn     *cdp.Conn
 	headless bool
 
-	mu      sync.Mutex
-	pages   map[string]string // sessionId -> targetId
-	capture *recording.Capture
-	closed  chan struct{}
-	scripts map[string]string // sessionId -> script identifier for overlay
-	firstPg chan string
+	mu       sync.Mutex
+	pages    map[string]string        // sessionId -> targetId
+	capture  *recording.Capture
+	closed   chan struct{}
+	scripts  map[string]string        // sessionId -> script identifier for overlay
+	captured map[string]CapturedCreds // sessionId -> captured login credentials
+	firstPg  chan string
 
 	syncPending atomic.Bool
 
@@ -165,7 +166,7 @@ func (a *Manager) Launch(headless bool) (*Session, error) {
 		cmd.Process.Kill()
 		return nil, fmt.Errorf("连接浏览器失败: %v", err)
 	}
-	bs := &Session{owner: a, cmd: cmd, conn: conn, headless: headless, pages: map[string]string{}, closed: make(chan struct{}), scripts: map[string]string{}, firstPg: make(chan string, 1)}
+	bs := &Session{owner: a, cmd: cmd, conn: conn, headless: headless, pages: map[string]string{}, closed: make(chan struct{}), scripts: map[string]string{}, captured: map[string]CapturedCreds{}, firstPg: make(chan string, 1)}
 	bs.capture = a.newCapture(bs)
 	go bs.loop(exited)
 	if !headless {
@@ -176,6 +177,9 @@ func (a *Manager) Launch(headless bool) (*Session, error) {
 		}
 	}
 	a.restoreCookies(bs)
+	for orig, inc := range a.drainPendingClears() {
+		bs.ClearOriginState(orig, inc)
+	}
 	return bs, nil
 }
 
@@ -327,11 +331,15 @@ func (bs *Session) handle(ev cdp.Event) {
 		}
 	case "Runtime.bindingCalled":
 		var p struct {
-			Name string `json:"name"`
+			Name    string `json:"name"`
+			Payload string `json:"payload"`
 		}
 		json.Unmarshal(ev.Params, &p)
-		if p.Name == bindingName {
+		switch p.Name {
+		case bindingName:
 			go bs.owner.StopRecording("overlay")
+		case credBindingName:
+			bs.recordCapturedBinding(ev.SessionID, p.Payload)
 		}
 	case "Network.requestWillBeSent":
 		bs.capture.HandleEvent(ev)
@@ -396,10 +404,21 @@ func (bs *Session) StartRecordingOn(id int64, name, startURL string, fresh bool)
 
 // Cookies reads all cookies from the live browser.
 func (bs *Session) Cookies() ([]Cookie, error) {
+	return bs.cookiesForContext("")
+}
+
+func (bs *Session) cookiesForContext(browserContextID string) ([]Cookie, error) {
+	if bs == nil {
+		return nil, errors.New("浏览器会话不可用")
+	}
+	params := map[string]any{}
+	if browserContextID != "" {
+		params["browserContextId"] = browserContextID
+	}
 	var r struct {
 		Cookies []Cookie `json:"cookies"`
 	}
-	if err := bs.call("", "Storage.getCookies", map[string]any{}, &r); err != nil {
+	if err := bs.call("", "Storage.getCookies", params, &r); err != nil {
 		return nil, err
 	}
 	return r.Cookies, nil

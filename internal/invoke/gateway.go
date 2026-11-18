@@ -8,6 +8,7 @@ import (
 	"action2mcp/internal/mwconfig"
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"time"
 )
@@ -118,10 +119,14 @@ func (e *operation) Confirm(args map[string]any) (*operation, approval.Preview, 
 	return &operation{e.g, e.tool, prepared}, approval.Preview{Preview: prepared.Preview, PreviewHash: prepared.PreviewHash}, e.g.engine().ApprovalArgs(e.tool, args, nil), nil
 }
 
-func (a *Gateway) Wait(ctx context.Context, t *execution.Tool, args map[string]any, prepared *execution.PreparedCall, client string) (*Approved, error) {
+func (a *Gateway) Wait(ctx context.Context, t *execution.Tool, args map[string]any, prepared *execution.PreparedCall, client string, explanation ...string) (*Approved, error) {
 	timeout := a.timeout()
 	if timeout <= 0 {
 		timeout = a.repo.ApprovalTimeout()
+	}
+	note := ""
+	if len(explanation) > 0 {
+		note = strings.TrimSpace(explanation[0])
 	}
 	decision, err := a.Service().Wait(ctx, args, timeout, func(args map[string]any) (*operation, approval.Record, error) {
 		snapshot := *t
@@ -131,8 +136,13 @@ func (a *Gateway) Wait(ctx context.Context, t *execution.Tool, args map[string]a
 			param.Secret = a.engine().ParamIsSecret(t, *param, args[param.Name])
 		}
 		operation := &operation{a, &snapshot, prepared}
+		scrubbedNote := ""
+		if note != "" {
+			scrubbedNote = a.engine().ScrubPrepared(note, prepared, false)
+		}
 		record := approval.Record{TS: now(), Tool: a.engine().ScrubPrepared(t.Name, prepared, false), ToolID: t.ID, ToolRev: t.Rev,
 			Title: a.engine().ScrubPrepared(t.Title, prepared, false), Client: a.engine().ScrubPrepared(client, prepared, false),
+			Explanation: scrubbedNote,
 			ArgsDisplay: a.engine().ApprovalArgs(&snapshot, args, nil), Status: "pending", Preview: prepared.Preview, PreviewHash: prepared.PreviewHash,
 			Params: a.engine().PreparedParams(&snapshot, args, prepared)}
 		return operation, record, nil

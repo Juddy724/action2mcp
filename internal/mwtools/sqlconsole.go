@@ -200,7 +200,11 @@ func (a *Service) callWSSQL(ctx context.Context, c *mwCall, args map[string]any)
 	var pending *invoke.Approved
 	prefix := ""
 	if c.m.Config.SQLConsoleApproval() != "off" {
-		pending, err = a.approvals().Wait(ctx, tool, callArgs, prepared, c.client)
+		_, explanation := execution.ExtractApprovalNote(tool, args)
+		if explanation != "" {
+			explanation = a.scrubSQLConsoleText(explanation, nil, cfgVals, true)
+		}
+		pending, err = a.approvals().Wait(ctx, tool, callArgs, prepared, c.client, explanation)
 		if err != nil {
 			return c.blocked(a.engine().ScrubPrepared(err.Error(), prepared, true)), true
 		}

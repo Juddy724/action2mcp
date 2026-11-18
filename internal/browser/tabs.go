@@ -10,9 +10,10 @@ import (
 
 // loginTab is a page opened by Action2MCP itself (background re-login or a login window).
 type Tab struct {
-	bs       *Session
-	targetID string
-	session  string
+	bs               *Session
+	targetID         string
+	session          string
+	browserContextID string
 }
 
 func (bs *Session) userAgent() string {
@@ -61,6 +62,59 @@ func (bs *Session) OpenTab(u string, background bool) (*Tab, error) {
 	return t, nil
 }
 
+// OpenIsolatedTab opens u in a clean isolated browser context (empty cookies and storage).
+func (bs *Session) OpenIsolatedTab(u string) (*Tab, error) {
+	if bs == nil {
+		return nil, errors.New("浏览器会话不可用")
+	}
+	var bc struct {
+		BrowserContextID string `json:"browserContextId"`
+	}
+	if err := bs.call("", "Target.createBrowserContext", map[string]any{"disposeOnDetach": true}, &bc); err != nil {
+		return nil, err
+	}
+	var r struct {
+		TargetID string `json:"targetId"`
+	}
+	if err := bs.call("", "Target.createTarget", map[string]any{
+		"url":              "about:blank",
+		"browserContextId": bc.BrowserContextID,
+		"background":       true,
+	}, &r); err != nil {
+		if bc.BrowserContextID != "" {
+			bs.call("", "Target.disposeBrowserContext", map[string]any{"browserContextId": bc.BrowserContextID}, nil)
+		}
+		return nil, err
+	}
+	bs.mu.Lock()
+	if bs.ignore == nil {
+		bs.ignore = map[string]bool{}
+	}
+	bs.ignore[r.TargetID] = true
+	bs.mu.Unlock()
+	var at struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := bs.call("", "Target.attachToTarget", map[string]any{"targetId": r.TargetID, "flatten": true}, &at); err != nil {
+		bs.call("", "Target.closeTarget", map[string]any{"targetId": r.TargetID}, nil)
+		if bc.BrowserContextID != "" {
+			bs.call("", "Target.disposeBrowserContext", map[string]any{"browserContextId": bc.BrowserContextID}, nil)
+		}
+		return nil, err
+	}
+	t := &Tab{bs: bs, targetID: r.TargetID, session: at.SessionID, browserContextID: bc.BrowserContextID}
+	if bs.headless {
+		if ua := bs.userAgent(); ua != "" {
+			bs.call(t.session, "Emulation.setUserAgentOverride", map[string]any{"userAgent": ua, "acceptLanguage": "zh-CN,zh;q=0.9,en;q=0.8"}, nil)
+		}
+	}
+	bs.call(t.session, "Runtime.runIfWaitingForDebugger", nil, nil)
+	if err := bs.call(t.session, "Page.navigate", map[string]any{"url": u}, nil); err != nil {
+		debugf("navigate %s: %v", u, err)
+	}
+	return t, nil
+}
+
 func (t *Tab) Eval(expr string, out any) error {
 	var r struct {
 		Result struct {
@@ -97,6 +151,16 @@ func (t *Tab) Close() {
 		return
 	}
 	t.bs.call("", "Target.closeTarget", map[string]any{"targetId": t.targetID}, nil)
+	if t.browserContextID != "" {
+		t.bs.call("", "Target.disposeBrowserContext", map[string]any{"browserContextId": t.browserContextID}, nil)
+	}
+}
+
+func (t *Tab) Cookies() ([]Cookie, error) {
+	if t == nil || t.bs == nil {
+		return nil, errors.New("登录窗口不可用")
+	}
+	return t.bs.cookiesForContext(t.browserContextID)
 }
 
 func (t *Tab) Navigate(u string) error {

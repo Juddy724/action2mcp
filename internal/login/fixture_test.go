@@ -44,6 +44,9 @@ func (f fixtureBrowsers) OpenVisibleTab(string) (*browser.Session, *browser.Tab,
 }
 func (f fixtureBrowsers) ApplyCookies(c []Cookie)              { f.repo.ReplaceCookies(c) }
 func (f fixtureBrowsers) CookiesFor(string) ([]Cookie, string) { return f.repo.AllCookies(), "fixture" }
+func (f fixtureBrowsers) ClearOriginState(origin string, includeParentCookies bool) {
+	f.repo.ReplaceCookies(cookiesExcludingOrigin(f.repo.AllCookies(), origin, includeParentCookies))
+}
 func testLoginService(t *testing.T) *Service {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
@@ -74,8 +77,19 @@ CREATE TABLE IF NOT EXISTS vault(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT
 	}
 	repo := &loginTestRepository{Repository: sitecfg.NewRepository(db), db: db}
 	quit := make(chan struct{})
-	probe := execution.New(execution.Options{Vault: v, ConsolePort: 19000, HTTPClient: &http.Client{}}).Call
-	a := New(Options{Repository: repo, HeaderDB: db, Vault: v, Browsers: fixtureBrowsers{repo}, Quit: quit, Probe: probe, MiddlewareBindings: func() []MiddlewareBinding { return nil }})
+	httpClient := &http.Client{}
+	probe := execution.New(execution.Options{Vault: v, ConsolePort: 19000, HTTPClient: httpClient}).Call
+	a := New(Options{
+		Repository:         repo,
+		HeaderDB:           db,
+		Vault:              v,
+		Browsers:           fixtureBrowsers{repo},
+		Quit:               quit,
+		ConsolePort:        func() int { return 19000 },
+		HTTPClient:         func() *http.Client { return httpClient },
+		Probe:              probe,
+		MiddlewareBindings: func() []MiddlewareBinding { return nil },
+	})
 	t.Cleanup(func() {
 		for _, s := range repo.ListSites() {
 			_ = a.CancelLogin(s)

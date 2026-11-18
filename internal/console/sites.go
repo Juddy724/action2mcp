@@ -3,10 +3,12 @@ package console
 import (
 	"action2mcp/internal/credential"
 	"action2mcp/internal/domain"
+	"action2mcp/internal/login"
 	"action2mcp/internal/recording"
 	sitecfg "action2mcp/internal/site"
 	"action2mcp/internal/vault"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -215,11 +217,38 @@ func (a *Server) registerV2(mux *http.ServeMux) {
 			writeErr(w, 404, errors.New("站点不存在"))
 			return
 		}
-		if err := a.login().OpenLoginWindow(s); err != nil {
-			writeErr(w, 500, err)
+		var in struct {
+			Force bool `json:"force"`
+		}
+		if r.Body != nil && r.ContentLength != 0 {
+			if err := readJSON(r, &in); err != nil && !errors.Is(err, io.EOF) {
+				writeErr(w, 400, err)
+				return
+			}
+		}
+		qForce := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("force")))
+		force := in.Force || qForce == "1" || qForce == "true"
+		scrub := func(msg string) string {
+			if a.vault != nil {
+				return a.vault.Scrub(msg)
+			}
+			return msg
+		}
+		res, err := a.login().SmartOpenLogin(s, force)
+		if err != nil {
+			writeErr(w, 500, errors.New(scrub(err.Error())))
 			return
 		}
-		writeJSON(w, 200, map[string]any{"ok": true})
+		if res == nil {
+			res = &login.OpenLoginResult{}
+		}
+		writeJSON(w, 200, map[string]any{
+			"ok":            true,
+			"opened":        res.Opened,
+			"already_valid": res.AlreadyValid,
+			"method":        res.Method,
+			"message":       scrub(res.Message),
+		})
 	})
 	mux.Handle("POST /api/sites/{id}/cancel", a.approvalOnly(func(w http.ResponseWriter, r *http.Request) {
 		var in map[string]any

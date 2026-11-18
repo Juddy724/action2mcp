@@ -1,15 +1,17 @@
 package login
 
 import (
+	"action2mcp/internal/browser"
 	"action2mcp/internal/credential"
 	"action2mcp/internal/execution"
-
 	sitecfg "action2mcp/internal/site"
+	"action2mcp/internal/vault"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -32,6 +34,11 @@ type Surface interface {
 	Close()
 	Navigate(u string) error
 	Reload() error
+}
+
+type credCaptureSurface interface {
+	InstallLoginCapture() error
+	ReadCapturedCreds() browser.CapturedCreds
 }
 
 type LoginBrowser interface {
@@ -162,11 +169,13 @@ func (a *Service) Relogin(site *sitecfg.Site, seenGen int64, force, interactive 
 		return &LoginErr{Msg: msg}
 	}
 	a.smu.Unlock()
-	if fresh, err := a.repo.GetSite(site.ID); err == nil {
-		site = fresh
+	if site.ID != 0 {
+		if fresh, err := a.repo.GetSite(site.ID); err == nil && fresh != nil {
+			site = fresh
+		}
 	}
 	start := time.Now()
-	how, err := a.doRelogin(site, st, interactive)
+	how, err := a.doRelogin(site, st, force, interactive)
 	if err == nil {
 		a.bumpGen(st)
 		a.repo.SetSiteStatus(site.ID, "valid", "", true)
@@ -191,30 +200,45 @@ type credFail struct{ msg string }
 
 func (c *credFail) Error() string { return c.msg }
 
-func (a *Service) doRelogin(site *sitecfg.Site, st *siteState, interactive bool) (string, error) {
+func requestHasSecretRef(lr *sitecfg.LoginRequest) bool {
+	if lr == nil {
+		return false
+	}
+	if strings.Contains(lr.Body, "{{secret.") || strings.Contains(lr.URL, "{{secret.") {
+		return true
+	}
+	for _, v := range lr.Headers {
+		if strings.Contains(v, "{{secret.") {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *Service) doRelogin(site *sitecfg.Site, st *siteState, cold, interactive bool) (string, error) {
 	var err error
 	how := ""
 	switch site.Method {
 	case sitecfg.MethodManual:
 		err = &needUser{url: site.Entry(), reason: "manual"}
 	case sitecfg.MethodForm:
-		if site.Form.Mode != "fill" && site.Form.Request != nil && site.Form.Request.URL != "" {
+		if site.Form.Mode != "fill" && site.Form.Request != nil && site.Form.Request.URL != "" && requestHasSecretRef(site.Form.Request) {
 			how = "重放登录请求"
-			err = a.replayLogin(site)
+			err = a.replayLogin(site, cold)
 			var nu *needUser
 			if err != nil && !errors.As(err, new(*credFail)) && !errors.As(err, &nu) {
 				// replay failed for another reason (e.g. the login API changed): try filling the form
 				debugf("重放登录请求失败，改为浏览器填表: %v", err)
 				how = "浏览器自动填表"
-				err = a.browserLogin(site, true)
+				err = a.browserLogin(site, true, cold, !interactive)
 			}
 		} else {
 			how = "浏览器自动填表"
-			err = a.browserLogin(site, true)
+			err = a.browserLogin(site, true, cold, !interactive)
 		}
 	default:
 		how = "企业微信 / 单点登录"
-		err = a.browserLogin(site, false)
+		err = a.browserLogin(site, false, cold, !interactive)
 	}
 	if err == nil {
 		return how, nil
@@ -324,13 +348,36 @@ setTimeout(function(){if(b){b.click()}else if(form.requestSubmit){form.requestSu
 		j(user) + "," + j(pass) + "," + j(userSel) + "," + j(passSel) + "," + j(submitSel) + ")"
 }
 
-func (a *Service) browserLogin(site *sitecfg.Site, fill bool) error {
+func (a *Service) browserLogin(site *sitecfg.Site, fill, cold, restoreOnFail bool) (retErr error) {
 	bs, err := a.browsers.AcquireBrowser()
 	if err != nil {
 		return err
 	}
 	defer a.browsers.ReleaseBrowser(bs)
-	tab, err := bs.OpenTab(site.Entry(), true)
+
+	isolated := false
+	var tab *browser.Tab
+	if cold && fill {
+		if itab, ierr := bs.OpenIsolatedTab(site.Entry()); ierr == nil {
+			tab = itab
+			isolated = true
+		} else {
+			a.browsers.ClearOriginState(site.Origin, true)
+			tab, err = bs.OpenTab(site.Entry(), true)
+		}
+	} else if cold && !fill {
+		prevCookies := a.repo.AllCookies()
+		a.browsers.ClearOriginState(site.Origin, false)
+		defer func() {
+			if retErr != nil && restoreOnFail {
+				a.repo.ReplaceCookies(prevCookies)
+				a.browsers.ApplyCookies(prevCookies)
+			}
+		}()
+		tab, err = bs.OpenTab(site.Entry(), true)
+	} else {
+		tab, err = bs.OpenTab(site.Entry(), true)
+	}
 	if err != nil {
 		return fmt.Errorf("打开登录入口失败：%v", err)
 	}
@@ -368,9 +415,16 @@ func (a *Service) browserLogin(site *sitecfg.Site, fill bool) error {
 				continue
 			}
 			if time.Since(stableSince) >= 800*time.Millisecond {
-				cs, err := bs.Cookies()
-				if err == nil && len(cs) > 0 {
-					a.repo.ReplaceCookies(cs)
+				if isolated {
+					if cs, err := tab.Cookies(); err == nil && len(cs) > 0 {
+						merged := mergeCookies(a.repo.AllCookies(), cs)
+						a.repo.ReplaceCookies(merged)
+						a.browsers.ApplyCookies(merged)
+					}
+				} else {
+					if cs, err := bs.Cookies(); err == nil && len(cs) > 0 {
+						a.repo.ReplaceCookies(cs)
+					}
 				}
 				if miss := a.missingSiteHeaders(site); len(miss) > 0 {
 					if !headerReload {
@@ -549,6 +603,9 @@ func (a *Service) popLogin(site *sitecfg.Site, st *siteState, nu *needUser, bloc
 	if err != nil {
 		return err
 	}
+	if cs, ok := tab.(credCaptureSurface); ok {
+		_ = cs.InstallLoginCapture()
+	}
 	short := "等待扫码"
 	if nu.reason != "sso" {
 		short = "等待登录"
@@ -580,14 +637,17 @@ func (a *Service) popLogin(site *sitecfg.Site, st *siteState, nu *needUser, bloc
 
 func (a *Service) watchLoginWindow(site *sitecfg.Site, st *siteState, bs LoginBrowser, tab Surface, cancel <-chan struct{}) {
 	var (
-		stableHref  string
-		stableSince time.Time
-		fails       int
-		didHarvest  bool
-		lastCheck   time.Time
-		checkedOK   bool
-		poll        = 400 * time.Millisecond
-		end         = time.Now().Add(a.loginWait())
+		stableHref            string
+		stableSince           time.Time
+		fails                 int
+		didHarvest            bool
+		lastCheck             time.Time
+		checkedOK             bool
+		observedLoginPage     string
+		observedExternalHosts []string
+		seenExtHosts          = map[string]bool{}
+		poll                  = 400 * time.Millisecond
+		end                   = time.Now().Add(a.loginWait())
 	)
 	for {
 		if !sleepCancel(poll, cancel) {
@@ -622,6 +682,19 @@ func (a *Service) watchLoginWindow(site *sitecfg.Site, st *siteState, bs LoginBr
 			continue
 		}
 		fails = 0
+		if h := sitecfg.HostOf(pi.Href); h != "" && pi.Href != "about:blank" && !strings.HasPrefix(pi.Href, "chrome-error:") {
+			if credential.SameSite("http://"+h, site.Origin) {
+				if pi.Pass {
+					observedLoginPage = pi.Href
+				}
+			} else {
+				lh := strings.ToLower(h)
+				if !seenExtHosts[lh] {
+					seenExtHosts[lh] = true
+					observedExternalHosts = append(observedExternalHosts, lh)
+				}
+			}
+		}
 		loggedIn := site.LoggedInPage(pi)
 		if !loggedIn && pi.Ready == "complete" {
 			if checkedOK && time.Since(lastCheck) < 2*time.Second {
@@ -672,6 +745,7 @@ func (a *Service) watchLoginWindow(site *sitecfg.Site, st *siteState, bs LoginBr
 			}
 			continue
 		}
+		a.persistInteractiveLogin(site, tab, observedLoginPage, observedExternalHosts)
 		a.bumpGen(st)
 		a.repo.SetSiteStatus(site.ID, "valid", "", true)
 		log.Printf("已在弹出的窗口中完成登录：%s", site.Origin)
@@ -925,10 +999,61 @@ func extractCSRF(html, field string) (string, string) {
 	return "", ""
 }
 
-func (a *Service) replayLogin(site *sitecfg.Site) error {
+func cookiesExcludingOrigin(cs []Cookie, origin string, includeParentCookies bool) []Cookie {
+	origin = credential.NormalizeOrigin(origin)
+	if origin == "" {
+		return append([]Cookie(nil), cs...)
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return append([]Cookie(nil), cs...)
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return append([]Cookie(nil), cs...)
+	}
+	out := make([]Cookie, 0, len(cs))
+	for _, c := range cs {
+		d := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(c.Domain)), ".")
+		if d != "" {
+			if d == host || strings.HasSuffix(d, "."+host) {
+				continue
+			}
+			if includeParentCookies && strings.HasSuffix(host, "."+d) {
+				continue
+			}
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+func mergeCookies(base, incoming []Cookie) []Cookie {
+	out := append([]Cookie(nil), base...)
+	for _, c := range incoming {
+		replaced := false
+		for i := range out {
+			if out[i].Name == c.Name && strings.EqualFold(out[i].Domain, c.Domain) && out[i].Path == c.Path {
+				out[i] = c
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func (a *Service) replayLogin(site *sitecfg.Site, cold bool) error {
 	fl := site.Form
 	lr := fl.Request
-	hs := newHTTPSession(a.repo.AllCookies())
+	baseCookies := a.repo.AllCookies()
+	if cold {
+		baseCookies = cookiesExcludingOrigin(baseCookies, site.Origin, true)
+	}
+	hs := newHTTPSession(baseCookies)
 	client, closeIdle := (execution.HTTPGuard{ConsolePort: a.options.ConsolePort()}).Client(a.options.HTTPClient())
 	defer closeIdle()
 	client.Timeout = 30 * time.Second
@@ -1025,7 +1150,9 @@ func (a *Service) replayLogin(site *sitecfg.Site) error {
 	if len(got) == 0 {
 		return errors.New("登录请求没有返回任何新的 Cookie")
 	}
-	a.browsers.ApplyCookies(hs.cookies)
+	merged := mergeCookies(a.repo.AllCookies(), hs.cookies)
+	a.repo.ReplaceCookies(merged)
+	a.browsers.ApplyCookies(merged)
 	return nil
 }
 
@@ -1111,4 +1238,189 @@ func (a *Service) KeepaliveLoop() {
 // the cookies are saved and the site is marked 有效.
 func (a *Service) OpenLoginWindow(site *sitecfg.Site) error {
 	return a.popLogin(site, a.state(site.Origin), &needUser{reason: "manual"}, false)
+}
+
+var loginNonWordRe = regexp.MustCompile(`[^A-Za-z0-9]+`)
+
+func loginHostKey(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "site"
+	}
+	h := u.Hostname()
+	if net.ParseIP(h) != nil || h == "localhost" {
+		if s := strings.Trim(loginNonWordRe.ReplaceAllString(u.Host, "_"), "_"); s != "" {
+			return s
+		}
+		return "site"
+	}
+	parts := strings.Split(strings.ToLower(h), ".")
+	for _, p := range parts {
+		if p != "www" && p != "" {
+			if s := strings.Trim(loginNonWordRe.ReplaceAllString(p, "_"), "_"); s != "" {
+				return s
+			}
+		}
+	}
+	return "site"
+}
+
+func (a *Service) vaultNameFor(base, origin string) string {
+	if a.vault == nil {
+		return base
+	}
+	n := base
+	for i := 2; i < 50; i++ {
+		found := false
+		for _, it := range a.vault.List() {
+			if it.Name == n {
+				found = true
+				if it.Site == "" || credential.SameSite(it.Site, origin) {
+					return n
+				}
+			}
+		}
+		if !found {
+			return n
+		}
+		n = fmt.Sprintf("%s_%d", base, i)
+	}
+	return n
+}
+
+func (a *Service) persistInteractiveLogin(site *sitecfg.Site, tab Surface, loginPage string, externalHosts []string) {
+	if a == nil || site == nil {
+		return
+	}
+	cs, hasCapture := tab.(credCaptureSurface)
+	var creds browser.CapturedCreds
+	if hasCapture {
+		creds = cs.ReadCapturedCreds()
+	}
+	if site.ID != 0 && a.repo != nil {
+		if fresh, err := a.repo.GetSite(site.ID); err == nil && fresh != nil {
+			site = fresh
+		}
+	}
+	if creds.Password != "" && creds.Password != vault.Mask {
+		key := loginHostKey(site.Origin)
+		if a.vault != nil {
+			if creds.Username != "" {
+				userType := "plain"
+				userPrefix := "cfg."
+				if strings.HasPrefix(site.Form.UsernameRef, "secret.") {
+					userType = "secret"
+					userPrefix = "secret."
+				}
+				userName := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(site.Form.UsernameRef, "cfg."), "secret."))
+				if userName == "" || !credential.ValidName(userName) {
+					userName = a.vaultNameFor(key+"_username", site.Origin)
+					userType = "plain"
+					userPrefix = "cfg."
+				}
+				if err := a.vault.Upsert(userName, userType, creds.Username, site.Origin, "登录用户名（浏览器登录自动保存）"); err == nil {
+					site.Form.UsernameRef = userPrefix + userName
+				}
+			}
+			passName := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(site.Form.PasswordRef, "secret."), "cfg."))
+			if passName == "" || !credential.ValidName(passName) {
+				passName = a.vaultNameFor(key+"_password", site.Origin)
+			}
+			if err := a.vault.Upsert(passName, "secret", creds.Password, site.Origin, "登录密码（浏览器登录自动保存）"); err == nil {
+				site.Form.PasswordRef = "secret." + passName
+			}
+		}
+		site.Method = sitecfg.MethodForm
+		site.Form.Mode = "fill"
+		if u, err := browserHTTPURL(creds.LoginURL); err == nil && credential.SameSite(u, site.Origin) {
+			site.Form.LoginURL = u
+		} else if u, err := browserHTTPURL(loginPage); err == nil && credential.SameSite(u, site.Origin) {
+			site.Form.LoginURL = u
+		}
+		if site.ID != 0 && a.repo != nil {
+			_ = a.repo.SaveSite(site)
+		}
+		a.ResetSiteFailures()
+		return
+	}
+	if hasCapture || len(externalHosts) > 0 {
+		changed := false
+		if site.Method != sitecfg.MethodSSO {
+			site.Method = sitecfg.MethodSSO
+			changed = true
+		}
+		for _, eh := range externalHosts {
+			if eh == "" || site.IsSSOHost(eh) {
+				continue
+			}
+			if site.SSOHosts == "" {
+				site.SSOHosts = eh
+			} else {
+				site.SSOHosts += "," + eh
+			}
+			changed = true
+		}
+		if changed && site.ID != 0 && a.repo != nil {
+			_ = a.repo.SaveSite(site)
+		}
+		a.ResetSiteFailures()
+	}
+}
+
+// SmartOpenLogin first performs a non-interactive cold re-login check (unless force is true).
+// If the check succeeds, it reports AlreadyValid without opening a browser window.
+// Otherwise it clears the site's stale login state and opens a visible browser window to record new credentials or SSO state.
+func (a *Service) SmartOpenLogin(site *sitecfg.Site, force bool) (*OpenLoginResult, error) {
+	if site == nil {
+		return nil, errors.New("站点不存在")
+	}
+	if site.ID != 0 && a.repo != nil {
+		if fresh, err := a.repo.GetSite(site.ID); err == nil && fresh != nil {
+			site = fresh
+		}
+	}
+	st := a.state(site.Origin)
+	a.smu.Lock()
+	if st.pending && time.Since(st.pendingAt) < a.loginWait() {
+		a.smu.Unlock()
+		return nil, errors.New("正在等待登录，请先在弹出的窗口中完成登录，或点「取消」")
+	}
+	a.smu.Unlock()
+
+	if !force {
+		a.ResetSiteFailures()
+		err := a.Relogin(site, a.Generation(site.Origin), true, false)
+		if err == nil {
+			ok, _ := a.CheckSite(site)
+			if ok {
+				if site.ID != 0 && a.repo != nil {
+					if fresh, gerr := a.repo.GetSite(site.ID); gerr == nil && fresh != nil {
+						site = fresh
+					}
+				}
+				return &OpenLoginResult{
+					Opened:       false,
+					AlreadyValid: true,
+					Method:       site.Method,
+					Message:      "当前登录及自动重登配置已验证通过，工具调用时不会报登录失效，无需重新登录。",
+				}, nil
+			}
+		}
+		a.ResetSiteFailures()
+	}
+
+	if a.browsers != nil {
+		a.browsers.ClearOriginState(site.Origin, true)
+	}
+	_ = a.ClearSiteHeaders(site.Origin)
+
+	if err := a.popLogin(site, st, &needUser{url: site.Entry(), reason: "manual"}, false); err != nil {
+		return nil, err
+	}
+	return &OpenLoginResult{
+		Opened:       true,
+		AlreadyValid: false,
+		Method:       site.Method,
+		Message:      "已打开浏览器登录窗口，完成登录后将自动保存登录配置并关闭窗口",
+	}, nil
 }

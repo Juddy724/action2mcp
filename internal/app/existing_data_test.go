@@ -66,7 +66,15 @@ func TestExistingDataFilenameAndCatalogVisibility(t *testing.T) {
 			if err := app.store.DB().QueryRow("PRAGMA database_list").Scan(&seq, &dbName, &actual); err != nil {
 				t.Fatal(err)
 			}
-			if actual != path {
+			wantPath := path
+			if r, err := filepath.EvalSymlinks(path); err == nil {
+				wantPath = r
+			}
+			gotPath := actual
+			if r, err := filepath.EvalSymlinks(actual); err == nil {
+				gotPath = r
+			}
+			if gotPath != wantPath {
 				t.Fatalf("opened %q, want existing database %q", actual, path)
 			}
 			if tc.shadow {
