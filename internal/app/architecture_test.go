@@ -27,6 +27,7 @@ func TestFeaturePackageDependencyDirection(t *testing.T) {
 		"approval":   {"domain": true, "vault": true},
 		"result":     {"domain": true, "htmlmd": true},
 		"execution":  {"credential": true, "domain": true, "vault": true, "htmlmd": true, "sqlguard": true, "recording": true, "result": true},
+		"updater":    {},
 	}
 	for pkg, dependencies := range allowed {
 		entries, err := os.ReadDir(filepath.Join(moduleRoot(t), "internal", pkg))

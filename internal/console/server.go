@@ -84,6 +84,57 @@ func (a *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, a.status()) })
 
+	mux.HandleFunc("POST /api/update/check", func(w http.ResponseWriter, r *http.Request) {
+		if a.updater == nil || a.updater() == nil {
+			writeErr(w, 501, errors.New("版本检测服务未启用"))
+			return
+		}
+		info, err := a.updater().CheckNow()
+		if err != nil {
+			writeErr(w, 502, err)
+			return
+		}
+		writeJSON(w, 200, info)
+	})
+
+	mux.HandleFunc("POST /api/update", func(w http.ResponseWriter, r *http.Request) {
+		if a.updater == nil || a.updater() == nil {
+			writeErr(w, 501, errors.New("版本更新服务未启用"))
+			return
+		}
+		if recs, err := a.store.ListRecordings(); err == nil {
+			for _, rec := range recs {
+				if rec.Status == "recording" {
+					writeErr(w, 409, errors.New("当前正在录制中，请先结束录制后再更新版本"))
+					return
+				}
+			}
+		}
+		info, exePath, err := a.updater().ApplyUpdate()
+		if err != nil {
+			writeErr(w, 500, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{
+			"ok":             true,
+			"restarting":     true,
+			"target_version": info.LatestVersion,
+			"asset_name":     info.AssetName,
+		})
+		go func() {
+			time.Sleep(200 * time.Millisecond)
+			if a.shutdown != nil {
+				a.shutdown()
+			}
+			if a.restart != nil {
+				_ = a.restart(exePath)
+			}
+			if a.exit != nil {
+				a.exit()
+			}
+		}()
+	})
+
 	mux.HandleFunc("POST /api/recordings/start", func(w http.ResponseWriter, r *http.Request) {
 		var in struct{ Name, URL string }
 		if err := readJSON(r, &in); err != nil {

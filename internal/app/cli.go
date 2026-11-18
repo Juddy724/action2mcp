@@ -228,9 +228,43 @@ func ensureServer(dataDir string) error {
 	return errors.New("后台服务启动超时，请查看 data/server.log")
 }
 
+func spawnRestart(exePath, dataDir string) error {
+	if exePath == "" {
+		var err error
+		exePath, err = os.Executable()
+		if err != nil {
+			return err
+		}
+	}
+	os.MkdirAll(dataDir, 0o755)
+	logf, _ := os.OpenFile(filepath.Join(dataDir, "server.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	c := exec.Command(exePath, "serve", "--no-open")
+	c.Env = append(os.Environ(), "A2M_DATA="+dataDir, "A2M_WAIT_EXIT=1")
+	c.Stdout, c.Stderr, c.Stdin = logf, logf, nil
+	detach(c)
+	if err := c.Start(); err != nil {
+		return fmt.Errorf("启动更新后的服务失败: %v", err)
+	}
+	c.Process.Release()
+	return nil
+}
+
 func cmdServe(dataDir string, open bool) error {
 	cfg := config.LoadConfig(dataDir)
 	consoleURL := fmt.Sprintf("http://localhost:%d/", cfg.Port)
+	waitExit := os.Getenv("A2M_WAIT_EXIT") == "1"
+	if waitExit {
+		deadline := time.Now().Add(15 * time.Second)
+		for time.Now().Before(deadline) {
+			if !serverAlive(dataDir) {
+				if ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.Port)); err == nil {
+					ln.Close()
+					break
+				}
+			}
+			time.Sleep(150 * time.Millisecond)
+		}
+	}
 	if _, other := probeServer(dataDir); other != "" {
 		return portTakenErr(dataDir, other)
 	}
@@ -245,7 +279,15 @@ func cmdServe(dataDir string, open bool) error {
 	if err != nil {
 		return err
 	}
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.Port))
+	var ln net.Listener
+	listenAddr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
+	ln, err = net.Listen("tcp", listenAddr)
+	if err != nil && waitExit {
+		for i := 0; i < 30 && err != nil; i++ {
+			time.Sleep(150 * time.Millisecond)
+			ln, err = net.Listen("tcp", listenAddr)
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("端口 %d 被占用: %v（可在 data/config.json 修改 port）", cfg.Port, err)
 	}
