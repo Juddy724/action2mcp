@@ -1,6 +1,6 @@
 # Architecture
 
-Action2MCP remains version **0.6.0**, with database user version **12**. Package extraction does not change the CLI, HTTP routes, MCP methods, configuration JSON, saved-data paths or approval policy.
+Action2MCP remains version **0.6.1**, with database user version **12**. Package extraction does not change the CLI, HTTP routes, MCP methods, configuration JSON, saved-data paths or approval policy.
 
 ## Packages
 

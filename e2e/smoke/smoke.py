@@ -144,7 +144,7 @@ def main():
     print("data", data)
     print("upstream", up_port, "app", app_port)
     ver = subprocess.run([EXE, "version"], cwd="/tmp", env=env, capture_output=True, text=True)
-    ok(ver.returncode == 0 and ver.stdout.strip() == "Action2MCP 0.6.0", "version from /tmp: " + ver.stdout.strip() + ver.stderr.strip())
+    ok(ver.returncode == 0 and ver.stdout.strip() == "Action2MCP 0.6.1", "version from /tmp: " + ver.stdout.strip() + ver.stderr.strip())
     proc = subprocess.Popen([EXE, "serve", "--no-open"], cwd="/tmp", env=env, stdout=logf, stderr=subprocess.STDOUT)
     base = f"http://127.0.0.1:{app_port}"
     origin = base
@@ -161,7 +161,7 @@ def main():
             print(open(log_path).read()[-2000:])
             ok(False, "server did not become ready")
             raise RuntimeError("server did not become ready")
-        ok(status.get("version") == "0.6.0", "status version " + str(status.get("version")))
+        ok(status.get("version") == "0.6.1", "status version " + str(status.get("version")))
         ok(os.path.realpath(status.get("data_dir", "")) == os.path.realpath(data), "A2M_DATA honored: " + str(status.get("data_dir")))
         st = subprocess.run([EXE, "status"], cwd="/tmp", env=env, capture_output=True, text=True)
         ok(st.returncode == 0 and "服务运行中" in st.stdout, "cli status: " + st.stdout.strip())
@@ -229,7 +229,7 @@ def main():
 
         box = {"n": 0, "sid": ""}
         code, init = mcp(base, box, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "smoke", "version": "0"}})
-        ok(code == 200 and init["result"]["serverInfo"]["version"] == "0.6.0" and box.get("sid"), "mcp initialize")
+        ok(code == 200 and init["result"]["serverInfo"]["version"] == "0.6.1" and box.get("sid"), "mcp initialize")
         mcp(base, box, "notifications/initialized", note=True)
         _, listed = mcp(base, box, "tools/list", {})
         names = [t["name"] for t in listed["result"]["tools"]]
