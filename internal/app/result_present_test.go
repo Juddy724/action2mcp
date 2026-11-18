@@ -560,7 +560,7 @@ func TestLoadPackPlainJSONResponse(t *testing.T) {
 
 func TestSchemaV11ToV12PresentationDefaults(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "a2m.DB()")
+	path := filepath.Join(dir, "a2m.db")
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatal(err)

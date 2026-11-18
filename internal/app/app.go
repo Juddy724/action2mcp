@@ -27,7 +27,7 @@ import (
 	"time"
 )
 
-const Version = "0.6.1"
+const Version = "0.6.2"
 
 type App struct {
 	dataDir    string
@@ -73,7 +73,7 @@ func NewApp(dataDir string) (*App, error) {
 		return nil, err
 	}
 	cfg := config.LoadConfig(dataDir)
-	st, err := store.OpenStore(filepath.Join(dataDir, "a2m.DB()"))
+	st, err := store.OpenStore(filepath.Join(dataDir, "a2m.db"))
 	if err != nil {
 		return nil, err
 	}

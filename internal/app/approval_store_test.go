@@ -17,7 +17,7 @@ import (
 )
 
 func TestApprovalMigrationAndDefaults(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "v5.DB()")
+	path := filepath.Join(t.TempDir(), "v5.db")
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)

@@ -156,7 +156,7 @@ func TestSQLConsoleApprovalOffStillEnforcesGuard(t *testing.T) {
 
 func TestMigrateV10SQLConsoleApprovalStaysAlways(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "v10.DB()")
+	path := filepath.Join(dir, "v10.db")
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
@@ -235,7 +235,7 @@ PRAGMA user_version=10;`, sqlConsole, terminal, mysql)
 
 func TestMigrateV10PreservesHandSetOff(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "v10off.DB()")
+	path := filepath.Join(dir, "v10off.db")
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)

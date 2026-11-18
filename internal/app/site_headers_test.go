@@ -12,7 +12,7 @@ import (
 func testAppWithVault(t *testing.T) *App {
 	t.Helper()
 	dir := t.TempDir()
-	s, err := store.OpenStore(filepath.Join(dir, "a2m.DB()"))
+	s, err := store.OpenStore(filepath.Join(dir, "a2m.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestSiteHeadersEncryptedAndGeneration(t *testing.T) {
 	// Restart: reopen vault+store and match before any Send.
 	dir := a.dataDir
 	a.store.DB().Close()
-	s, err := store.OpenStore(filepath.Join(dir, "a2m.DB()"))
+	s, err := store.OpenStore(filepath.Join(dir, "a2m.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

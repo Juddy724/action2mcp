@@ -291,7 +291,7 @@ func TestNormalizeCookieHeaderBinding(t *testing.T) {
 
 func TestMigrateWSToolNormalizesCookieBinding(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "v7-cookie.DB()")
+	path := filepath.Join(dir, "v7-cookie.db")
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)

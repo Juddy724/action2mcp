@@ -17,7 +17,7 @@ import (
 
 func testVault(t *testing.T) (*store.Store, *vault.Vault, string) {
 	dir := t.TempDir()
-	st, err := store.OpenStore(filepath.Join(dir, "a2m.DB()"))
+	st, err := store.OpenStore(filepath.Join(dir, "a2m.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

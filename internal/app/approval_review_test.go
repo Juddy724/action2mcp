@@ -108,7 +108,7 @@ func TestApprovalStickySourceFloor(t *testing.T) {
 }
 
 func TestApprovalFloorBackfillAndHistoricalSources(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "floors.DB()")
+	path := filepath.Join(t.TempDir(), "floors.db")
 	s, err := store.OpenStore(path)
 	if err != nil {
 		t.Fatal(err)
@@ -498,8 +498,8 @@ func TestApprovalDocumentation(t *testing.T) {
 				t.Fatalf("%s is missing approval documentation for %s", path, required)
 			}
 		}
-		if path == "README.md" && !strings.Contains(string(b), "| 平台 | 安装包 (v0.6.1) |") {
-			t.Fatal("download table version is not 0.6.1")
+		if path == "README.md" && !strings.Contains(string(b), "| 平台 | 安装包 (v0.6.2) |") {
+			t.Fatal("download table version is not 0.6.2")
 		}
 	}
 }
