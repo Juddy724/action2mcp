@@ -26,16 +26,24 @@ type Browsers interface {
 	OpenVisibleTab(string) (*browser.Session, *browser.Tab, error)
 	ApplyCookies([]Cookie)
 	CookiesFor(string) ([]Cookie, string)
+	ClearOriginState(origin string, includeParentCookies bool)
 }
 type Repository interface {
 	GetSite(int64) (*sitecfg.Site, error)
 	EnsureSite(string) *sitecfg.Site
 	ListSites() []*sitecfg.Site
+	SaveSite(*sitecfg.Site) error
 	SetSiteStatus(int64, string, string, bool)
 	SetSiteError(int64, string)
 	AllCookies() []Cookie
 	ReplaceCookies([]Cookie)
 	ListTools() ([]*execution.Tool, error)
+}
+type OpenLoginResult struct {
+	Opened       bool   `json:"opened"`
+	AlreadyValid bool   `json:"already_valid"`
+	Method       string `json:"method,omitempty"`
+	Message      string `json:"message,omitempty"`
 }
 type MiddlewareBinding struct {
 	URL   string

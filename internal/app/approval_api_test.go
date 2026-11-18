@@ -625,3 +625,114 @@ func TestApprovalAPILegacyRoutesRemainLocalOnly(t *testing.T) {
 		t.Fatal("blocked request changed a tool policy or setting")
 	}
 }
+
+func TestApprovalExplanationAndConcurrentBatch(t *testing.T) {
+	a := approvalTestApp(t)
+	a.cfg.Port = 19000
+	handler := a.Handler()
+	origin := fmt.Sprintf("http://127.0.0.1:%d", a.cfg.Port)
+	secret := privateTestValue(t)
+	if err := a.vault.Upsert("note_secret", "secret", secret, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	var hits atomic.Int32
+	upstream := newApprovalTarget(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		io.WriteString(w, "ok")
+	}))
+	tool, _ := saveApprovalTool(t, a, upstream, "always")
+	schema := a.executor().McpInputSchema(tool)
+	props, _ := schema["properties"].(map[string]any)
+	if props[execution.ApprovalNoteParam] == nil {
+		t.Fatalf("expected %s in McpInputSchema properties: %+v", execution.ApprovalNoteParam, props)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Send two concurrent approval calls in a single JSON-RPC batch request.
+	batchDone := make(chan []map[string]any, 1)
+	go func() {
+		batchBody := execution.CompactJSON([]map[string]any{
+			{
+				"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+				"params": map[string]any{
+					"name": "approval_call",
+					"arguments": map[string]any{
+						"value":                     "first",
+						execution.ApprovalNoteParam: "修改订单状态为已取消，影响：该订单将停止发货并触发退款流程 " + secret,
+					},
+				},
+			},
+			{
+				"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+				"params": map[string]any{
+					"name": "approval_call",
+					"arguments": map[string]any{
+						"value":                     "second",
+						execution.ApprovalNoteParam: "同步更新库存记录，影响：可用库存增加 1 件",
+					},
+				},
+			},
+		})
+		req := httptest.NewRequestWithContext(ctx, "POST", "https://example.com/mcp", bytes.NewReader(batchBody))
+		req.Host = "127.0.0.1"
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		var out []map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		batchDone <- out
+	}()
+
+	// Both calls must enter pending simultaneously.
+	pending := pendingApprovals(t, a, 2)
+	byVal := map[string]approval.Record{}
+	for _, r := range pending {
+		byVal[r.ArgsDisplay["value"]] = r
+		if _, leaked := r.ArgsDisplay[execution.ApprovalNoteParam]; leaked {
+			t.Fatalf("synthetic %s leaked into ArgsDisplay: %+v", execution.ApprovalNoteParam, r.ArgsDisplay)
+		}
+		assertNoSecretLeak(t, "pending explanation", r.Explanation, secret)
+	}
+	firstRec, ok1 := byVal["first"]
+	secondRec, ok2 := byVal["second"]
+	if !ok1 || !ok2 {
+		t.Fatalf("expected both batch calls in pending, got %+v", pending)
+	}
+	if !strings.Contains(firstRec.Explanation, "修改订单状态为已取消") || !strings.Contains(secondRec.Explanation, "同步更新库存记录") {
+		t.Fatalf("explanations not recorded: first=%q second=%q", firstRec.Explanation, secondRec.Explanation)
+	}
+
+	// Approve the first item while the second stays pending.
+	approveRecord(t, a, firstRec)
+	remaining := listApprovalAPI(t, handler, origin, "pending")
+	if len(remaining) != 1 || remaining[0].ID != secondRec.ID {
+		t.Fatalf("expected second item to remain pending, got %+v", remaining)
+	}
+
+	// Reject the second item so the batch request completes.
+	w := approvalAPIRequest(t, handler, http.MethodPost, fmt.Sprintf("/api/approvals/%d/decide", secondRec.ID), origin, "application/json", map[string]any{
+		"action": "reject", "nonce": secondRec.Nonce, "feedback": "暂不更新库存",
+	})
+	requireApprovalAPIResponse(t, w, http.StatusOK, nil)
+
+	replies := <-batchDone
+	if len(replies) != 2 || hits.Load() != 1 {
+		t.Fatalf("batch replies=%d hits=%d", len(replies), hits.Load())
+	}
+
+	all := listApprovalAPI(t, handler, origin, "all")
+	if len(all) != 2 {
+		t.Fatalf("expected 2 history records, got %d", len(all))
+	}
+	for _, r := range all {
+		if r.Status == "pending" {
+			t.Fatalf("expected decided status, got pending: %+v", r)
+		}
+		if r.Explanation == "" {
+			t.Fatalf("explanation lost after decision: %+v", r)
+		}
+		assertNoSecretLeak(t, "history explanation", r.Explanation, secret)
+	}
+}

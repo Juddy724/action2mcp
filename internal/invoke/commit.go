@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"testing"
 	"time"
 )
 
@@ -23,7 +24,7 @@ type Approved struct {
 }
 
 func notifyApproval(tool string) {
-	if runtime.GOOS != "darwin" {
+	if runtime.GOOS != "darwin" || testing.Testing() {
 		return
 	}
 	tool = strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "\n", " ", "\r", " ").Replace(tool)

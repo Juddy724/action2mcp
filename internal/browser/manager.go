@@ -45,14 +45,16 @@ type Options struct {
 // Manager owns browser/profile leases and recording lifecycle. It owns neither
 // application policy nor login generations, and accepts no App or exposed locks.
 type Manager struct {
-	options  Options
-	repo     Repository
-	mu       sync.Mutex
-	browser  *Session
-	recID    int64
-	recName  string
-	recStart time.Time
-	lastStop *StopInfo
+	options       Options
+	repo          Repository
+	mu            sync.Mutex
+	browser       *Session
+	recID         int64
+	recName       string
+	recStart      time.Time
+	lastStop      *StopInfo
+	clearMu       sync.Mutex
+	pendingClears map[string]bool
 }
 
 func New(o Options) *Manager {
