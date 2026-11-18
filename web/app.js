@@ -1135,7 +1135,7 @@ function openUpdateModal() {
       <p class="upd-hint"><span aria-hidden="true">✓</span>更新后服务会自动重启，本地所有配置、工具与登录数据均不受影响。</p>
       <div class="upd-actions">
         <button type="button" class="upd-btn ghost" id="cancel-update-btn" onclick="closeModal()">稍后再说</button>
-        <button type="button" class="upd-btn primary" id="confirm-update-btn" onclick="applySelfUpdate(this)">立即更新并重启</button>
+        <button type="button" class="upd-btn primary" id="confirm-update-btn" onclick="applySelfUpdate(this)">立即更新</button>
       </div>
     </div>`);
   $('#confirm-update-btn')?.focus();
@@ -1196,7 +1196,7 @@ async function applySelfUpdate(btn) {
     if (btn && btn.isConnected) {
       btn.disabled = false;
       btn.removeAttribute('aria-busy');
-      btn.textContent = '立即更新并重启';
+      btn.textContent = '立即更新';
     }
     if (cancelBtn && cancelBtn.isConnected) cancelBtn.disabled = false;
   }
