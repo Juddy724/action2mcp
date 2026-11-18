@@ -2,7 +2,7 @@
 
 把网页上的业务操作录制下来，整理成 AI 可调用的 MCP 工具。单个可执行文件，解压即用，数据只保存在本机。
 
-当前版本：**v0.6.1**。安装包见 [Releases](https://github.com/Juddy724/action2mcp/releases/latest)；更完整的使用说明在解压后的 README.md 里。0.6.1 完成 App 功能拆包，保留数据库、命令行和 MCP 行为；升级时请保留原 data 目录。
+当前版本：**v0.6.2**。安装包见 [Releases](https://github.com/Juddy724/action2mcp/releases/latest)；更完整的使用说明在解压后的 README.md 里。0.6.2 修复拆包后数据库文件名回归，继续读取原 data/a2m.db；升级时请保留整个 data 目录和 secret.key，不会自动删除或合并影子库 a2m.DB()。
 
 ## 界面预览
 
@@ -28,12 +28,12 @@ AI 调用需要审批时，控制台会弹出卡片；历史记录里的执行�
 
 ## 下载与启动
 
-| 平台 | 安装包 (v0.6.1) |
+| 平台 | 安装包 (v0.6.2) |
 |---|---|
-| macOS (Apple 芯片) | [Action2MCP-0.6.1-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.6.1/Action2MCP-0.6.1-macOS-AppleSilicon.zip) |
-| macOS (Intel) | [Action2MCP-0.6.1-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.6.1/Action2MCP-0.6.1-macOS-Intel.zip) |
-| Windows x64 | [Action2MCP-0.6.1-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.6.1/Action2MCP-0.6.1-Windows-x64.zip) |
-| Linux x64 | [Action2MCP-0.6.1-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.6.1/Action2MCP-0.6.1-Linux-x64.zip) |
+| macOS (Apple 芯片) | [Action2MCP-0.6.2-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.6.2/Action2MCP-0.6.2-macOS-AppleSilicon.zip) |
+| macOS (Intel) | [Action2MCP-0.6.2-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.6.2/Action2MCP-0.6.2-macOS-Intel.zip) |
+| Windows x64 | [Action2MCP-0.6.2-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.6.2/Action2MCP-0.6.2-Windows-x64.zip) |
+| Linux x64 | [Action2MCP-0.6.2-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.6.2/Action2MCP-0.6.2-Linux-x64.zip) |
 
 解压后运行 `start.command`（macOS）、`start.bat`（Windows）或 `start.sh`（Linux），然后打开 [http://localhost:7788](http://localhost:7788)。电脑上需要已安装 Google Chrome 或 Microsoft Edge；录制会打开一个专用浏览器窗口，和日常使用的浏览器互不影响。
 

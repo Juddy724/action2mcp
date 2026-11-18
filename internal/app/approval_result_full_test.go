@@ -140,7 +140,7 @@ func TestApprovalResultFullCapAndMigration(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	path := dir + "/v9.DB()"
+	path := dir + "/v9.db"
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)

@@ -277,7 +277,7 @@ func TestTieredDiscovery(t *testing.T) {
 // A 0.3.0 database (no packs.scenarios, no settings table) opens and keeps its data.
 func TestMigrateFrom030(t *testing.T) {
 	dir := t.TempDir()
-	p := filepath.Join(dir, "a2m.DB()")
+	p := filepath.Join(dir, "a2m.db")
 	db, err := sql.Open("sqlite", p)
 	if err != nil {
 		t.Fatal(err)

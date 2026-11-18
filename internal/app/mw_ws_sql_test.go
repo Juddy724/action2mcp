@@ -371,7 +371,7 @@ func TestSQLConsoleAuditHasNoIDs(t *testing.T) {
 
 func TestMigrateWSToolToSQLMiddleware(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "v7.DB()")
+	path := filepath.Join(dir, "v7.db")
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
@@ -554,7 +554,7 @@ func TestSQLConsoleEnvTypeDefaultsToPROD(t *testing.T) {
 
 func TestMigrateV8SQLConsoleEnvToRows(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "v8env.DB()")
+	path := filepath.Join(dir, "v8env.db")
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
