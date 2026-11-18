@@ -355,29 +355,17 @@ func (a *Service) browserLogin(site *sitecfg.Site, fill, cold, restoreOnFail boo
 	}
 	defer a.browsers.ReleaseBrowser(bs)
 
-	isolated := false
-	var tab *browser.Tab
-	if cold && fill {
-		if itab, ierr := bs.OpenIsolatedTab(site.Entry()); ierr == nil {
-			tab = itab
-			isolated = true
-		} else {
-			a.browsers.ClearOriginState(site.Origin, true)
-			tab, err = bs.OpenTab(site.Entry(), true)
-		}
-	} else if cold && !fill {
+	if cold {
 		prevCookies := a.repo.AllCookies()
-		a.browsers.ClearOriginState(site.Origin, false)
+		a.browsers.ClearOriginState(site.Origin, fill)
 		defer func() {
 			if retErr != nil && restoreOnFail {
 				a.repo.ReplaceCookies(prevCookies)
 				a.browsers.ApplyCookies(prevCookies)
 			}
 		}()
-		tab, err = bs.OpenTab(site.Entry(), true)
-	} else {
-		tab, err = bs.OpenTab(site.Entry(), true)
 	}
+	tab, err := bs.OpenTab(site.Entry(), true)
 	if err != nil {
 		return fmt.Errorf("打开登录入口失败：%v", err)
 	}
@@ -386,6 +374,7 @@ func (a *Service) browserLogin(site *sitecfg.Site, fill, cold, restoreOnFail boo
 	var (
 		clickedSSO, filled, clickedQuick bool
 		ssoSince, loginSince, filledAt   time.Time
+		openedAt                         = time.Now()
 		stableHref                       string
 		stableSince                      time.Time
 		lastErr                          string
@@ -409,22 +398,22 @@ func (a *Service) browserLogin(site *sitecfg.Site, fill, cold, restoreOnFail boo
 		if pi.Href == "about:blank" || h == "" {
 			continue
 		}
-		if site.LoggedInPage(pi) {
+		// In cold form-fill mode, we cleared the site's cookies, so wait until the form has been filled
+		// (or for SPAs in non-cold fill mode, give the SPA router 2s to render the password box before assuming logged-in).
+		canBeLoggedIn := true
+		if fill && !filled {
+			if cold || time.Since(openedAt) < 2*time.Second {
+				canBeLoggedIn = false
+			}
+		}
+		if canBeLoggedIn && site.LoggedInPage(pi) {
 			if stableHref != pi.Href {
 				stableHref, stableSince = pi.Href, time.Now()
 				continue
 			}
 			if time.Since(stableSince) >= 800*time.Millisecond {
-				if isolated {
-					if cs, err := tab.Cookies(); err == nil && len(cs) > 0 {
-						merged := mergeCookies(a.repo.AllCookies(), cs)
-						a.repo.ReplaceCookies(merged)
-						a.browsers.ApplyCookies(merged)
-					}
-				} else {
-					if cs, err := bs.Cookies(); err == nil && len(cs) > 0 {
-						a.repo.ReplaceCookies(cs)
-					}
+				if cs, err := bs.Cookies(); err == nil && len(cs) > 0 {
+					a.repo.ReplaceCookies(cs)
 				}
 				if miss := a.missingSiteHeaders(site); len(miss) > 0 {
 					if !headerReload {
@@ -1331,10 +1320,16 @@ func (a *Service) persistInteractiveLogin(site *sitecfg.Site, tab Surface, login
 			}
 		}
 		site.Method = sitecfg.MethodForm
-		site.Form.Mode = "fill"
-		if u, err := browserHTTPURL(creds.LoginURL); err == nil && credential.SameSite(u, site.Origin) {
+		if site.Form.Request != nil && requestHasSecretRef(site.Form.Request) {
+			if site.Form.Mode == "" {
+				site.Form.Mode = "replay"
+			}
+		} else {
+			site.Form.Mode = "fill"
+		}
+		if u, err := browserHTTPURL(loginPage); err == nil && credential.SameSite(u, site.Origin) {
 			site.Form.LoginURL = u
-		} else if u, err := browserHTTPURL(loginPage); err == nil && credential.SameSite(u, site.Origin) {
+		} else if u, err := browserHTTPURL(creds.LoginURL); err == nil && credential.SameSite(u, site.Origin) && (site.Form.LoginURL == "" || site.IsLoginURL(u)) {
 			site.Form.LoginURL = u
 		}
 		if site.ID != 0 && a.repo != nil {

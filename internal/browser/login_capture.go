@@ -86,7 +86,8 @@ func (t *Tab) InstallLoginCapture() error {
 	return nil
 }
 
-// ReadCapturedCreds returns captured login credentials for t, merging any live DOM fallback values.
+// ReadCapturedCreds returns captured login credentials for t, merging any live DOM fallback values
+// only when the binding has not already captured a password during form interaction.
 func (t *Tab) ReadCapturedCreds() CapturedCreds {
 	if t == nil || t.bs == nil {
 		return CapturedCreds{}
@@ -94,6 +95,10 @@ func (t *Tab) ReadCapturedCreds() CapturedCreds {
 	t.bs.mu.Lock()
 	cur := t.bs.captured[t.session]
 	t.bs.mu.Unlock()
+
+	if cur.Password != "" {
+		return cur
+	}
 
 	var raw string
 	if err := t.Eval(readLoginCaptureJS, &raw); err == nil && raw != "" {
