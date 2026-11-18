@@ -14,6 +14,7 @@ import (
 	"action2mcp/internal/site"
 	"action2mcp/internal/store"
 	"action2mcp/internal/transfer"
+	"action2mcp/internal/updater"
 	"action2mcp/internal/vault"
 )
 
@@ -59,6 +60,8 @@ type Options struct {
 	Transfer     func() *transfer.Service
 	Tools        func() *catalog.Service
 	MCPServer    func() *mcpserver.Server
+	Updater      func() *updater.Service
+	Restart      func(exePath string) error
 	ToolsChanged func()
 	DropDriver   func(middlewareID int64)
 }
@@ -81,6 +84,8 @@ type Server struct {
 	transfer     func() *transfer.Service
 	tools        func() *catalog.Service
 	mcpServer    func() *mcpserver.Server
+	updater      func() *updater.Service
+	restart      func(exePath string) error
 	toolsChanged func()
 	dropDriver   func(middlewareID int64)
 }
@@ -89,5 +94,5 @@ func New(o Options) *Server {
 	return &Server{port: o.Port, store: o.Store, vault: o.Vault, sessions: o.Sessions, quit: o.Quit,
 		status: o.Status, shutdown: o.Shutdown, exit: o.Exit, browser: o.Browser, login: o.Login, engine: o.Engine,
 		analysis: o.Analysis, middlewares: o.Middlewares, approvals: o.Approvals, transfer: o.Transfer, tools: o.Tools,
-		mcpServer: o.MCPServer, toolsChanged: o.ToolsChanged, dropDriver: o.DropDriver}
+		mcpServer: o.MCPServer, updater: o.Updater, restart: o.Restart, toolsChanged: o.ToolsChanged, dropDriver: o.DropDriver}
 }

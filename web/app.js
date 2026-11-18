@@ -35,6 +35,16 @@ async function refreshStatus() {
       : `<span class="pill" title="阶梯模式：AI 先看到 4 个入口工具，再按需加载流程包">阶梯模式 · <b style="margin:0 3px">${s.enabled_packs}</b> 个流程包 / ${s.exposed_tools} 个工具可加载</span>`;
   }
   $('#statusbar').innerHTML = h;
+  const upBtn = $('#update-btn');
+  if (upBtn) {
+    if (s.update && s.update.available && s.update.latest_version) {
+      const label = `⬆ 发现新版本 v${s.update.latest_version}`;
+      if (upBtn.textContent !== label) upBtn.textContent = label;
+      upBtn.hidden = false;
+    } else {
+      upBtn.hidden = true;
+    }
+  }
   if (!s.recording && s.last_stop && refreshStatus._lastStopID !== undefined && s.last_stop.recording_id !== refreshStatus._lastStopID) {
     showRecordingStopped(s.last_stop);
     if (ROUTE.startsWith('recordings')) render();
@@ -1093,7 +1103,89 @@ async function pageSettings(app) {
     <p class="muted">登录态只保存在本机的 <code>${esc(s.data_dir)}</code> 里（专用浏览器配置 + 本地快照），不会进入工具和导出文件。</p>
     <p>已保存登录态的网站：${Object.keys(creds.domains).length ? Object.entries(creds.domains).map(([d, n]) => `<code>${esc(d)}</code>`).join(' ') : '<span class="muted">暂无</span>'}</p>
     <div class="row"><button onclick="openLogin()">打开浏览器登录</button><button class="danger" onclick="clearCreds()">清除本地登录态快照</button></div></div>
-  <div class="card small muted">Action2MCP ${esc(s.version)} · 进程 ${s.pid} · 数据目录 ${esc(s.data_dir)}</div>`;
+  <div class="card small muted row" style="justify-content:space-between">
+    <span>Action2MCP ${esc(s.version)} · 进程 ${s.pid} · 数据目录 ${esc(s.data_dir)}${s.update?.checked_at ? ` · 上次检查更新 ${esc(s.update.checked_at)}` : ''}</span>
+    <button type="button" class="sm" onclick="checkUpdateManual(this)">检查更新</button>
+  </div>`;
+}
+
+function openUpdateModal() {
+  const u = STATUS.update;
+  if (!u || !u.available) {
+    toast('当前已是最新版本 v' + (STATUS.version || ''));
+    return;
+  }
+  openModal(`
+    <h2>发现新版本 v${esc(u.latest_version)}</h2>
+    <p>当前版本：<code>v${esc(u.current_version || STATUS.version)}</code> → 最新版本：<b style="color:var(--green)">v${esc(u.latest_version)}</b>${u.asset_name ? ` <span class="muted small">(${esc(u.asset_name)})</span>` : ''}</p>
+    ${u.release_notes ? `<div class="small muted" style="margin-top:8px">更新说明：</div><pre style="max-height:200px;white-space:pre-wrap">${esc(u.release_notes)}</pre>` : ''}
+    <p class="muted small" style="margin-top:12px">点击「立即更新并重启」将自动下载对应平台二进制文件并原地替换重启，本地 <code>data</code> 数据与登录态完整保留，不会产生多份程序。</p>
+    <div class="row" style="margin-top:18px;justify-content:flex-end">
+      <button type="button" id="cancel-update-btn" onclick="closeModal()">稍后再说</button>
+      <button type="button" class="pri big" id="confirm-update-btn" onclick="applySelfUpdate(this)">⬆ 立即更新并重启</button>
+    </div>`);
+  $('#confirm-update-btn')?.focus();
+}
+
+async function checkUpdateManual(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '检查中…'; }
+  try {
+    const u = await api('POST', '/api/update/check', {});
+    await refreshStatus();
+    if (u.available) {
+      openUpdateModal();
+    } else {
+      toast(`当前已是最新版本（v${u.current_version || STATUS.version}）`);
+      if (ROUTE === 'settings') render();
+    }
+  } catch (e) {
+    toast('检查更新失败：' + e.message, 5000);
+  } finally {
+    if (btn && btn.isConnected) { btn.disabled = false; btn.textContent = '检查更新'; }
+  }
+}
+
+async function applySelfUpdate(btn) {
+  const cancelBtn = $('#cancel-update-btn');
+  const oldPID = STATUS.pid;
+  if (btn) {
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    btn.textContent = '正在下载并替换新版本…';
+  }
+  if (cancelBtn) cancelBtn.disabled = true;
+  try {
+    const r = await api('POST', '/api/update', {});
+    if (btn) btn.textContent = `正在重启至 v${r.target_version || ''}，请稍候…`;
+    for (let i = 0; i < 45; i++) {
+      await new Promise(res => setTimeout(res, 600));
+      try {
+        const st = await api('GET', '/api/status');
+        if (st && st.version && (st.pid !== oldPID || st.version === r.target_version)) {
+          STATUS = st;
+          closeModal();
+          await refreshStatus();
+          await render();
+          toast(`已成功更新并重启至 v${st.version}`, 6000);
+          return;
+        }
+      } catch {
+        // Server is briefly offline while restarting; keep polling.
+      }
+    }
+    toast('更新已完成，请手动刷新页面查看最新状态', 6000);
+    closeModal();
+    await refreshStatus();
+    await render();
+  } catch (e) {
+    toast('更新失败：' + e.message, 6000);
+    if (btn && btn.isConnected) {
+      btn.disabled = false;
+      btn.removeAttribute('aria-busy');
+      btn.textContent = '⬆ 立即更新并重启';
+    }
+    if (cancelBtn && cancelBtn.isConnected) cancelBtn.disabled = false;
+  }
 }
 async function saveApprovalTimeout(form) {
   const secs = Number(form.elements.approval_timeout_secs.value);

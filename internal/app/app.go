@@ -14,6 +14,7 @@ import (
 	"action2mcp/internal/mwtools"
 	"action2mcp/internal/store"
 	"action2mcp/internal/transfer"
+	"action2mcp/internal/updater"
 	"action2mcp/internal/vault"
 
 	"fmt"
@@ -27,7 +28,7 @@ import (
 	"time"
 )
 
-const Version = "0.6.2"
+const Version = "0.6.3"
 
 type App struct {
 	dataDir    string
@@ -66,12 +67,15 @@ type App struct {
 	mcpOnce           sync.Once
 	mcpService        *mcpserver.Server
 	mcpSessions       mcp.Manager // Mcp-Session-Id -> *mcp.Session (client name, loaded packs, SSE stream)
+	updaterOnce       sync.Once
+	updaterService    *updater.Service
 }
 
 func NewApp(dataDir string) (*App, error) {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, err
 	}
+	updater.CleanupStaleFiles("")
 	cfg := config.LoadConfig(dataDir)
 	st, err := store.OpenStore(filepath.Join(dataDir, "a2m.db"))
 	if err != nil {
@@ -98,36 +102,39 @@ func NewApp(dataDir string) (*App, error) {
 	}
 	go a.browserRuntime().CookieSyncLoop()
 	go a.loginRuntime().KeepaliveLoop()
+	go a.updaterRuntime().Loop(a.quit)
 	return a, nil
 }
 
 // ---------- recording ----------
 
 type Status struct {
-	Version        string    `json:"version"`
-	PID            int       `json:"pid"`
-	Recording      bool      `json:"recording"`
-	RecordingID    int64     `json:"recording_id"`
-	RecordingName  string    `json:"recording_name"`
-	RecordingSecs  int       `json:"recording_secs"`
-	Captured       int       `json:"captured"`
-	Useful         int       `json:"useful"`
-	BrowserRunning bool      `json:"browser_running"`
-	LastStop       *StopInfo `json:"last_stop"`
-	ExposedTools   int       `json:"exposed_tools"`
-	ExposedMW      int       `json:"exposed_middleware"`
-	TotalTools     int       `json:"total_tools"`
-	EnabledPacks   int       `json:"enabled_packs"`
-	MCPURL         string    `json:"mcp_url"`
-	MCPMode        string    `json:"mcp_mode"`
-	DataDir        string    `json:"data_dir"`
-	ExePath        string    `json:"exe_path"`
-	OS             string    `json:"os"`
+	Version        string              `json:"version"`
+	PID            int                 `json:"pid"`
+	Recording      bool                `json:"recording"`
+	RecordingID    int64               `json:"recording_id"`
+	RecordingName  string              `json:"recording_name"`
+	RecordingSecs  int                 `json:"recording_secs"`
+	Captured       int                 `json:"captured"`
+	Useful         int                 `json:"useful"`
+	BrowserRunning bool                `json:"browser_running"`
+	LastStop       *StopInfo           `json:"last_stop"`
+	ExposedTools   int                 `json:"exposed_tools"`
+	ExposedMW      int                 `json:"exposed_middleware"`
+	TotalTools     int                 `json:"total_tools"`
+	EnabledPacks   int                 `json:"enabled_packs"`
+	MCPURL         string              `json:"mcp_url"`
+	MCPMode        string              `json:"mcp_mode"`
+	DataDir        string              `json:"data_dir"`
+	ExePath        string              `json:"exe_path"`
+	OS             string              `json:"os"`
+	Update         *updater.UpdateInfo `json:"update,omitempty"`
 }
 
 func (a *App) Status() Status {
 	state := a.browserRuntime().Snapshot()
-	s := Status{Version: Version, PID: os.Getpid(), Recording: state.Recording, RecordingID: state.RecordingID, RecordingName: state.RecordingName, LastStop: state.LastStop, RecordingSecs: state.RecordingSecs, BrowserRunning: state.BrowserRunning, Captured: state.Captured, Useful: state.Useful, MCPURL: fmt.Sprintf("http://localhost:%d/mcp", a.cfg.Port), DataDir: a.dataDir, OS: runtime.GOOS}
+	up := a.updaterRuntime().Snapshot()
+	s := Status{Version: Version, PID: os.Getpid(), Recording: state.Recording, RecordingID: state.RecordingID, RecordingName: state.RecordingName, LastStop: state.LastStop, RecordingSecs: state.RecordingSecs, BrowserRunning: state.BrowserRunning, Captured: state.Captured, Useful: state.Useful, MCPURL: fmt.Sprintf("http://localhost:%d/mcp", a.cfg.Port), DataDir: a.dataDir, OS: runtime.GOOS, Update: &up}
 	if exe, err := os.Executable(); err == nil {
 		s.ExePath = exe
 	}

@@ -10,6 +10,7 @@ import (
 	"action2mcp/internal/mcpserver"
 	"action2mcp/internal/mwtools"
 	"action2mcp/internal/transfer"
+	"action2mcp/internal/updater"
 	"net/http"
 	"time"
 )
@@ -103,6 +104,16 @@ func (a *App) tools() *catalog.Service {
 // Handler is the local web console plus the MCP endpoint.
 func (a *App) Handler() http.Handler { return a.console().Handler() }
 
+func (a *App) updaterRuntime() *updater.Service {
+	a.updaterOnce.Do(func() {
+		a.updaterService = updater.New(updater.Options{
+			CurrentVersion: Version,
+			HTTPClient:     a.httpClient,
+		})
+	})
+	return a.updaterService
+}
+
 func (a *App) console() *console.Server {
 	a.consoleOnce.Do(func() {
 		a.consoleService = console.New(console.Options{
@@ -114,6 +125,8 @@ func (a *App) console() *console.Server {
 			Login:    func() console.Login { return a.loginRuntime() },
 			Engine:   a.executor, Analysis: a.recAnalysis, Middlewares: a.middlewares, Approvals: a.approvals,
 			Transfer: a.transfer, Tools: a.tools, MCPServer: a.mcpServer,
+			Updater: a.updaterRuntime,
+			Restart: func(exePath string) error { return spawnRestart(exePath, a.dataDir) },
 			ToolsChanged: a.broadcastToolsChanged, DropDriver: a.drivers.Drop,
 		})
 	})
