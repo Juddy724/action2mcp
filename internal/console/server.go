@@ -80,7 +80,13 @@ func randID() string {
 
 func (a *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("GET /", http.FileServer(http.FS(web.FS)))
+	staticFS := http.FileServer(http.FS(web.FS))
+	mux.Handle("GET /", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
+		staticFS.ServeHTTP(w, r)
+	}))
 
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, a.status()) })
 
