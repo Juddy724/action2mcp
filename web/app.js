@@ -1116,13 +1116,27 @@ function openUpdateModal() {
     return;
   }
   openModal(`
-    <h2>发现新版本 v${esc(u.latest_version)}</h2>
-    <p>当前版本：<code>v${esc(u.current_version || STATUS.version)}</code> → 最新版本：<b style="color:var(--green)">v${esc(u.latest_version)}</b>${u.asset_name ? ` <span class="muted small">(${esc(u.asset_name)})</span>` : ''}</p>
-    ${u.release_notes ? `<div class="small muted" style="margin-top:8px">更新说明：</div><pre style="max-height:200px;white-space:pre-wrap">${esc(u.release_notes)}</pre>` : ''}
-    <p class="muted small" style="margin-top:12px">点击「立即更新并重启」将自动下载新版本并重启服务，本地所有配置、工具与登录数据均不受影响。</p>
-    <div class="row" style="margin-top:18px;justify-content:flex-end">
-      <button type="button" id="cancel-update-btn" onclick="closeModal()">稍后再说</button>
-      <button type="button" class="pri big" id="confirm-update-btn" onclick="applySelfUpdate(this)">⬆ 立即更新并重启</button>
+    <div class="update-modal">
+      <div class="upd-head">
+        <div class="upd-icon" aria-hidden="true">⬆</div>
+        <div>
+          <h2>发现新版本</h2>
+          <div class="upd-ver">
+            <span class="upd-chip">v${esc(u.current_version || STATUS.version)}</span>
+            <span class="upd-arrow" aria-hidden="true">→</span>
+            <span class="upd-chip new">v${esc(u.latest_version)}</span>
+          </div>
+        </div>
+      </div>
+      <div class="upd-section">
+        <div class="upd-label">更新内容${u.release_url ? `<a href="${esc(u.release_url)}" target="_blank" rel="noopener">在 GitHub 查看 ↗</a>` : ''}</div>
+        <pre class="upd-notes">${esc(u.release_notes || '暂未获取到更新说明，可点击右上方链接在 GitHub 查看。')}</pre>
+      </div>
+      <p class="upd-hint"><span aria-hidden="true">✓</span>更新后服务会自动重启，本地所有配置、工具与登录数据均不受影响。</p>
+      <div class="upd-actions">
+        <button type="button" class="upd-btn ghost" id="cancel-update-btn" onclick="closeModal()">稍后再说</button>
+        <button type="button" class="upd-btn primary" id="confirm-update-btn" onclick="applySelfUpdate(this)">立即更新并重启</button>
+      </div>
     </div>`);
   $('#confirm-update-btn')?.focus();
 }
@@ -1182,7 +1196,7 @@ async function applySelfUpdate(btn) {
     if (btn && btn.isConnected) {
       btn.disabled = false;
       btn.removeAttribute('aria-busy');
-      btn.textContent = '⬆ 立即更新并重启';
+      btn.textContent = '立即更新并重启';
     }
     if (cancelBtn && cancelBtn.isConnected) cancelBtn.disabled = false;
   }

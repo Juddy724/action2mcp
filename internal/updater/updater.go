@@ -6,14 +6,17 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -44,6 +47,7 @@ type Options struct {
 	Repo           string
 	APIURL         string // Optional override for unit tests
 	WebReleaseURL  string // Optional override for redirect fallback tests
+	AtomURL        string // Optional override for releases Atom feed tests
 	Interval       time.Duration
 	HTTPClient     *http.Client
 	ExecutablePath func() (string, error)
@@ -265,11 +269,97 @@ func (s *Service) checkViaRedirectFallback() (UpdateInfo, error) {
 		Name:               assetName,
 		BrowserDownloadURL: assetURL,
 	})
+	rel.Body = s.fetchAtomNotes(tag)
 	info := s.buildUpdateInfo(rel, time.Now().Format("2006-01-02 15:04:05"))
 	s.mu.Lock()
+	if info.ReleaseNotes == "" && s.last.LatestVersion == info.LatestVersion {
+		info.ReleaseNotes = s.last.ReleaseNotes
+	}
+	if info.AssetSHA256 == "" && s.last.LatestVersion == info.LatestVersion && s.last.AssetName == info.AssetName {
+		info.AssetSHA256 = s.last.AssetSHA256
+	}
 	s.last = info
 	s.mu.Unlock()
 	return info, nil
+}
+
+// fetchAtomNotes reads release notes from the public releases Atom feed, which is not subject to
+// the REST API rate limit. Returns "" on any failure.
+func (s *Service) fetchAtomNotes(tag string) string {
+	feedURL := s.opts.AtomURL
+	if feedURL == "" {
+		feedURL = "https://github.com/" + s.opts.Repo + "/releases.atom"
+	}
+	req, err := http.NewRequest("GET", feedURL, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("User-Agent", "Action2MCP-Updater/"+CleanVersion(s.opts.CurrentVersion))
+	resp, err := s.opts.HTTPClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return ""
+	}
+	return parseAtomNotes(data, tag)
+}
+
+type atomFeed struct {
+	Entries []struct {
+		Links []struct {
+			Href string `xml:"href,attr"`
+		} `xml:"link"`
+		Content string `xml:"content"`
+	} `xml:"entry"`
+}
+
+func parseAtomNotes(data []byte, tag string) string {
+	var f atomFeed
+	if err := xml.Unmarshal(data, &f); err != nil {
+		return ""
+	}
+	for _, e := range f.Entries {
+		for _, l := range e.Links {
+			if strings.HasSuffix(l.Href, "/tag/"+tag) {
+				return htmlToText(e.Content)
+			}
+		}
+	}
+	return ""
+}
+
+var (
+	olBlockRe  = regexp.MustCompile(`(?is)<ol[^>]*>(.*?)</ol>`)
+	liOpenRe   = regexp.MustCompile(`(?i)<li[^>]*>`)
+	blockEndRe = regexp.MustCompile(`(?i)</(p|li|h[1-6]|div|ul|ol)>|<br\s*/?>`)
+	tagRe      = regexp.MustCompile(`<[^>]+>`)
+	blankRe    = regexp.MustCompile(`\n{2,}`)
+)
+
+func htmlToText(h string) string {
+	h = olBlockRe.ReplaceAllStringFunc(h, func(block string) string {
+		n := 0
+		return liOpenRe.ReplaceAllStringFunc(block, func(string) string {
+			n++
+			return "\n" + strconv.Itoa(n) + ". "
+		})
+	})
+	h = liOpenRe.ReplaceAllString(h, "\n• ")
+	h = blockEndRe.ReplaceAllString(h, "\n")
+	h = tagRe.ReplaceAllString(h, "")
+	h = html.UnescapeString(h)
+	lines := strings.Split(h, "\n")
+	for i, l := range lines {
+		lines[i] = strings.TrimSpace(l)
+	}
+	h = blankRe.ReplaceAllString(strings.Join(lines, "\n"), "\n")
+	return strings.TrimSpace(h)
 }
 
 func (s *Service) buildUpdateInfo(rel ghRelease, checkedAt string) UpdateInfo {
