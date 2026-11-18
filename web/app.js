@@ -1119,7 +1119,7 @@ function openUpdateModal() {
     <h2>发现新版本 v${esc(u.latest_version)}</h2>
     <p>当前版本：<code>v${esc(u.current_version || STATUS.version)}</code> → 最新版本：<b style="color:var(--green)">v${esc(u.latest_version)}</b>${u.asset_name ? ` <span class="muted small">(${esc(u.asset_name)})</span>` : ''}</p>
     ${u.release_notes ? `<div class="small muted" style="margin-top:8px">更新说明：</div><pre style="max-height:200px;white-space:pre-wrap">${esc(u.release_notes)}</pre>` : ''}
-    <p class="muted small" style="margin-top:12px">点击「立即更新并重启」将自动下载对应平台二进制文件并原地替换重启，本地 <code>data</code> 数据与登录态完整保留，不会产生多份程序。</p>
+    <p class="muted small" style="margin-top:12px">点击「立即更新并重启」将自动下载新版本并重启服务，本地所有配置、工具与登录数据均不受影响。</p>
     <div class="row" style="margin-top:18px;justify-content:flex-end">
       <button type="button" id="cancel-update-btn" onclick="closeModal()">稍后再说</button>
       <button type="button" class="pri big" id="confirm-update-btn" onclick="applySelfUpdate(this)">⬆ 立即更新并重启</button>
