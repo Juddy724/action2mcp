@@ -118,7 +118,7 @@ func (a *Manager) Launch(headless bool) (*Session, error) {
 		"--disable-background-networking",
 		"--disable-sync",
 		"--password-store=basic",
-		"--disable-features=Translate,OptimizationHints,MediaRouter",
+		"--disable-features=Translate,OptimizationHints,MediaRouter,HttpsFirstBalancedModeAutoEnable,HttpsUpgrades",
 		"--hide-crash-restore-bubble",
 	}
 	if headless {
