@@ -399,12 +399,14 @@ func (a *Service) browserLogin(site *sitecfg.Site, fill, cold, restoreOnFail boo
 			continue
 		}
 		// In cold form-fill mode, we cleared the site's cookies, so wait until the form has been filled
-		// (or for SPAs in non-cold fill mode, give the SPA router 2s to render the password box before assuming logged-in).
+		// (or for SPAs, give the SPA router 2s to render the login/SSO redirect before assuming logged-in).
 		canBeLoggedIn := true
 		if fill && !filled {
 			if cold || time.Since(openedAt) < 2*time.Second {
 				canBeLoggedIn = false
 			}
+		} else if !fill && time.Since(openedAt) < 2*time.Second && strings.TrimSpace(pi.Text) == "" {
+			canBeLoggedIn = false
 		}
 		if canBeLoggedIn && site.LoggedInPage(pi) {
 			if stableHref != pi.Href {
@@ -632,21 +634,71 @@ func (a *Service) watchLoginWindow(site *sitecfg.Site, st *siteState, bs LoginBr
 		didHarvest            bool
 		lastCheck             time.Time
 		checkedOK             bool
+		detectedValid         bool
+		persistedOnce         bool
+		lastCookieCount       int
 		observedLoginPage     string
 		observedExternalHosts []string
 		seenExtHosts          = map[string]bool{}
 		poll                  = 400 * time.Millisecond
 		end                   = time.Now().Add(a.loginWait())
 	)
+	syncCookies := func() int {
+		if bs == nil {
+			return 0
+		}
+		cs, err := bs.Cookies()
+		if err != nil || len(cs) == 0 {
+			return 0
+		}
+		a.repo.ReplaceCookies(cs)
+		lastCookieCount = len(cs)
+		return len(cs)
+	}
+	finalizeClosed := func() {
+		if bs != nil && bs.Alive() {
+			syncCookies()
+		}
+		if !detectedValid && site.CheckURL != "" {
+			if ok, _ := a.CheckSite(site); ok {
+				detectedValid = true
+			}
+		}
+		if detectedValid {
+			a.persistInteractiveLogin(site, tab, observedLoginPage, observedExternalHosts)
+			a.bumpGen(st)
+			a.repo.SetSiteStatus(site.ID, "valid", "", true)
+			log.Printf("用户已关闭登录窗口，登录态已保存：%s", site.Origin)
+			return
+		}
+		if lastCookieCount > 0 && (observedLoginPage != "" || len(observedExternalHosts) > 0) {
+			a.persistInteractiveLogin(site, tab, observedLoginPage, observedExternalHosts)
+		}
+		a.repo.SetSiteError(site.ID, "登录窗口已关闭")
+		log.Printf("登录窗口已关闭：%s", site.Origin)
+	}
 	for {
 		if !sleepCancel(poll, cancel) {
 			tab.Close()
-			a.repo.SetSiteError(site.ID, "已取消登录等待")
-			log.Printf("已取消登录等待：%s", site.Origin)
+			if detectedValid {
+				a.persistInteractiveLogin(site, tab, observedLoginPage, observedExternalHosts)
+				a.bumpGen(st)
+				a.repo.SetSiteStatus(site.ID, "valid", "", true)
+				log.Printf("已结束登录等待并保留有效登录态：%s", site.Origin)
+			} else {
+				a.repo.SetSiteError(site.ID, "已取消登录等待")
+				log.Printf("已取消登录等待：%s", site.Origin)
+			}
 			return
 		}
 		if time.Now().After(end) {
-			tab.Close()
+			if detectedValid {
+				a.persistInteractiveLogin(site, tab, observedLoginPage, observedExternalHosts)
+				a.bumpGen(st)
+				a.repo.SetSiteStatus(site.ID, "valid", "", true)
+				log.Printf("%s：登录监听结束（已保留有效登录态）", site.Origin)
+				return
+			}
 			msg := "登录等待超时（" + formatLoginWait(a.loginWait()) + "）"
 			if miss := a.missingSiteHeaders(site); len(miss) > 0 {
 				msg += "，尚未收获请求头：" + strings.Join(miss, "、")
@@ -656,23 +708,23 @@ func (a *Service) watchLoginWindow(site *sitecfg.Site, st *siteState, bs LoginBr
 			return
 		}
 		if bs != nil && !bs.Alive() {
-			a.repo.SetSiteError(site.ID, "登录窗口已关闭")
-			log.Printf("登录窗口已关闭：%s", site.Origin)
+			finalizeClosed()
 			return
 		}
 		pi, err := tab.Info()
 		if err != nil {
 			fails++
 			if fails > 5 {
-				a.repo.SetSiteError(site.ID, "登录窗口已关闭")
-				log.Printf("登录窗口已关闭：%s", site.Origin)
+				finalizeClosed()
 				return
 			}
 			continue
 		}
 		fails = 0
+		onSite := false
 		if h := sitecfg.HostOf(pi.Href); h != "" && pi.Href != "about:blank" && !strings.HasPrefix(pi.Href, "chrome-error:") {
 			if credential.SameSite("http://"+h, site.Origin) {
+				onSite = true
 				if pi.Pass {
 					observedLoginPage = pi.Href
 				}
@@ -684,16 +736,17 @@ func (a *Service) watchLoginWindow(site *sitecfg.Site, st *siteState, bs LoginBr
 				}
 			}
 		}
+		// Keep cookies synced while the browser window is open so manual logins are never lost.
+		syncCookies()
+
 		loggedIn := site.LoggedInPage(pi)
-		if !loggedIn && pi.Ready == "complete" {
+		// Only fall back to CheckSite when an explicit CheckURL is configured (or we are on the target site
+		// and NOT sitting on an external SSO/QR page), avoiding SPA static-shell false positives.
+		allowCheckSite := site.CheckURL != "" || (onSite && !pi.Pass && !site.IsLoginURL(pi.Href))
+		if !loggedIn && pi.Ready == "complete" && allowCheckSite {
 			if checkedOK && time.Since(lastCheck) < 2*time.Second {
 				loggedIn = true
 			} else if lastCheck.IsZero() || time.Since(lastCheck) >= 2*time.Second {
-				if bs != nil {
-					if cs, err := bs.Cookies(); err == nil && len(cs) > 0 {
-						a.repo.ReplaceCookies(cs)
-					}
-				}
 				lastCheck = time.Now()
 				if ok, _ := a.CheckSite(site); ok {
 					loggedIn, checkedOK = true, true
@@ -713,11 +766,6 @@ func (a *Service) watchLoginWindow(site *sitecfg.Site, st *siteState, bs LoginBr
 		if time.Since(stableSince) < 300*time.Millisecond {
 			continue
 		}
-		if bs != nil {
-			if cs, err := bs.Cookies(); err == nil && len(cs) > 0 {
-				a.repo.ReplaceCookies(cs)
-			}
-		}
 		if miss := a.missingSiteHeaders(site); len(miss) > 0 {
 			if !didHarvest {
 				didHarvest = true
@@ -734,12 +782,21 @@ func (a *Service) watchLoginWindow(site *sitecfg.Site, st *siteState, bs LoginBr
 			}
 			continue
 		}
-		a.persistInteractiveLogin(site, tab, observedLoginPage, observedExternalHosts)
-		a.bumpGen(st)
-		a.repo.SetSiteStatus(site.ID, "valid", "", true)
-		log.Printf("已在弹出的窗口中完成登录：%s", site.Origin)
-		tab.Close()
-		return
+		if !persistedOnce {
+			persistedOnce = true
+			detectedValid = true
+			a.persistInteractiveLogin(site, tab, observedLoginPage, observedExternalHosts)
+			a.bumpGen(st)
+			a.repo.SetSiteStatus(site.ID, "valid", "", true)
+			a.smu.Lock()
+			if st.cancel == cancel {
+				st.pendingMsg = "已检测到登录成功，确认页面正常后请手动关闭浏览器窗口"
+			}
+			a.smu.Unlock()
+			log.Printf("已在弹出的窗口中检测到登录成功（保持窗口打开，待用户确认后手动关闭）：%s", site.Origin)
+		}
+		// Keep watching until the user closes the window so they can still complete login or switch accounts
+		// if a site falsely looked logged-in before redirecting.
 	}
 }
 
@@ -1167,6 +1224,25 @@ func htmlText(s string) string {
 
 // ---------- status check & keepalive ----------
 
+var (
+	spaScriptStyleRe = regexp.MustCompile(`(?is)<(script|style|head|noscript)\b[^>]*>.*?</(script|style|head|noscript)>`)
+	spaTagRe         = regexp.MustCompile(`(?s)<[^>]+>`)
+	spaMountRe       = regexp.MustCompile(`(?i)\bid\s*=\s*["'](root|app|__next|__nuxt)["']`)
+)
+
+func isEmptySPAShell(body, contentType string) bool {
+	ct := strings.ToLower(contentType)
+	if ct != "" && !strings.Contains(ct, "html") {
+		return false
+	}
+	if !spaMountRe.MatchString(body) {
+		return false
+	}
+	stripped := spaScriptStyleRe.ReplaceAllString(body, "")
+	stripped = spaTagRe.ReplaceAllString(stripped, "")
+	return strings.TrimSpace(stripped) == ""
+}
+
 // CheckSite tells whether the saved login state is still valid (no re-login).
 func (a *Service) CheckSite(site *sitecfg.Site) (bool, string) {
 	u := site.CheckURL
@@ -1174,6 +1250,11 @@ func (a *Service) CheckSite(site *sitecfg.Site) (bool, string) {
 		u = site.Origin + "/"
 	}
 	cs, _ := a.browsers.CookiesFor(u)
+	if site.CheckURL == "" && len(cs) == 0 {
+		why := "本地尚无该站点登录 Cookie"
+		a.repo.SetSiteStatus(site.ID, "invalid", why, false)
+		return false, why
+	}
 	t := &Tool{Method: "GET", Headers: map[string]string{"Accept": "text/html,application/json,*/*"}}
 	res, err := a.options.Probe(t, "GET", u, t.Headers, "", cs, "")
 	if err != nil || res.Error != "" {
@@ -1185,7 +1266,13 @@ func (a *Service) CheckSite(site *sitecfg.Site) (bool, string) {
 		}
 		return false, msg
 	}
-	bad, why := site.NotLoggedIn(res.Status, res.Body, execution.HeaderGet(res.Headers, "Content-Type"), res.Redirects(), u)
+	ct := execution.HeaderGet(res.Headers, "Content-Type")
+	if site.CheckURL == "" && res.Status >= 200 && res.Status < 300 && isEmptySPAShell(res.Body, ct) {
+		why := "首页是未鉴权的前端单页壳，无法仅凭首页判断登录状态，请在登录中心配置「检测地址」"
+		a.repo.SetSiteStatus(site.ID, "invalid", why, false)
+		return false, why
+	}
+	bad, why := site.NotLoggedIn(res.Status, res.Body, ct, res.Redirects(), u)
 	if bad {
 		a.repo.SetSiteStatus(site.ID, "invalid", why, false)
 		return false, why
@@ -1416,6 +1503,6 @@ func (a *Service) SmartOpenLogin(site *sitecfg.Site, force bool) (*OpenLoginResu
 		Opened:       true,
 		AlreadyValid: false,
 		Method:       site.Method,
-		Message:      "已打开浏览器登录窗口，完成登录后将自动保存登录配置并关闭窗口",
+		Message:      "已打开浏览器登录窗口，完成登录并确认页面正常后请手动关闭窗口（系统会自动保存登录态与配置）",
 	}, nil
 }

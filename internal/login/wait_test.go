@@ -154,6 +154,20 @@ func waitSitePending(t *testing.T, a *Service, site *sitecfg.Site, want bool, d 
 	t.Fatalf("pending=%v want %v", p, want)
 }
 
+func waitSiteStatus(t *testing.T, a *Service, site *sitecfg.Site, want string, d time.Duration) *sitecfg.Site {
+	t.Helper()
+	end := time.Now().Add(d)
+	for time.Now().Before(end) {
+		if got, err := a.repo.GetSite(site.ID); err == nil && got != nil && got.Status == want {
+			return got
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	got, _ := a.repo.GetSite(site.ID)
+	t.Fatalf("status=%q err=%q want %q", got.Status, got.LastError, want)
+	return got
+}
+
 func TestLoginAlreadyLoggedInFastPath(t *testing.T) {
 	srv := loginTestServer(t)
 	defer srv.Close()
@@ -169,16 +183,18 @@ func TestLoginAlreadyLoggedInFastPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitSitePending(t, a, site, true, time.Second)
-	waitSitePending(t, a, site, false, 3*time.Second)
-	got, err := a.repo.GetSite(site.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	got := waitSiteStatus(t, a, site, "valid", 3*time.Second)
 	if got.Status != "valid" {
 		t.Fatalf("status=%q err=%q", got.Status, got.LastError)
 	}
-	if !tab.isClosed() {
-		t.Fatal("window was not closed after already-logged-in success")
+	if tab.isClosed() {
+		t.Fatal("window must stay open until the user closes it manually")
+	}
+	bs.Close()
+	waitSitePending(t, a, site, false, 2*time.Second)
+	got, _ = a.repo.GetSite(site.ID)
+	if got.Status != "valid" {
+		t.Fatalf("closing window after valid login overwrote status=%q err=%q", got.Status, got.LastError)
 	}
 }
 
@@ -202,8 +218,8 @@ func TestLoginWaitTimeout(t *testing.T) {
 	if got.Status != "invalid" || !strings.Contains(got.LastError, "超时") {
 		t.Fatalf("status=%q err=%q", got.Status, got.LastError)
 	}
-	if !tab.isClosed() {
-		t.Fatal("window was not closed after timeout")
+	if tab.isClosed() {
+		t.Fatal("window should not be forcefully closed on timeout")
 	}
 }
 
@@ -292,8 +308,7 @@ func TestLoginWaitHarvestsRequiredHeader(t *testing.T) {
 	if err := a.OpenLoginWindow(site); err != nil {
 		t.Fatal(err)
 	}
-	waitSitePending(t, a, site, false, 4*time.Second)
-	got, _ := a.repo.GetSite(site.ID)
+	got := waitSiteStatus(t, a, site, "valid", 4*time.Second)
 	if got.Status != "valid" {
 		t.Fatalf("status=%q err=%q reloads=%d", got.Status, got.LastError, tab.reloadCount())
 	}
@@ -303,8 +318,76 @@ func TestLoginWaitHarvestsRequiredHeader(t *testing.T) {
 	if _, err := a.GetSiteHeader(bindingURL, "sso-epctoken"); err != nil {
 		t.Fatalf("header not available via wss/ws url: %v", err)
 	}
-	if !tab.isClosed() {
-		t.Fatal("window was not closed after harvest")
+	if tab.isClosed() {
+		t.Fatal("window must stay open until user closes it manually")
+	}
+	bs.Close()
+	waitSitePending(t, a, site, false, 2*time.Second)
+}
+
+func TestLoginWindowDoesNotAutoCloseOnSPAShellOrSSOPage(t *testing.T) {
+	// Simulates SPA console: root URL returns HTTP 200 React SPA shell even with zero cookies.
+	spaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(200)
+		io.WriteString(w, `<!doctype html><html><head><title>SPA</title></head><body><div id="root"></div><script>window.boot();</script></body></html>`)
+	}))
+	defer spaSrv.Close()
+
+	u, _ := url.Parse(spaSrv.URL)
+	bs := newFakeBrowser(nil)
+	var mu sync.Mutex
+	curPage := sitecfg.PageInfo{Href: "https://login.work.weixin.qq.com/wwlogin/sso/login", Ready: "complete", Text: "扫码登录"}
+	tab := &fakeLoginTab{infoFn: func() (sitecfg.PageInfo, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return curPage, nil
+	}}
+
+	a, site := loginTestApp(t, spaSrv, bs, tab)
+	site.Method = sitecfg.MethodSSO
+	site.CheckURL = "" // no explicit backend check_url, just like SPA console
+	if err := a.repo.(*loginTestRepository).SaveSite(site); err != nil {
+		t.Fatal(err)
+	}
+
+	// CheckSite must NOT treat an unauthenticated SPA shell as valid.
+	if ok, _ := a.CheckSite(site); ok {
+		t.Fatal("CheckSite falsely reported valid on empty SPA shell with no cookies")
+	}
+
+	if err := a.OpenLoginWindow(site); err != nil {
+		t.Fatal(err)
+	}
+	waitSitePending(t, a, site, true, time.Second)
+	// Wait past a full poll + CheckSite interval: window must NOT auto-close or mark valid on QR page!
+	time.Sleep(1200 * time.Millisecond)
+	if tab.isClosed() {
+		t.Fatal("SSO QR login window auto-closed prematurely on SPA site")
+	}
+	got, _ := a.repo.GetSite(site.ID)
+	if got.Status == "valid" {
+		t.Fatalf("site falsely marked valid while user is still on WeCom QR page: %+v", got)
+	}
+
+	// Now user scans QR code: cookies appear and browser navigates back to SPA dashboard.
+	bs.mu.Lock()
+	bs.cookies = []Cookie{{Name: "console_sid", Value: "real-session", Domain: u.Hostname(), Path: "/", Session: true}}
+	bs.mu.Unlock()
+	mu.Lock()
+	curPage = sitecfg.PageInfo{Href: spaSrv.URL + "/v2/clusters", Ready: "complete", Text: "发布大盘 集群列表"}
+	mu.Unlock()
+
+	waitSiteStatus(t, a, site, "valid", 3*time.Second)
+	if tab.isClosed() {
+		t.Fatal("window should remain open for user confirmation even after login is detected")
+	}
+	// User manually closes the browser window -> pending ends, status stays valid.
+	bs.Close()
+	waitSitePending(t, a, site, false, 2*time.Second)
+	got, _ = a.repo.GetSite(site.ID)
+	if got.Status != "valid" {
+		t.Fatalf("expected status valid after user closed window, got %q (%q)", got.Status, got.LastError)
 	}
 }
 
