@@ -160,6 +160,11 @@ func (a *Engine) Prepare(t *Tool, args map[string]any) (*PreparedCall, error) {
 	if err != nil {
 		return nil, err
 	}
+	if IsFlowMethod(t.Method) && strings.TrimSpace(body) == "" {
+		if b, err := json.MarshalIndent(vals, "", "  "); err == nil {
+			body = string(b)
+		}
+	}
 	p := &PreparedCall{request: domain.RequestPreview{Method: method, URL: u, Headers: headers, Body: body}, subs: d.subs, credHeaders: append([]string(nil), t.CredHeaders...), presentCfg: presentationFields(t.Config)}
 	if err := a.freezeWSCall(t, vals, d, p); err != nil {
 		return nil, fmt.Errorf("%s", a.ScrubApprovalText(err.Error(), secrets))
@@ -185,6 +190,11 @@ func (a *Engine) Prepare(t *Tool, args map[string]any) (*PreparedCall, error) {
 	method, u, headers, body, err = t.renderValues(displayVals, display)
 	if err != nil {
 		return nil, err
+	}
+	if IsFlowMethod(t.Method) && strings.TrimSpace(body) == "" {
+		if b, err := json.MarshalIndent(displayVals, "", "  "); err == nil {
+			body = string(b)
+		}
 	}
 	pairs := []string{}
 	for _, sub := range display.subs {

@@ -27,6 +27,7 @@ func TestFeaturePackageDependencyDirection(t *testing.T) {
 		"approval":   {"domain": true, "vault": true},
 		"result":     {"domain": true, "htmlmd": true},
 		"execution":  {"credential": true, "domain": true, "vault": true, "htmlmd": true, "sqlguard": true, "recording": true, "result": true},
+		"flow":       {"credential": true, "domain": true, "execution": true, "vault": true},
 		"updater":    {},
 	}
 	for pkg, dependencies := range allowed {

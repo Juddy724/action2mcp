@@ -13,6 +13,9 @@ func toolOpKind(t *execution.Tool) (write bool, ann map[string]any) {
 		method = strings.ToUpper(strings.TrimSpace(t.Method))
 	}
 	write = analysis.IsWriteMethod(method)
+	if t != nil && execution.IsFlowMethod(method) && t.Approval == "always" {
+		write = true
+	}
 	if t != nil && t.Config.SqlGuardEnabled() {
 		write = false
 	}

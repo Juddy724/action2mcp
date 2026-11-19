@@ -498,8 +498,8 @@ func TestApprovalDocumentation(t *testing.T) {
 				t.Fatalf("%s is missing approval documentation for %s", path, required)
 			}
 		}
-		if path == "README.md" && !strings.Contains(string(b), "| 平台 | 安装包 (v0.6.2) |") {
-			t.Fatal("download table version is not 0.6.2")
+		if path == "README.md" && !strings.Contains(string(b), "| 平台 | 安装包 (v"+Version+") |") {
+			t.Fatalf("download table version is not %s", Version)
 		}
 	}
 }

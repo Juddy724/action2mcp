@@ -11,6 +11,7 @@ type Param struct {
 	Description string `json:"description"`
 	Required    bool   `json:"required"`
 	Default     string `json:"default,omitempty"`
+	TestValue   string `json:"test_value,omitempty"`
 	Secret      bool   `json:"secret,omitempty"`
 }
 

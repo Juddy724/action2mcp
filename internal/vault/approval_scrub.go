@@ -157,6 +157,15 @@ func scrubSecretTextMin(text string, vault *Vault, values []string, minLen int) 
 	if len(matches) == 0 {
 		return text
 	}
+	var jsonNums []approvalTextSpan
+	if isLikelyJSON(text) && json.Valid([]byte(text)) {
+		jsonNums = jsonBareNumberSpans(text)
+	}
+	if len(jsonNums) > 0 {
+		for i := range matches {
+			matches[i] = snapSpanToJSONNumbers(matches[i], jsonNums)
+		}
+	}
 	sort.Slice(matches, func(i, j int) bool {
 		if matches[i].start == matches[j].start {
 			return matches[i].end > matches[j].end
@@ -175,11 +184,82 @@ func scrubSecretTextMin(text string, vault *Vault, values []string, minLen int) 
 			i++
 		}
 		out.WriteString(text[last:span.start])
-		out.WriteString(Mask)
+		if len(jsonNums) > 0 && isExactJSONNumberSpan(span, jsonNums) {
+			out.WriteByte('"')
+			out.WriteString(Mask)
+			out.WriteByte('"')
+		} else {
+			out.WriteString(Mask)
+		}
 		last = span.end
 	}
 	out.WriteString(text[last:])
 	return out.String()
+}
+
+func isLikelyJSON(s string) bool {
+	s = strings.TrimSpace(s)
+	return len(s) >= 2 && ((s[0] == '{' && s[len(s)-1] == '}') || (s[0] == '[' && s[len(s)-1] == ']'))
+}
+
+// jsonBareNumberSpans returns byte ranges of unquoted JSON number tokens in a valid JSON document.
+func jsonBareNumberSpans(s string) []approvalTextSpan {
+	var out []approvalTextSpan
+	n := len(s)
+	inStr := false
+	for i := 0; i < n; {
+		c := s[i]
+		if inStr {
+			if c == '\\' && i+1 < n {
+				i += 2
+				continue
+			}
+			if c == '"' {
+				inStr = false
+			}
+			i++
+			continue
+		}
+		if c == '"' {
+			inStr = true
+			i++
+			continue
+		}
+		if (c >= '0' && c <= '9') || c == '-' {
+			start := i
+			i++
+			for i < n && ((s[i] >= '0' && s[i] <= '9') || s[i] == '.' || s[i] == 'e' || s[i] == 'E' || s[i] == '+' || s[i] == '-') {
+				i++
+			}
+			out = append(out, approvalTextSpan{start: start, end: i})
+			continue
+		}
+		i++
+	}
+	return out
+}
+
+func snapSpanToJSONNumbers(sp approvalTextSpan, nums []approvalTextSpan) approvalTextSpan {
+	for _, num := range nums {
+		if sp.start < num.end && sp.end > num.start {
+			if num.start < sp.start {
+				sp.start = num.start
+			}
+			if num.end > sp.end {
+				sp.end = num.end
+			}
+		}
+	}
+	return sp
+}
+
+func isExactJSONNumberSpan(sp approvalTextSpan, nums []approvalTextSpan) bool {
+	for _, num := range nums {
+		if sp.start == num.start && sp.end == num.end {
+			return true
+		}
+	}
+	return false
 }
 
 func approvalHex(text string, digits int) (rune, bool) {

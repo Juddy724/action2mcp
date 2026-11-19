@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -46,15 +47,39 @@ type WSAuthConfig struct {
 	FailMessageMatch []string `json:"fail_if_success_false_and_message_matches,omitempty"`
 }
 
+type FlowConfig struct {
+	Steps  []FlowStep `json:"steps"`
+	Output FlowOutput `json:"output,omitempty"`
+}
+
+type FlowStep struct {
+	ID               string         `json:"id"`
+	Name             string         `json:"name,omitempty"`
+	Kind             string         `json:"kind"` // "tool" | "script"
+	ParallelWithPrev bool           `json:"parallel_with_prev,omitempty"`
+	ToolName         string         `json:"tool_name,omitempty"`
+	ArgsFrom         string         `json:"args_from,omitempty"`
+	Args             map[string]any `json:"args,omitempty"`
+	Runtime          string         `json:"runtime,omitempty"` // "builtin_js" | "python" | "go" | "java" | "node" | "shell"
+	Code             string         `json:"code,omitempty"`
+}
+
+type FlowOutput struct {
+	Mode     string `json:"mode,omitempty"` // "last" | "template"
+	Template string `json:"template,omitempty"`
+}
+
 type ToolConfig struct {
 	Messages       []string         `json:"messages,omitempty"`
 	SQLGuard       *SQLGuardConfig  `json:"sql_guard,omitempty"`
 	Collect        *WSCollectConfig `json:"collect,omitempty"`
 	Auth           *WSAuthConfig    `json:"auth,omitempty"`
+	Flow           *FlowConfig      `json:"flow,omitempty"`
 	ResultFormat   string           `json:"result_format,omitempty"`   // ""/"auto", "raw", "selector"
 	ResultSelector string           `json:"result_selector,omitempty"` // used when ResultFormat=selector
 	DetectFailure  *bool            `json:"detect_failure,omitempty"`  // nil = enabled; false disables
 	OpKind         string           `json:"op_kind,omitempty"`         // ""/"auto", "read", "write"
+	SampleOutput   string           `json:"sample_output,omitempty"`   // compact scrubbed JSON/text preview of output
 }
 
 const (
@@ -132,6 +157,42 @@ func presentationFields(c ToolConfig) ToolConfig {
 
 func IsWSMethod(method string) bool {
 	return strings.ToUpper(strings.TrimSpace(method)) == "WS"
+}
+
+func IsFlowMethod(method string) bool {
+	return strings.ToUpper(strings.TrimSpace(method)) == "FLOW"
+}
+
+var flowStepIDRe = regexp.MustCompile(`^[A-Za-z0-9_]{1,64}$`)
+
+func ValidateFlowConfig(f *FlowConfig) error {
+	if f == nil || len(f.Steps) == 0 {
+		return errors.New("自定义工具至少需要包含 1 个节点")
+	}
+	seen := map[string]bool{}
+	for _, s := range f.Steps {
+		id := strings.TrimSpace(s.ID)
+		if !flowStepIDRe.MatchString(id) {
+			return fmt.Errorf("节点标识 %q 只能包含英文字母、数字和下划线（1–64 位）", s.ID)
+		}
+		if seen[id] {
+			return fmt.Errorf("节点标识 %q 重复，请保证每个节点标识唯一", id)
+		}
+		seen[id] = true
+		switch strings.ToLower(strings.TrimSpace(s.Kind)) {
+		case "tool":
+			if strings.TrimSpace(s.ToolName) == "" {
+				return fmt.Errorf("节点 %s：工具节点必须选择目标工具", id)
+			}
+		case "script":
+			if strings.TrimSpace(s.Code) == "" {
+				return fmt.Errorf("节点 %s：脚本节点代码不能为空", id)
+			}
+		default:
+			return fmt.Errorf("节点 %s：节点类型必须是 tool 或 script", id)
+		}
+	}
+	return nil
 }
 
 func ParseToolConfigJSON(raw string) (ToolConfig, error) {
@@ -223,6 +284,18 @@ func (c *ToolConfig) ApplyDefaults() {
 }
 
 func ValidateToolConfig(method string, c ToolConfig, requireComplete bool) error {
+	if IsFlowMethod(method) {
+		if c.SqlGuardEnabled() || len(c.Messages) > 0 || c.Collect != nil || c.Auth != nil {
+			return errors.New("自定义流程工具不能包含 WebSocket 配置")
+		}
+		if requireComplete || c.Flow != nil {
+			return ValidateFlowConfig(c.Flow)
+		}
+		return nil
+	}
+	if c.Flow != nil {
+		return errors.New("普通 HTTP/WebSocket 工具不能包含自定义流程配置")
+	}
 	empty := !c.SqlGuardEnabled() && len(c.Messages) == 0 && c.Collect == nil && c.Auth == nil
 	if !IsWSMethod(method) {
 		if empty {
@@ -288,6 +361,17 @@ func configTemplateTexts(t *Tool) []string {
 	}
 	if t.Config.SQLGuard != nil {
 		out = append(out, t.Config.SQLGuard.Param, t.Config.SQLGuard.Path)
+	}
+	if t.Config.Flow != nil {
+		out = append(out, t.Config.Flow.Output.Template)
+		for _, s := range t.Config.Flow.Steps {
+			out = append(out, s.Code, s.ArgsFrom)
+			for _, v := range s.Args {
+				if b, err := json.Marshal(v); err == nil {
+					out = append(out, string(b))
+				}
+			}
+		}
 	}
 	return out
 }

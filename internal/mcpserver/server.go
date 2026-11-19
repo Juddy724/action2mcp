@@ -5,6 +5,7 @@ import (
 	"action2mcp/internal/analysis"
 	"action2mcp/internal/approval"
 	"action2mcp/internal/execution"
+	"action2mcp/internal/flow"
 	"action2mcp/internal/invoke"
 	"action2mcp/internal/mcp"
 	"action2mcp/internal/mwconfig"
@@ -41,6 +42,7 @@ type Options struct {
 	Analysis    func() *analysis.Service
 	Middlewares func() *mwtools.Service
 	Approvals   func() *invoke.Gateway
+	Flow        func() *flow.Executor
 }
 
 // mcpServer is the Streamable-HTTP MCP adapter: JSON-RPC framing, discovery
@@ -53,10 +55,11 @@ type Server struct {
 	analysis    func() *analysis.Service
 	middlewares func() *mwtools.Service
 	approvals   func() *invoke.Gateway
+	flow        func() *flow.Executor
 }
 
 func New(o Options) *Server {
-	return &Server{version: o.Version, repo: o.Repository, sessions: o.Sessions, engine: o.Engine, analysis: o.Analysis, middlewares: o.Middlewares, approvals: o.Approvals}
+	return &Server{version: o.Version, repo: o.Repository, sessions: o.Sessions, engine: o.Engine, analysis: o.Analysis, middlewares: o.Middlewares, approvals: o.Approvals, flow: o.Flow}
 }
 
 type rpcReq struct {
@@ -415,6 +418,25 @@ func (a *Server) invokeTool(ctx context.Context, mc *mcp.Call, name string, args
 		}
 		prepared = pending.Prepared
 		prefix = a.approvals().EditPrefix(pending)
+	}
+	if execution.IsFlowMethod(t.Method) {
+		if a.flow == nil || a.flow() == nil {
+			return mcp.TextResult("自定义工具编排执行器未就绪", true), nil
+		}
+		fres, ferr := a.flow().Run(ctx, t, args, explanation)
+		out := ""
+		isErr := false
+		if ferr != nil {
+			out = prefix + "调用失败：" + ferr.Error()
+			isErr = true
+		} else if fres != nil {
+			out = prefix + fres.Body
+			isErr = !fres.OK
+		}
+		if pending != nil {
+			a.approvals().Service().RecordResult(pending.Record.ID, out)
+		}
+		return mcp.TextResult(out, isErr), nil
 	}
 	res, err := a.engine().Send(prepared)
 	out, isErr := formatMCPCallResult(prefix, res, err)

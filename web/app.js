@@ -806,8 +806,10 @@ async function saveLoginReq(id) {
   } catch (e) { toast('保存失败：' + e.message, 5000); }
 }
 async function editTool(id) {
-  const d = await api('GET', '/api/tools/' + id);
-  const packs = await api('GET', '/api/packs');
+  const [d, packs] = await Promise.all([api('GET', '/api/tools/' + id), api('GET', '/api/packs')]);
+  if (String(d.tool.method || '').toUpperCase() === 'FLOW') {
+    return openCustomToolEditor(null, id, d.tool, packs);
+  }
   EDIT = { tool: d.tool, candidates: null, packs, packSel: new Set(packs.filter(p => p.tool_ids.includes(id)).map(p => p.id)) };
   drawEditor();
 }
@@ -915,14 +917,19 @@ async function saveTool() {
 // ---------- tools ----------
 async function pageTools(app) {
   const tools = await api('GET', '/api/tools');
-  app.innerHTML = `<h2>工具 <span class="muted small" style="font-weight:400">共 ${tools.length} 个。工具要放进「已开启」的流程包，AI 才能看到。</span></h2>
-  ${tools.length === 0 ? '<div class="card empty">还没有工具。先去「录制」页录一次操作，再把有用的请求保存为工具。</div>' :
+  app.innerHTML = `<div class="sec-head" style="margin-top:0;margin-bottom:16px">
+    <h2 style="margin:0">工具 <span class="muted small" style="font-weight:400">共 ${tools.length} 个。工具要放进「已开启」的流程包，AI 才能看到。</span></h2>
+    <div class="row">
+      <button type="button" class="pri" onclick="openCustomToolEditor()">＋ 新建自定义工具</button>
+    </div>
+  </div>
+  ${tools.length === 0 ? '<div class="card empty">还没有工具。可以去「录制」页抓包生成，或点击右上角「＋ 新建自定义工具」创建脚本或编排工具。</div>' :
   tools.map(t => `<div class="card"><div class="row">
     <div class="grow"><b class="mono" style="font-size:15px">${esc(t.name)}</b> <span>${esc(t.title)}</span>
       <div class="muted small">${esc(t.description || '（没有用途说明，建议补充，AI 会更会用）')}</div>
-      <div class="small" style="margin-top:4px">${methodBadge(t.method)} <span class="mono">${esc(t.url)}</span></div>
+      <div class="small" style="margin-top:4px">${toolBadgeAndTarget(t)}</div>
       <div class="small muted" style="margin-top:4px">参数：${t.params.length ? t.params.map(p => `<code>${esc(p.name)}</code>`).join(' ') : '无'}　·　流程包：${(t.packs || []).length ? t.packs.map(esc).join('、') : '<span style="color:var(--amber)">未加入任何流程包</span>'}</div></div>
-    <button class="pri" onclick="testTool(${t.id})">▶ 测试</button><button onclick="editTool(${t.id})">编辑</button>${isWSGuardTool(t) ? `<button onclick="convertToolToMW(${t.id})">转为 SQL 控制台</button>` : ''}<button class="danger" onclick="delTool(${t.id})">删除</button></div></div>`).join('')}`;
+    <button type="button" class="pri" onclick="testTool(${t.id})">▶ 测试</button><button type="button" onclick="editTool(${t.id})">编辑</button>${isWSGuardTool(t) ? `<button type="button" onclick="convertToolToMW(${t.id})">转为 SQL 控制台</button>` : ''}<button type="button" class="danger" onclick="delTool(${t.id})">删除</button></div></div>`).join('')}`;
 }
 function isWSGuardTool(t) {
   return String(t.method || '').toUpperCase() === 'WS' && t.config && t.config.sql_guard && t.config.sql_guard.enabled;
@@ -939,17 +946,22 @@ async function delTool(id) { if (!confirm('删除这个工具？')) return; awai
 async function testTool(id) {
   const d = await api('GET', '/api/tools/' + id);
   const t = d.tool;
-  openModal(`<h2>测试工具 <span class="mono">${esc(t.name)}</span></h2>
-   <div class="form-grid">${t.params.map(p => `<label>${esc(p.name)}${p.required ? ' *' : ''}</label><input class="targ" data-n="${esc(p.name)}" data-t="${esc(p.type)}" value="${esc(p.default || '')}" placeholder="${esc(p.description)}">`).join('') || '<div class="full muted">这个工具没有参数</div>'}</div>
-   <div class="row" style="margin-top:14px"><button class="pri" onclick="runTool(${id})">▶ 运行</button><span class="muted small">会用专用浏览器里的登录态发出真实请求</span></div>
+  const isFlow = String(t.method || '').toUpperCase() === 'FLOW';
+  openModal(`<h2>测试工具 <span class="mono">${esc(t.name)}</span> ${isFlow ? toolTypeBadge(t) : ''}</h2>
+   <div class="form-grid">${t.params.map(p => `<label>${esc(p.name)}${p.required ? ' *' : ''}</label><input class="targ" data-n="${esc(p.name)}" data-t="${esc(p.type)}" value="${esc(p.test_value || p.default || '')}" placeholder="${esc(p.description)}">`).join('') || '<div class="full muted">这个工具没有参数</div>'}</div>
+   <div class="row" style="margin-top:14px"><button type="button" class="pri" onclick="runTool(${id})">▶ 运行</button><span class="muted small">${isFlow ? '将按节点编排顺序执行自定义脚本与子工具（留空将尝试使用参数默认值）' : '会用专用浏览器里的登录态发出真实请求'}</span></div>
    <div id="run-out" style="margin-top:12px"></div>`);
 }
 async function runTool(id) {
   const args = {};
-  document.querySelectorAll('.targ').forEach(i => { let v = i.value; if (i.dataset.t === 'number' || i.dataset.t === 'integer') v = v === '' ? undefined : Number(v); if (i.dataset.t === 'boolean') v = v === 'true'; if (v !== undefined) args[i.dataset.n] = v; });
-  $('#run-out').innerHTML = '<div class="muted">请求中…</div>';
+  document.querySelectorAll('.targ').forEach(i => { let v = i.value; if (i.dataset.t === 'number' || i.dataset.t === 'integer') v = v === '' ? undefined : Number(v); if (i.dataset.t === 'boolean') v = v === '' ? undefined : v === 'true'; if (v !== undefined) args[i.dataset.n] = v; });
+  $('#run-out').innerHTML = '<div class="muted">执行中…</div>';
   try {
     const r = await api('POST', `/api/tools/${id}/run`, { args });
+    if (r && ('steps_trace' in r || 'final_output' in r)) {
+      $('#run-out').innerHTML = renderFlowRunResult(r);
+      return;
+    }
     $('#run-out').innerHTML = `<div class="row"><b class="${r.status && r.status < 400 ? 'st-ok' : 'st-bad'}">HTTP ${r.status || '失败'}</b><span class="muted small">${r.duration_ms} ms · 登录态来源：${esc(r.cred_source)} · 带上的 Cookie：${(r.cookie_names || []).map(esc).join(', ') || '无'}</span></div>
       ${r.error ? `<div class="notice">${esc(r.error)}</div>` : ''}
       ${r.status === 401 || r.status === 403 ? '<div class="notice">目标网站返回未登录/无权限：点「录制」页的「打开浏览器登录」登录一次后再试。</div>' : ''}
@@ -1785,3 +1797,1297 @@ async function delMW(id) {
   try { await api('DELETE', '/api/middleware/' + id); toast('已删除'); render(); } catch (e) { toast(e.message, 5000); }
 }
 async function clearAudit() { if (!confirm('清空操作审计记录？')) return; await api('DELETE', '/api/middleware/audit'); render(); }
+
+// ---------- custom script & multi-tool flow editor ----------
+let FLOW_STATE = null;
+
+const FLOW_RUNTIME_FALLBACK = [
+  { id: 'builtin_js', label: '内置 JS 引擎 (推荐 · 零依赖内置)', builtin: true, available: true, version: 'builtin ES6+' },
+  { id: 'python', label: 'Python (python3 / python)', available: false },
+  { id: 'go', label: 'Go (go run)', available: false },
+  { id: 'java', label: 'Java (java 11+ 单文件运行)', available: false },
+  { id: 'node', label: 'Node.js (node)', available: false },
+  { id: 'shell', label: 'Shell (sh / bash)', available: false },
+];
+
+const FLOW_SAMPLES = {
+  builtin_js: `function main(input, steps) {
+  console.log("input:", input);
+  return {
+    ok: true,
+    received: input,
+    prev_steps: Object.keys(steps)
+  };
+}`,
+  python: `import sys, json
+
+ctx = json.load(sys.stdin)
+inp = ctx.get("input", {})
+steps = ctx.get("steps", {})
+print(json.dumps({
+    "ok": True,
+    "received": inp,
+    "step_keys": list(steps.keys())
+}, ensure_ascii=False))`,
+  go: `package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+)
+
+func main() {
+	var ctx map[string]any
+	_ = json.NewDecoder(os.Stdin).Decode(&ctx)
+	out, _ := json.Marshal(map[string]any{
+		"ok":       true,
+		"received": ctx["input"],
+	})
+	fmt.Println(string(out))
+}`,
+  java: `import java.nio.charset.StandardCharsets;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        String ctx = new String(System.in.readAllBytes(), StandardCharsets.UTF_8);
+        System.out.println("{\\"ok\\":true,\\"ctx_bytes\\":" + ctx.length() + "}");
+    }
+}`,
+  node: `const fs = require('fs');
+const raw = fs.readFileSync(0, 'utf8') || '{}';
+const ctx = JSON.parse(raw);
+console.log(JSON.stringify({
+  ok: true,
+  received: ctx.input || {},
+  step_keys: Object.keys(ctx.steps || {})
+}));`,
+  shell: `#!/usr/bin/env sh
+cat >/dev/null
+echo '{"ok":true,"note":"shell script executed"}'`,
+};
+
+function runtimeDisplayLabel(rtId) {
+  const map = {
+    builtin_js: '内置 JS',
+    python: 'Python',
+    go: 'Go',
+    java: 'Java',
+    node: 'Node.js',
+    shell: 'Shell',
+  };
+  return map[rtId] || rtId || 'builtin_js';
+}
+
+function isSingleScriptFlow(t) {
+  const steps = (t && t.config && t.config.flow && t.config.flow.steps) || [];
+  return String(t && t.method || '').toUpperCase() === 'FLOW' && steps.length === 1 && steps[0].kind === 'script';
+}
+
+function toolTypeBadge(t) {
+  if (String(t && t.method || '').toUpperCase() !== 'FLOW') return methodBadge(t && t.method);
+  return isSingleScriptFlow(t)
+    ? '<span class="badge m-SCRIPT">SCRIPT</span>'
+    : '<span class="badge m-FLOW">FLOW</span>';
+}
+
+function toolBadgeAndTarget(t) {
+  if (String(t.method || '').toUpperCase() !== 'FLOW') {
+    return `${methodBadge(t.method)} <span class="mono">${esc(t.url)}</span>`;
+  }
+  const steps = (t.config && t.config.flow && t.config.flow.steps) || [];
+  if (steps.length === 1 && steps[0].kind === 'script') {
+    return `${toolTypeBadge(t)} <span class="muted">自定义脚本（${esc(runtimeDisplayLabel(steps[0].runtime))}）</span>`;
+  }
+  if (steps.length > 0) {
+    const chain = steps.map(s => `${s.id || s.tool_name || s.kind}${s.parallel_with_prev ? ' ⚡' : ''}`).join(' → ');
+    return `${toolTypeBadge(t)} <span class="muted">编排 ${steps.length} 个节点：<span class="mono">${esc(chain)}</span></span>`;
+  }
+  return `${toolTypeBadge(t)} <span class="mono">${esc(t.url || 'flow://custom')}</span>`;
+}
+
+function buildFlowPresetData(mode) {
+  if (mode === 'flow') {
+    return {
+      params: [],
+      steps: [
+        { id: 'step_1', name: '调用子工具', kind: 'tool', tool_name: '', args: {} },
+        { id: 'step_2', name: '汇总处理脚本', kind: 'script', runtime: 'builtin_js', code: FLOW_SAMPLES.builtin_js },
+      ],
+      output: { mode: 'last', template: '' },
+    };
+  }
+  return {
+    params: [{ name: 'input_text', type: 'string', required: false, default: '', test_value: 'hello', description: '示例入参（可按需修改或删除）' }],
+    steps: [{ id: 'run_script', name: '执行脚本', kind: 'script', runtime: 'builtin_js', args: { input_text: '{{input.input_text}}' }, code: FLOW_SAMPLES.builtin_js }],
+    output: { mode: 'last', template: '' },
+  };
+}
+
+function flowPresetSnapshot(tool) {
+  const flow = (tool && tool.config && tool.config.flow) || { steps: [], output: { mode: 'last', template: '' } };
+  return JSON.stringify({ params: tool.params || [], steps: flow.steps || [], output: flow.output || { mode: 'last', template: '' } });
+}
+
+function switchFlowPreset(mode) {
+  if (!FLOW_STATE || FLOW_STATE.tool.id) return;
+  if (FLOW_STATE.presetMode === mode) return;
+  collectFlowForm();
+  const curSnap = flowPresetSnapshot(FLOW_STATE.tool);
+  if (FLOW_STATE.presetBaseline && curSnap !== FLOW_STATE.presetBaseline) {
+    if (!confirm('切换初始模板会覆盖当前的入参定义与节点编排（基本信息与流程包归属会保留），确认切换吗？')) return;
+  }
+  const preset = buildFlowPresetData(mode);
+  FLOW_STATE.presetMode = mode;
+  FLOW_STATE.tool.params = preset.params;
+  FLOW_STATE.tool.config.flow = { steps: preset.steps, output: preset.output };
+  FLOW_STATE.presetBaseline = flowPresetSnapshot(FLOW_STATE.tool);
+  FLOW_STATE.testResult = null;
+  drawFlowEditor();
+}
+
+async function openCustomToolEditor(presetMode, id, loadedTool, loadedPacks) {
+  try {
+    const [rtResp, allTools, allPacks, detailResp] = await Promise.all([
+      api('GET', '/api/runtimes').catch(() => ({ runtimes: FLOW_RUNTIME_FALLBACK })),
+      api('GET', '/api/tools'),
+      loadedPacks ? Promise.resolve(loadedPacks) : api('GET', '/api/packs'),
+      id && !loadedTool ? api('GET', '/api/tools/' + id) : Promise.resolve(null),
+    ]);
+    const existing = loadedTool || (detailResp && detailResp.tool);
+    const activePreset = presetMode === 'flow' ? 'flow' : 'script';
+    let tool;
+    if (existing) {
+      tool = JSON.parse(JSON.stringify(existing));
+      tool.method = 'FLOW';
+      tool.url = tool.url || 'flow://custom';
+      tool.params = Array.isArray(tool.params) ? tool.params : [];
+      tool.config = tool.config || {};
+      tool.config.flow = tool.config.flow || { steps: [], output: { mode: 'last' } };
+      tool.config.flow.steps = Array.isArray(tool.config.flow.steps) ? tool.config.flow.steps : [];
+      tool.config.flow.output = tool.config.flow.output || { mode: 'last', template: '' };
+    } else {
+      const preset = buildFlowPresetData(activePreset);
+      tool = {
+        id: 0,
+        name: '',
+        title: '',
+        description: '',
+        method: 'FLOW',
+        url: 'flow://custom',
+        approval: 'off',
+        params: preset.params,
+        config: {
+          op_kind: 'auto',
+          flow: {
+            steps: preset.steps,
+            output: preset.output,
+          },
+        },
+      };
+    }
+    const selPacks = new Set(
+      existing
+        ? allPacks.filter(p => p.tool_ids.includes(existing.id)).map(p => p.id)
+        : JSON.parse(localStorage.getItem('a2m_last_packs') || '[]')
+    );
+    FLOW_STATE = {
+      tool,
+      presetMode: existing ? (isSingleScriptFlow(tool) ? 'script' : 'flow') : activePreset,
+      presetBaseline: existing ? '' : flowPresetSnapshot(tool),
+      runtimes: (rtResp && rtResp.runtimes && rtResp.runtimes.length) ? rtResp.runtimes : FLOW_RUNTIME_FALLBACK,
+      tools: allTools || [],
+      packs: allPacks || [],
+      packSel: selPacks,
+      testResult: null,
+      traceFields: {},
+      stepLiveOutputs: {},
+      toolSamples: {},
+      testing: false,
+      lastTarget: null,
+    };
+    drawFlowEditor();
+    preloadFlowToolSamples();
+  } catch (e) {
+    toast('打开自定义工具编辑器失败：' + e.message, 5000);
+  }
+}
+
+async function fetchToolSampleOutput(toolId) {
+  if (!FLOW_STATE || !toolId) return;
+  if (FLOW_STATE.toolSamples[toolId]) return;
+  FLOW_STATE.toolSamples[toolId] = { loading: true, has_sample: false, source: '', sample: null, fields: [] };
+  try {
+    const r = await api('GET', `/api/tools/${toolId}/sample-output`);
+    const sample = r && r.has_sample ? r.sample : null;
+    FLOW_STATE.toolSamples[toolId] = {
+      loading: false,
+      has_sample: !!sample,
+      source: (r && r.source) || '',
+      sample,
+      fields: sample && typeof sample === 'object' ? extractTraceFieldPaths(sample) : [],
+    };
+  } catch {
+    FLOW_STATE.toolSamples[toolId] = { loading: false, has_sample: false, source: '', sample: null, fields: [] };
+  }
+  if (FLOW_STATE && $('#f-name')) {
+    collectFlowForm();
+    drawFlowEditor();
+  }
+}
+
+function preloadFlowToolSamples() {
+  if (!FLOW_STATE) return;
+  const steps = (FLOW_STATE.tool.config && FLOW_STATE.tool.config.flow && FLOW_STATE.tool.config.flow.steps) || [];
+  for (const s of steps) {
+    if (s.kind === 'tool' && s.tool_name) {
+      const sub = FLOW_STATE.tools.find(x => x.name === s.tool_name);
+      if (sub && sub.id) fetchToolSampleOutput(sub.id);
+    }
+  }
+}
+
+// Lightweight static extractor for JS `return { ... }` object literals to preview script outputs before running a test.
+function inferJSScriptOutputSample(code) {
+  const src = String(code || '');
+  if (!src.trim()) return null;
+  // Find the last `return {` token outside strings/comments
+  let lastBraceIdx = -1;
+  let i = 0;
+  const n = src.length;
+  const skipStrOrComment = (pos) => {
+    const c = src[pos];
+    if (c === '/' && src[pos + 1] === '/') {
+      const nl = src.indexOf('\n', pos + 2);
+      return nl < 0 ? n : nl + 1;
+    }
+    if (c === '/' && src[pos + 1] === '*') {
+      const end = src.indexOf('*/', pos + 2);
+      return end < 0 ? n : end + 2;
+    }
+    if (c === '"' || c === "'" || c === '`') {
+      let j = pos + 1;
+      while (j < n) {
+        if (src[j] === '\\') { j += 2; continue; }
+        if (src[j] === c) return j + 1;
+        j += 1;
+      }
+      return n;
+    }
+    return pos;
+  };
+  while (i < n) {
+    const next = skipStrOrComment(i);
+    if (next !== i) { i = next; continue; }
+    if (src.slice(i, i + 6) === 'return' && (i === 0 || !/[A-Za-z0-9_$]/.test(src[i - 1])) && !/[A-Za-z0-9_$]/.test(src[i + 6] || '')) {
+      let k = i + 6;
+      while (k < n && /\s/.test(src[k])) k += 1;
+      if (src[k] === '{') lastBraceIdx = k;
+      i = k;
+      continue;
+    }
+    i += 1;
+  }
+  if (lastBraceIdx < 0) return null;
+
+  function parseObjLiteral(startIdx, depth) {
+    if (depth > 3 || src[startIdx] !== '{') return null;
+    const obj = {};
+    let p = startIdx + 1;
+    let keyCount = 0;
+    const skipWS = () => {
+      while (p < n) {
+        if (/\s/.test(src[p])) { p += 1; continue; }
+        const nx = skipStrOrComment(p);
+        if (nx !== p && src[p] === '/') { p = nx; continue; }
+        break;
+      }
+    };
+    while (p < n) {
+      skipWS();
+      if (p >= n || src[p] === '}') return { obj, end: p + 1 };
+      let key = '';
+      if (src[p] === '"' || src[p] === "'") {
+        const q = src[p++];
+        const s0 = p;
+        while (p < n && src[p] !== q) { if (src[p] === '\\') p += 2; else p += 1; }
+        key = src.slice(s0, p);
+        if (src[p] === q) p += 1;
+      } else if (/[A-Za-z_$]/.test(src[p])) {
+        const s0 = p;
+        while (p < n && /[A-Za-z0-9_$]/.test(src[p])) p += 1;
+        key = src.slice(s0, p);
+      } else {
+        return keyCount > 0 ? { obj, end: p } : null;
+      }
+      skipWS();
+      if (src[p] === ',' || src[p] === '}') {
+        // ES6 shorthand `{ foo, bar }`
+        obj[key] = `<${key}>`;
+        keyCount += 1;
+        if (src[p] === ',') p += 1;
+        continue;
+      }
+      if (src[p] !== ':') return keyCount > 0 ? { obj, end: p } : null;
+      p += 1;
+      skipWS();
+      if (src[p] === '{') {
+        const nested = parseObjLiteral(p, depth + 1);
+        if (nested) {
+          obj[key] = nested.obj;
+          p = nested.end;
+        } else {
+          obj[key] = {};
+          let b = 1; p += 1;
+          while (p < n && b > 0) {
+            const nx = skipStrOrComment(p); if (nx !== p) { p = nx; continue; }
+            if (src[p] === '{') b += 1; else if (src[p] === '}') b -= 1;
+            p += 1;
+          }
+        }
+      } else if (src[p] === '[') {
+        obj[key] = [];
+        let b = 1; p += 1;
+        while (p < n && b > 0) {
+          const nx = skipStrOrComment(p); if (nx !== p) { p = nx; continue; }
+          if (src[p] === '[') b += 1; else if (src[p] === ']') b -= 1;
+          p += 1;
+        }
+      } else {
+        const v0 = p;
+        let dCurly = 0, dParen = 0, dBrack = 0;
+        while (p < n) {
+          const nx = skipStrOrComment(p);
+          if (nx !== p) { p = nx; continue; }
+          const ch = src[p];
+          if (ch === '{') dCurly += 1;
+          else if (ch === '}') { if (dCurly === 0 && dParen === 0 && dBrack === 0) break; dCurly -= 1; }
+          else if (ch === '(') dParen += 1;
+          else if (ch === ')') dParen -= 1;
+          else if (ch === '[') dBrack += 1;
+          else if (ch === ']') dBrack -= 1;
+          else if (ch === ',' && dCurly === 0 && dParen === 0 && dBrack === 0) break;
+          p += 1;
+        }
+        const rawExpr = src.slice(v0, p).trim();
+        if (rawExpr === 'true') obj[key] = true;
+        else if (rawExpr === 'false') obj[key] = false;
+        else if (rawExpr === 'null') obj[key] = null;
+        else if (/^-?\d+(\.\d+)?$/.test(rawExpr)) obj[key] = Number(rawExpr);
+        else if ((rawExpr.startsWith('"') && rawExpr.endsWith('"')) || (rawExpr.startsWith("'") && rawExpr.endsWith("'"))) obj[key] = rawExpr.slice(1, -1);
+        else obj[key] = `<${rawExpr.slice(0, 32)}>`;
+      }
+      keyCount += 1;
+      skipWS();
+      if (src[p] === ',') p += 1;
+    }
+    return keyCount > 0 ? { obj, end: p } : null;
+  }
+
+  const parsed = parseObjLiteral(lastBraceIdx, 0);
+  return parsed && Object.keys(parsed.obj).length > 0 ? parsed.obj : null;
+}
+
+function getStepSampleInfo(s) {
+  if (!FLOW_STATE || !s) return { sample: null, label: '暂无样本，点击下方「▶ 测试运行」后自动捕获', fields: [] };
+  if (s.id && FLOW_STATE.stepLiveOutputs && FLOW_STATE.stepLiveOutputs[s.id] !== undefined) {
+    const val = FLOW_STATE.stepLiveOutputs[s.id];
+    const fields = val && typeof val === 'object' ? extractTraceFieldPaths(val) : [];
+    return {
+      sample: val,
+      label: `来自本次测试运行${fields.length ? ` · 已提取 ${fields.length} 个字段` : ''}`,
+      fields,
+    };
+  }
+  if (s.kind === 'tool') {
+    const sub = FLOW_STATE.tools.find(x => x.name === s.tool_name);
+    if (!sub) return { sample: null, label: '请先选择目标工具', fields: [] };
+    const info = FLOW_STATE.toolSamples && FLOW_STATE.toolSamples[sub.id];
+    if (info && info.loading) return { sample: null, label: '正在加载工具出参示例…', fields: [] };
+    if (info && info.has_sample) {
+      const srcLabel = info.source === 'recording' ? '来自录制样本' : '来自历史样本';
+      return {
+        sample: info.sample,
+        label: `${srcLabel}${info.fields.length ? ` · 已提取 ${info.fields.length} 个字段` : ''}`,
+        fields: info.fields || [],
+      };
+    }
+    return { sample: null, label: '该工具暂无历史出参样本，点击下方「▶ 测试运行」后自动捕获', fields: [] };
+  }
+  // Script step
+  const rt = s.runtime || 'builtin_js';
+  if (rt === 'builtin_js') {
+    const inferred = inferJSScriptOutputSample(s.code);
+    if (inferred) {
+      const fields = extractTraceFieldPaths(inferred);
+      return {
+        sample: inferred,
+        label: `根据脚本代码静态解析 · 已识别 ${fields.length} 个字段（测试运行后更新为真实数据）`,
+        fields,
+      };
+    }
+  }
+  return { sample: null, label: '点击下方「▶ 测试运行」后自动捕获真实出参示例', fields: [] };
+}
+
+function getStepFieldSuggestions(stepId) {
+  if (!FLOW_STATE || !stepId) return [];
+  const merged = [];
+  const seen = new Set();
+  const addAll = (arr) => {
+    for (const f of arr || []) {
+      if (!seen.has(f)) { seen.add(f); merged.push(f); }
+    }
+  };
+  if (FLOW_STATE.traceFields && FLOW_STATE.traceFields[stepId]) {
+    addAll(FLOW_STATE.traceFields[stepId]);
+  }
+  const steps = (FLOW_STATE.tool.config && FLOW_STATE.tool.config.flow && FLOW_STATE.tool.config.flow.steps) || [];
+  const targetStep = steps.find(x => x.id === stepId);
+  if (targetStep) {
+    addAll(getStepSampleInfo(targetStep).fields);
+  }
+  return merged;
+}
+
+function flowComputeStages(steps) {
+  const out = [];
+  let stage = 0;
+  steps.forEach((s, idx) => {
+    if (idx === 0 || !s.parallel_with_prev) stage += 1;
+    out.push({ stage, parallel: idx > 0 && !!s.parallel_with_prev });
+  });
+  return out;
+}
+
+function flowUniqueStepId(steps, prefix) {
+  const used = new Set(steps.map(s => String(s.id || '').trim()).filter(Boolean));
+  let n = steps.length + 1;
+  while (used.has(`${prefix}_${n}`)) n += 1;
+  return `${prefix}_${n}`;
+}
+
+function parseFlowArgExpr(raw) {
+  const s = String(raw ?? '').trim();
+  const inMatch = s.match(/^\{\{\s*input\.([A-Za-z0-9_-]+)\s*\}\}$/);
+  if (inMatch) return { source: 'input', name: inMatch[1] };
+  const stMatch = s.match(/^\{\{\s*steps\.([A-Za-z0-9_]+)(?:\.([^\s\}]+))?\s*\}\}$/);
+  if (stMatch) return { source: 'step', stepId: stMatch[1], path: stMatch[2] || '' };
+  return { source: 'literal', value: String(raw ?? '') };
+}
+
+function composeFlowArgExpr(source, primary, secondary) {
+  if (source === 'input') {
+    const n = String(primary || '').trim();
+    return n ? `{{input.${n}}}` : '';
+  }
+  if (source === 'step') {
+    const sid = String(primary || '').trim();
+    const path = String(secondary || '').trim().replace(/^\.+/, '');
+    if (!sid) return '';
+    return path ? `{{steps.${sid}.${path}}}` : `{{steps.${sid}}}`;
+  }
+  return String(primary ?? '');
+}
+
+function extractTraceFieldPaths(val, prefix = '', out = [], limit = 80) {
+  if (out.length >= limit || val === null || val === undefined) return out;
+  if (Array.isArray(val)) {
+    if (prefix) out.push(prefix);
+    if (val.length > 0 && out.length < limit) {
+      extractTraceFieldPaths(val[0], prefix ? `${prefix}.0` : '0', out, limit);
+    }
+    return out;
+  }
+  if (typeof val === 'object') {
+    if (prefix) out.push(prefix);
+    for (const k of Object.keys(val)) {
+      if (out.length >= limit) break;
+      const next = prefix ? `${prefix}.${k}` : k;
+      const child = val[k];
+      if (child !== null && typeof child === 'object') {
+        extractTraceFieldPaths(child, next, out, limit);
+      } else {
+        out.push(next);
+      }
+    }
+    return out;
+  }
+  if (prefix) out.push(prefix);
+  return out;
+}
+
+function syncFlowDerivedParams() {
+  if (!FLOW_STATE) return;
+  const t = FLOW_STATE.tool;
+  t.params = Array.isArray(t.params) ? t.params : [];
+  const referenced = new Map(); // paramName -> subToolParamMeta | null
+  const inputRefRe = /\{\{\s*input\.([A-Za-z0-9_-]+)\s*\}\}/g;
+
+  for (const s of (t.config && t.config.flow && t.config.flow.steps) || []) {
+    const sub = s.kind === 'tool' ? FLOW_STATE.tools.find(x => x.name === s.tool_name) : null;
+    const subParams = new Map(((sub && sub.params) || []).map(p => [p.name, p]));
+    if (s.args_from) {
+      for (const m of String(s.args_from).matchAll(inputRefRe)) {
+        if (!referenced.has(m[1])) referenced.set(m[1], null);
+      }
+    }
+    for (const [k, v] of Object.entries(s.args || {})) {
+      const strVal = String(v ?? '');
+      for (const m of strVal.matchAll(inputRefRe)) {
+        const refName = m[1];
+        const meta = subParams.get(k) || subParams.get(refName) || null;
+        if (!referenced.has(refName) || (!referenced.get(refName) && meta)) {
+          referenced.set(refName, meta);
+        }
+      }
+    }
+  }
+
+  const existingByName = new Map(t.params.filter(p => p.name).map(p => [p.name, p]));
+  for (const [refName, meta] of referenced.entries()) {
+    if (!existingByName.has(refName)) {
+      const created = {
+        name: refName,
+        type: (meta && meta.type) || 'string',
+        required: meta ? !!meta.required : true,
+        default: (meta && meta.default) || '',
+        test_value: (meta && meta.test_value) || '',
+        description: (meta && meta.description) || '',
+        _auto: true,
+      };
+      t.params.push(created);
+      existingByName.set(refName, created);
+    }
+  }
+  // Drop untouched auto-derived params that are no longer referenced by any node
+  t.params = t.params.filter(p => {
+    if (!p._auto) return true;
+    if (referenced.has(p.name)) return true;
+    if (p.test_value) return true;
+    return false;
+  });
+}
+
+function collectFlowForm() {
+  if (!FLOW_STATE || !$('#f-name')) return;
+  const t = FLOW_STATE.tool;
+  t.name = $('#f-name').value.trim();
+  t.title = $('#f-title').value.trim();
+  t.description = $('#f-desc').value.trim();
+  t.method = 'FLOW';
+  t.url = t.url || 'flow://custom';
+  t.approval = $('#f-approval').value || 'off';
+  t.config = t.config || {};
+  t.config.op_kind = ($('#f-op-kind') && $('#f-op-kind').value) || 'auto';
+
+  const params = [];
+  document.querySelectorAll('#f-params-body tr[data-pi]').forEach(tr => {
+    const idx = +tr.dataset.pi;
+    const prev = t.params[idx] || {};
+    params.push({
+      ...prev,
+      name: ($('.fp-name', tr)?.value || '').trim(),
+      type: $('.fp-type', tr)?.value || 'string',
+      required: !!$('.fp-req', tr)?.checked,
+      default: $('.fp-def', tr)?.value ?? '',
+      test_value: $('.fp-test', tr)?.value ?? '',
+      description: $('.fp-desc', tr)?.value ?? '',
+    });
+  });
+  t.params = params;
+
+  const flow = t.config.flow = t.config.flow || { steps: [], output: { mode: 'last', template: '' } };
+  document.querySelectorAll('#f-steps-list .flow-step-card[data-si]').forEach(card => {
+    const si = +card.dataset.si;
+    const s = flow.steps[si];
+    if (!s) return;
+    s.id = ($('.f-step-id', card)?.value || '').trim();
+    s.name = ($('.f-step-name', card)?.value || '').trim();
+    const parEl = $('.f-step-parallel', card);
+    s.parallel_with_prev = si > 0 && !!(parEl && parEl.checked);
+    const collectStepArgs = () => {
+      const args = {};
+      card.querySelectorAll('.f-step-arg-row').forEach(row => {
+        const k = ($('.f-step-arg-key', row)?.value || '').trim();
+        if (!k) return;
+        const src = $('.f-arg-src', row)?.value || 'literal';
+        let expr = '';
+        if (src === 'input') {
+          expr = composeFlowArgExpr('input', $('.f-arg-in-name', row)?.value || '');
+        } else if (src === 'step') {
+          expr = composeFlowArgExpr('step', $('.f-arg-step-id', row)?.value || '', $('.f-arg-step-path', row)?.value || '');
+        } else {
+          expr = $('.f-step-arg-val', row)?.value ?? '';
+        }
+        args[k] = expr;
+      });
+      return args;
+    };
+    if (s.kind === 'tool') {
+      const toolSel = $('.f-step-tool', card);
+      if (toolSel) s.tool_name = toolSel.value;
+      s.args = collectStepArgs();
+    } else {
+      const rtSel = $('.f-step-runtime', card);
+      if (rtSel) s.runtime = rtSel.value;
+      const codeEl = $('.f-step-code', card);
+      if (codeEl) s.code = codeEl.value;
+      s.args = collectStepArgs();
+    }
+  });
+
+  flow.output = {
+    mode: ($('#f-out-mode') && $('#f-out-mode').value) || 'last',
+    template: ($('#f-out-tpl') && $('#f-out-tpl').value) || '',
+  };
+  FLOW_STATE.packSel = new Set([...document.querySelectorAll('.f-pack:checked')].map(x => +x.value));
+}
+
+function flowSubToolOptions(currentToolName) {
+  const selfId = FLOW_STATE.tool.id;
+  return FLOW_STATE.tools.filter(x => !selfId || x.id !== selfId).map(x => ({
+    name: x.name,
+    label: `${x.name}${x.title ? ' — ' + x.title : ''} [${String(x.method || '').toUpperCase() === 'FLOW' ? 'FLOW' : x.method}]`,
+    tool: x,
+  }));
+}
+
+function renderFlowArgControl(si, paramKey, rawVal, prevSteps) {
+  const parsed = parseFlowArgExpr(rawVal);
+  const src = parsed.source;
+  const stepOptions = prevSteps.map(ps => ps.id);
+  const curStepId = parsed.stepId || stepOptions[0] || '';
+  const fieldListId = curStepId ? `flow-fields-${si}-${curStepId}` : '';
+  const fieldSuggestions = getStepFieldSuggestions(curStepId);
+
+  return `<div class="flow-arg-ctrl">
+    <select class="f-arg-src" aria-label="参数来源" onchange="onFlowArgSourceChange(${si}, '${esc(paramKey)}', this.value)">
+      <option value="input" ${src === 'input' ? 'selected' : ''}>工具入参</option>
+      <option value="step" ${src === 'step' ? 'selected' : ''} ${stepOptions.length === 0 && src !== 'step' ? 'disabled' : ''}>前置节点出参</option>
+      <option value="literal" ${src === 'literal' ? 'selected' : ''}>固定值 / 模板</option>
+    </select>
+    ${src === 'input'
+      ? `<input class="f-arg-in-name mono" value="${esc(parsed.name || paramKey)}" placeholder="对外入参名" onchange="onFlowArgInputChange()">`
+      : src === 'step'
+      ? `<select class="f-arg-step-id mono" onchange="onFlowArgStepIdChange(${si}, '${esc(paramKey)}', this.value)">
+          ${(stepOptions.includes(curStepId) ? stepOptions : [curStepId, ...stepOptions].filter(Boolean)).map(id => `<option value="${esc(id)}" ${id === curStepId ? 'selected' : ''}>${esc(id)}</option>`).join('')}
+        </select>
+        <input class="f-arg-step-path mono" list="${esc(fieldListId)}" value="${esc(parsed.path || '')}" placeholder="字段路径，如 body.0.customerId（留空取整个输出）" onchange="onFlowArgInputChange()">
+        ${fieldSuggestions.length ? `<datalist id="${esc(fieldListId)}">${fieldSuggestions.map(fp => `<option value="${esc(fp)}"></option>`).join('')}</datalist>` : ''}`
+      : `<input class="f-step-arg-val mono" data-si="${si}" data-key="${esc(paramKey)}" value="${esc(parsed.value ?? '')}" placeholder="固定值或 {{cfg.x}} / {{input.x}} / {{steps.prev.field}}" onfocus="setFlowVarTarget(this)" onkeyup="setFlowVarTarget(this)" onmouseup="setFlowVarTarget(this)" onchange="onFlowArgInputChange()">`}
+  </div>`;
+}
+
+function renderFlowStepOutputSample(s) {
+  const info = getStepSampleInfo(s);
+  const body = info.sample !== null && info.sample !== undefined
+    ? `<pre>${esc(formatTraceVal(info.sample))}</pre>`
+    : `<div class="muted small" style="margin-top:6px">${esc(info.label)}</div>`;
+  return `<details class="flow-sample-box">
+    <summary>出参示例 <span class="muted small">（${esc(info.label)}）</span></summary>
+    ${body}
+  </details>`;
+}
+
+function refreshScriptStepSample(si, code) {
+  if (!FLOW_STATE) return;
+  const s = FLOW_STATE.tool.config.flow.steps[si];
+  if (!s || s.kind !== 'script') return;
+  s.code = code;
+  const box = $(`#f-step-sample-${si}`);
+  if (box) {
+    const wasOpen = !!($('details', box)?.open);
+    box.innerHTML = renderFlowStepOutputSample(s);
+    if (wasOpen && $('details', box)) $('details', box).open = true;
+  }
+}
+
+function renderFlowStepToolBody(s, si, stage, steps) {
+  const opts = flowSubToolOptions(s.tool_name);
+  const selectedTool = FLOW_STATE.tools.find(x => x.name === s.tool_name);
+  const knownParams = selectedTool && Array.isArray(selectedTool.params) ? selectedTool.params : [];
+  const knownNames = new Set(knownParams.map(p => p.name));
+  const curArgs = (s.args && typeof s.args === 'object') ? s.args : {};
+  const extraKeys = Object.keys(curArgs).filter(k => !knownNames.has(k));
+
+  const prevSteps = steps.filter((_, idx) => FLOW_STATE._stages[idx].stage < stage && steps[idx].id);
+  const inputChips = (FLOW_STATE.tool.params || []).filter(p => p.name).map(p => `{{input.${p.name}}}`);
+  const stepChips = prevSteps.map(p => `{{steps.${p.id}}}`);
+  const allChips = [...inputChips, ...stepChips];
+
+  return `
+    <div class="form-grid" style="margin-top:6px">
+      <label for="f-step-tool-${si}">目标工具 *</label>
+      <div>
+        <select id="f-step-tool-${si}" class="f-step-tool" style="width:100%" onchange="onFlowStepToolChange(${si}, this.value)">
+          <option value="">-- 请选择要编排的已有工具 --</option>
+          ${opts.map(o => `<option value="${esc(o.name)}" ${o.name === s.tool_name ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}
+        </select>
+        ${selectedTool ? `<div class="flow-step-meta">${toolTypeBadge(selectedTool)}<span class="mono">${esc(selectedTool.url || '')}</span>${selectedTool.description ? `<span>· ${esc(selectedTool.description)}</span>` : ''}</div>` : ''}
+      </div>
+      <label>入参映射</label>
+      <div>
+        ${(knownParams.length === 0 && extraKeys.length === 0)
+          ? '<div class="muted small">当前子工具没有声明入参，如需额外字段可点击下方按钮添加。</div>'
+          : `<table class="flow-param-table">
+              <tr><th style="width:24%">入参字段</th><th>来源与取值（选「工具入参」自动同步到上方「2. 对外入参定义」）</th><th style="width:76px">操作</th></tr>
+              ${knownParams.map(p => `
+                <tr class="f-step-arg-row">
+                  <td>
+                    <input type="hidden" class="f-step-arg-key" value="${esc(p.name)}">
+                    <span class="mono">${esc(p.name)}</span>${p.required ? ' <span class="st-bad">*</span>' : ''}
+                    <div class="muted small">${esc(p.type || 'string')}${p.description ? ' · ' + esc(p.description) : ''}</div>
+                  </td>
+                  <td>${renderFlowArgControl(si, p.name, curArgs[p.name] ?? '', prevSteps)}</td>
+                  <td class="muted small">${p.default ? `默认: <code>${esc(p.default)}</code>` : '-'}</td>
+                </tr>`).join('')}
+              ${extraKeys.map(k => `
+                <tr class="f-step-arg-row">
+                  <td><input class="f-step-arg-key mono" value="${esc(k)}" placeholder="参数名" onchange="onFlowArgInputChange()"></td>
+                  <td>${renderFlowArgControl(si, k, curArgs[k] ?? '', prevSteps)}</td>
+                  <td><button type="button" class="sm danger" onclick="removeFlowStepArg(${si}, '${esc(k)}')">移除</button></td>
+                </tr>`).join('')}
+            </table>`}
+        <div class="row" style="margin-top:8px">
+          <button type="button" class="sm" onclick="addFlowStepCustomArg(${si})">＋ 添加额外入参</button>
+          <span class="muted small">选「前置节点出参」时，已自动提供上游样本字段联想</span>
+        </div>
+        ${allChips.length ? `<div class="var-chips"><span class="small muted">模板输入框快捷插入：</span>${allChips.map(c => `<button type="button" class="var-chip" onclick="insertFlowVar(${si}, '${esc(c)}')">${esc(c)}</button>`).join('')}</div>` : ''}
+      </div>
+      <label>出参示例</label>
+      <div>${renderFlowStepOutputSample(s)}</div>
+    </div>`;
+}
+
+function renderFlowStepScriptBody(s, si, stage, steps) {
+  const rtId = s.runtime || 'builtin_js';
+  const rtInfo = FLOW_STATE.runtimes.find(r => r.id === rtId) || { id: rtId, label: runtimeDisplayLabel(rtId), available: rtId === 'builtin_js' };
+  const prevSteps = steps.filter((_, idx) => FLOW_STATE._stages[idx].stage < stage && steps[idx].id);
+  const inputNames = (FLOW_STATE.tool.params || []).filter(p => p.name).map(p => p.name);
+  const isJS = rtId === 'builtin_js';
+  const curArgs = (s.args && typeof s.args === 'object') ? s.args : {};
+  const argKeys = Object.keys(curArgs);
+
+  return `
+    <div class="form-grid" style="margin-top:6px">
+      <label for="f-step-rt-${si}">运行环境</label>
+      <div>
+        <div class="row">
+          <select id="f-step-rt-${si}" class="f-step-runtime grow" onchange="onFlowStepRuntimeChange(${si}, this.value)">
+            ${FLOW_STATE.runtimes.map(r => `<option value="${esc(r.id)}" ${r.id === rtId ? 'selected' : ''}>${r.available ? '✓' : '⚠'} ${esc(r.label)}</option>`).join('')}
+          </select>
+          <button type="button" class="sm" onclick="insertFlowSampleCode(${si})">插入示例代码</button>
+        </div>
+        <div class="runtime-status ${rtInfo.available ? 'ok' : 'warn'}">
+          <span>${rtInfo.available ? '✓' : '⚠'}</span>
+          <div>
+            <b>${esc(rtInfo.label)} ${rtInfo.available ? '已就绪' : '未检测到本地环境'}</b>
+            ${rtInfo.version ? ` · <span class="mono">${esc(rtInfo.version)}</span>` : ''}
+            ${rtInfo.path ? `<div class="small muted mono">${esc(rtInfo.path)}</div>` : ''}
+            ${!rtInfo.available && rtInfo.hint ? `<div>${esc(rtInfo.hint)}</div>` : ''}
+          </div>
+        </div>
+      </div>
+      <label>入参映射</label>
+      <div>
+        ${argKeys.length === 0
+          ? '<div class="muted small">可选：显式声明脚本依赖的入参变量（未配置时脚本也可直接读 <code>input.*</code> 和 <code>steps.*</code>）。</div>'
+          : `<table class="flow-param-table">
+              <tr><th style="width:24%">脚本变量名</th><th>来源与取值（选「工具入参」自动同步到上方「2. 对外入参定义」）</th><th style="width:76px">操作</th></tr>
+              ${argKeys.map(k => `
+                <tr class="f-step-arg-row">
+                  <td><input class="f-step-arg-key mono" value="${esc(k)}" placeholder="变量名" onchange="onFlowArgInputChange()"></td>
+                  <td>${renderFlowArgControl(si, k, curArgs[k] ?? '', prevSteps)}</td>
+                  <td><button type="button" class="sm danger" onclick="removeFlowStepArg(${si}, '${esc(k)}')">移除</button></td>
+                </tr>`).join('')}
+            </table>`}
+        <div class="row" style="margin-top:8px">
+          <button type="button" class="sm" onclick="addFlowStepCustomArg(${si})">＋ 添加脚本入参</button>
+          <span class="muted small">${isJS ? '映射的字段可在脚本中直接按变量名、<code>params.字段</code> 或 <code>input.字段</code> 读取' : '映射的字段会随 stdin JSON 的 <code>params</code> 与 <code>input</code> 一并传入'}</span>
+        </div>
+      </div>
+      <label for="f-step-code-${si}">脚本源码 *</label>
+      <div>
+        <div class="small muted">
+          ${isJS
+            ? `约定入口：<code>function main(input, steps) { ... return {...}; }</code>。支持正则 <code>/pattern/g</code>、<code>JSON</code>/<code>Object</code>/<code>Array</code>/<code>Math</code>/<code>console.log</code>，以及动态调用已有工具：<code>callTool("工具名", { 参数 })</code>。`
+            : `运行时通过标准输入传入 JSON：<code>{"input": {...}, "params": {...}, "steps": {...}}</code>（路径亦写入 <code>A2M_CONTEXT_FILE</code>），stdout 末尾 JSON 将作为本节点输出。`}
+        </div>
+        ${(argKeys.length || inputNames.length || prevSteps.length) ? `<div class="var-chips">
+          <span class="small muted">${isJS ? '点击插入表达式：' : '可用数据键名：'}</span>
+          ${argKeys.map(k => `<button type="button" class="var-chip" onclick="insertFlowCodeSnippet(${si}, '${esc(isJS ? k : k)}')">${esc(isJS ? k : 'params["' + k + '"]')}</button>`).join('')}
+          ${inputNames.filter(n => !argKeys.includes(n)).map(n => `<button type="button" class="var-chip" onclick="insertFlowCodeSnippet(${si}, '${esc(isJS ? 'input.' + n : n)}')">${esc(isJS ? 'input.' + n : 'input["' + n + '"]')}</button>`).join('')}
+          ${prevSteps.map(p => `<button type="button" class="var-chip" onclick="insertFlowCodeSnippet(${si}, '${esc(isJS ? 'steps.' + p.id : p.id)}')">${esc(isJS ? 'steps.' + p.id : 'steps["' + p.id + '"]')}</button>`).join('')}
+        </div>` : ''}
+        <textarea id="f-step-code-${si}" class="flow-code f-step-code" spellcheck="false" onfocus="setFlowVarTarget(this)" onkeyup="setFlowVarTarget(this)" onmouseup="setFlowVarTarget(this)" onblur="refreshScriptStepSample(${si}, this.value)">${esc(s.code || '')}</textarea>
+      </div>
+      <label>出参示例</label>
+      <div id="f-step-sample-${si}">${renderFlowStepOutputSample(s)}</div>
+    </div>`;
+}
+
+function drawFlowEditor() {
+  const st = FLOW_STATE;
+  const t = st.tool;
+  const flow = t.config.flow;
+  const steps = flow.steps;
+  st._stages = flowComputeStages(steps);
+  const titleText = t.id ? '编辑自定义工具' : '新建自定义工具';
+  const stageVars = [
+    ...(t.params || []).filter(p => p.name).map(p => `{{input.${p.name}}}`),
+    ...steps.filter(s => s.id).map(s => `{{steps.${s.id}}}`),
+  ];
+
+  openModal(`<form class="flow-editor" onsubmit="event.preventDefault();saveCustomTool()">
+    <h2>${esc(titleText)} ${toolTypeBadge(t)}</h2>
+    <p class="muted small" style="margin:-8px 0 12px">将脚本或现有工具作为编排节点，支持串行与「与上一步并行 ⚡」，保存后加入流程包即可暴露为一个统一工具给 AI。</p>
+    ${!t.id ? `<div class="flow-preset-bar" role="group" aria-label="选择初始模板">
+      <button type="button" class="flow-preset-btn ${st.presetMode === 'script' ? 'active' : ''}" aria-pressed="${st.presetMode === 'script'}" onclick="switchFlowPreset('script')">
+        <span class="flow-preset-title"><span class="badge m-SCRIPT">SCRIPT</span> 自定义脚本模板</span>
+        <span class="flow-preset-desc">单个脚本节点起步（内置 JS / Python / Go / Java / Node / Shell），也可随时追加工具节点</span>
+      </button>
+      <button type="button" class="flow-preset-btn ${st.presetMode === 'flow' ? 'active' : ''}" aria-pressed="${st.presetMode === 'flow'}" onclick="switchFlowPreset('flow')">
+        <span class="flow-preset-title"><span class="badge m-FLOW">FLOW</span> 多工具编排模板</span>
+        <span class="flow-preset-desc">「调用子工具 + 脚本处理」起步，适合串联或并行组合多个现有工具</span>
+      </button>
+    </div>` : ''}
+
+    <fieldset class="flow-sec">
+      <legend>1. 基本信息与流程包归属</legend>
+      <div class="form-grid">
+        <label for="f-name">工具标识 *</label>
+        <input id="f-name" class="mono" value="${esc(t.name)}" placeholder="my_custom_tool（英文、数字、下划线）" required>
+        <label for="f-title">显示名称</label>
+        <input id="f-title" value="${esc(t.title)}" placeholder="例如：聚合用户信息并生成报表">
+        <label for="f-desc">用途说明（给 AI 看）</label>
+        <input id="f-desc" value="${esc(t.description)}" placeholder="告诉 AI 什么时候调用它、需要传什么参数、返回什么结果">
+        <label for="f-approval">审批与操作类型</label>
+        <div class="row">
+          <select id="f-approval"><option value="off" ${t.approval !== 'always' ? 'selected' : ''}>不审批</option><option value="always" ${t.approval === 'always' ? 'selected' : ''}>每次都审批</option></select>
+          <select id="f-op-kind"><option value="auto" ${(t.config.op_kind || 'auto') === 'auto' ? 'selected' : ''}>操作类型：自动（按审批设置）</option><option value="read" ${t.config.op_kind === 'read' ? 'selected' : ''}>操作类型：只读</option><option value="write" ${t.config.op_kind === 'write' ? 'selected' : ''}>操作类型：写操作</option></select>
+        </div>
+        <label>放进流程包</label>
+        <div>
+          <div class="row">${st.packs.map(p => `<label class="chk"><input type="checkbox" class="f-pack" value="${p.id}" ${st.packSel.has(p.id) ? 'checked' : ''}> ${esc(p.name)} ${p.enabled ? '<span class="badge" style="background:#dcfce7;color:#15803d">已开启</span>' : ''}</label>`).join('')}
+            <input id="f-newpack" placeholder="或新建流程包，如：自动化工具" style="width:210px"></div>
+          <div class="muted small" style="margin-top:4px">提示：可只把编排后的总工具放进「已开启」流程包，原子子工具无需对 AI 暴露。</div>
+        </div>
+      </div>
+    </fieldset>
+
+    <fieldset class="flow-sec">
+      <legend>2. 对外入参定义（AI 调用参数 & 控制台测试值）</legend>
+      <div class="flow-sec-head">
+        <span class="muted small">节点参数来源设为「工具入参」时会自动同步到此表；「测试值」仅用于本页「▶ 测试运行」，不会在 AI 调用时误传。</span>
+        <div class="row">
+          <button type="button" class="sm" onclick="extractFlowSubToolParams()">⚡ 从子工具同步入参</button>
+          <button type="button" class="sm pri" onclick="addFlowParam()">＋ 添加入参</button>
+        </div>
+      </div>
+      <div id="f-params-body">
+        ${(t.params || []).length === 0
+          ? '<div class="muted small">当前没有对外入参（若脚本/工具不需要传参可直接测试，或在下方工具节点中将参数来源设为「工具入参」自动添加）。</div>'
+          : `<table class="flow-param-table">
+              <tr><th style="width:170px">参数名 *</th><th style="width:76px">类型</th><th style="width:40px;text-align:center">必填</th><th style="width:96px">默认值</th><th style="width:168px">测试值 (仅测试)</th><th>说明（给 AI 看）</th><th style="width:56px">操作</th></tr>
+              ${(t.params || []).map((p, i) => `<tr data-pi="${i}">
+                <td><input class="fp-name mono" value="${esc(p.name)}" placeholder="param_name"></td>
+                <td><select class="fp-type">${['string','number','integer','boolean','object','array'].map(x => `<option ${x === (p.type || 'string') ? 'selected' : ''}>${x}</option>`).join('')}</select></td>
+                <td style="text-align:center"><input type="checkbox" class="fp-req" ${p.required ? 'checked' : ''}></td>
+                <td><input class="fp-def mono" value="${esc(p.default || '')}" placeholder="选填默认值"></td>
+                <td><input class="fp-test mono" value="${esc(p.test_value || '')}" placeholder="测试运行样例"></td>
+                <td><input class="fp-desc" value="${esc(p.description || '')}" placeholder="参数用途说明"></td>
+                <td><button type="button" class="sm danger" onclick="removeFlowParam(${i})">删除</button></td>
+              </tr>`).join('')}
+            </table>`}
+      </div>
+    </fieldset>
+
+    <fieldset class="flow-sec">
+      <legend>3. 节点编排流水线（共 ${steps.length} 个节点）</legend>
+      <div id="f-steps-list" class="flow-steps-list">
+        ${steps.map((s, si) => {
+          const stg = st._stages[si];
+          return `<div class="flow-step-card" data-si="${si}">
+            <div class="flow-step-head">
+              <span class="flow-stage-badge ${stg.parallel ? 'parallel' : ''}">Stage ${stg.stage}${stg.parallel ? ' · 与上一步并行 ⚡' : ''}</span>
+              <span class="badge ${s.kind === 'tool' ? 'm-GET' : 'm-SCRIPT'}">${s.kind === 'tool' ? '工具节点' : '脚本节点'}</span>
+              <input class="flow-step-id f-step-id mono" value="${esc(s.id)}" placeholder="节点ID" title="节点 ID，后续节点通过 steps.<ID> 引用此节点输出">
+              <input class="flow-step-name f-step-name" value="${esc(s.name || '')}" placeholder="节点名称（可选）">
+              ${si > 0 ? `<label class="flow-parallel-chk"><input type="checkbox" class="f-step-parallel" ${s.parallel_with_prev ? 'checked' : ''} onchange="toggleFlowStepParallel(${si}, this.checked)"> 与上一步并行 ⚡</label>` : ''}
+              <button type="button" class="sm" ${si === 0 ? 'disabled' : ''} onclick="moveFlowStep(${si}, -1)" title="上移">↑</button>
+              <button type="button" class="sm" ${si === steps.length - 1 ? 'disabled' : ''} onclick="moveFlowStep(${si}, 1)" title="下移">↓</button>
+              <button type="button" class="sm danger" ${steps.length <= 1 ? 'disabled' : ''} onclick="removeFlowStep(${si})">删除</button>
+            </div>
+            ${s.kind === 'tool' ? renderFlowStepToolBody(s, si, stg.stage, steps) : renderFlowStepScriptBody(s, si, stg.stage, steps)}
+          </div>`;
+        }).join('')}
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button type="button" onclick="addFlowStep('tool')">＋ 添加现有工具节点</button>
+        <button type="button" onclick="addFlowStep('script')">＋ 添加自定义脚本节点</button>
+      </div>
+    </fieldset>
+
+    <fieldset class="flow-sec">
+      <legend>4. 最终出参格式</legend>
+      <div class="form-grid">
+        <label for="f-out-mode">返回方式</label>
+        <div>
+          <select id="f-out-mode" onchange="onFlowOutModeChange(this.value)">
+            <option value="last" ${(flow.output.mode || 'last') !== 'template' ? 'selected' : ''}>默认：使用最后一个节点（或最后 Stage）的返回结果</option>
+            <option value="template" ${flow.output.mode === 'template' ? 'selected' : ''}>自定义模板拼接（JSON / 文本）</option>
+          </select>
+        </div>
+        ${flow.output.mode === 'template' ? `
+          <label for="f-out-tpl">输出模板</label>
+          <div>
+            ${stageVars.length ? `<div class="var-chips" style="margin-top:0;margin-bottom:6px"><span class="small muted">点击插入变量：</span>${stageVars.map(v => `<button type="button" class="var-chip" onclick="insertFlowOutputVar('${esc(v)}')">${esc(v)}</button>`).join('')}</div>` : ''}
+            <textarea id="f-out-tpl" style="min-height:90px" placeholder='{"summary":"{{steps.step_1}}","raw":{{steps.merge_js}}}' onfocus="setFlowVarTarget(this)" onkeyup="setFlowVarTarget(this)" onmouseup="setFlowVarTarget(this)">${esc(flow.output.template || '')}</textarea>
+          </div>` : ''}
+      </div>
+    </fieldset>
+
+    <div class="flow-actions">
+      <button type="button" class="pri" ${st.testing ? 'disabled' : ''} onclick="runFlowDraftTest()">${st.testing ? '正在测试运行…' : '▶ 测试运行（按默认入参）'}</button>
+      <div class="row">
+        <button type="button" onclick="closeModal()">取消</button>
+        <button type="submit" class="pri big">保存自定义工具</button>
+      </div>
+    </div>
+    <div id="flow-test-out" style="margin-top:12px">${st.testResult ? renderFlowRunResult(st.testResult) : ''}</div>
+  </form>`);
+}
+
+function setFlowVarTarget(el) {
+  if (!FLOW_STATE || !el) return;
+  FLOW_STATE.lastTargetEl = el;
+  FLOW_STATE.lastTargetStart = el.selectionStart ?? el.value.length;
+  FLOW_STATE.lastTargetEnd = el.selectionEnd ?? el.value.length;
+}
+
+function insertIntoTextInput(el, snippet) {
+  if (!el) return;
+  const start = el.selectionStart ?? el.value.length;
+  const end = el.selectionEnd ?? el.value.length;
+  el.value = el.value.slice(0, start) + snippet + el.value.slice(end);
+  const nextPos = start + snippet.length;
+  el.focus();
+  if (el.setSelectionRange) el.setSelectionRange(nextPos, nextPos);
+  setFlowVarTarget(el);
+}
+
+function insertFlowVar(si, token) {
+  const card = document.querySelector(`#f-steps-list .flow-step-card[data-si="${si}"]`);
+  let target = FLOW_STATE.lastTargetEl;
+  if (!target || !card || !card.contains(target) || !target.classList.contains('f-step-arg-val')) {
+    const inputs = card ? [...card.querySelectorAll('.f-step-arg-val')] : [];
+    target = inputs.find(i => !i.value.trim()) || inputs[0];
+  }
+  if (!target) { toast('该节点暂无可填入的变量输入框'); return; }
+  insertIntoTextInput(target, token);
+}
+
+function insertFlowCodeSnippet(si, expr) {
+  const card = document.querySelector(`#f-steps-list .flow-step-card[data-si="${si}"]`);
+  const area = card && $('.f-step-code', card);
+  if (area) insertIntoTextInput(area, expr);
+}
+
+function insertFlowOutputVar(token) {
+  const el = $('#f-out-tpl');
+  if (el) insertIntoTextInput(el, token);
+}
+
+function addFlowParam() {
+  collectFlowForm();
+  FLOW_STATE.tool.params.push({ name: '', type: 'string', required: true, default: '', test_value: '', description: '' });
+  drawFlowEditor();
+}
+
+function removeFlowParam(idx) {
+  collectFlowForm();
+  FLOW_STATE.tool.params.splice(idx, 1);
+  drawFlowEditor();
+}
+
+function onFlowArgSourceChange(si, paramKey, newSrc) {
+  collectFlowForm();
+  const s = FLOW_STATE.tool.config.flow.steps[si];
+  if (!s) return;
+  s.args = s.args || {};
+  const stages = flowComputeStages(FLOW_STATE.tool.config.flow.steps);
+  const myStage = stages[si] ? stages[si].stage : 1;
+  const prevSteps = FLOW_STATE.tool.config.flow.steps.filter((_, idx) => stages[idx].stage < myStage && FLOW_STATE.tool.config.flow.steps[idx].id);
+  if (newSrc === 'input') {
+    s.args[paramKey] = `{{input.${paramKey}}}`;
+  } else if (newSrc === 'step') {
+    const firstPrev = prevSteps[0] ? prevSteps[0].id : '';
+    s.args[paramKey] = firstPrev ? `{{steps.${firstPrev}.${paramKey}}}` : '';
+  } else {
+    s.args[paramKey] = '';
+  }
+  syncFlowDerivedParams();
+  drawFlowEditor();
+}
+
+function onFlowArgStepIdChange(si, paramKey, stepId) {
+  collectFlowForm();
+  const s = FLOW_STATE.tool.config.flow.steps[si];
+  if (!s) return;
+  const parsed = parseFlowArgExpr((s.args && s.args[paramKey]) || '');
+  s.args[paramKey] = composeFlowArgExpr('step', stepId, parsed.path || '');
+  syncFlowDerivedParams();
+  drawFlowEditor();
+}
+
+function onFlowArgInputChange() {
+  collectFlowForm();
+  syncFlowDerivedParams();
+  drawFlowEditor();
+}
+
+function extractFlowSubToolParams() {
+  collectFlowForm();
+  const before = (FLOW_STATE.tool.params || []).length;
+  syncFlowDerivedParams();
+  const after = (FLOW_STATE.tool.params || []).length;
+  drawFlowEditor();
+  toast(after > before ? `已自动同步 ${after - before} 个来源为「工具入参」的字段到对外入参定义` : '对外入参已与各节点「工具入参」完全同步');
+}
+
+function onFlowStepToolChange(si, toolName) {
+  collectFlowForm();
+  const s = FLOW_STATE.tool.config.flow.steps[si];
+  if (!s) return;
+  s.tool_name = toolName;
+  const sub = FLOW_STATE.tools.find(x => x.name === toolName);
+  const nextArgs = {};
+  if (sub && Array.isArray(sub.params)) {
+    for (const p of sub.params) {
+      nextArgs[p.name] = (s.args && s.args[p.name] !== undefined && s.args[p.name] !== '')
+        ? s.args[p.name]
+        : `{{input.${p.name}}}`;
+    }
+  }
+  s.args = nextArgs;
+  syncFlowDerivedParams();
+  drawFlowEditor();
+  if (sub && sub.id) fetchToolSampleOutput(sub.id);
+}
+
+function addFlowStepCustomArg(si) {
+  collectFlowForm();
+  const s = FLOW_STATE.tool.config.flow.steps[si];
+  if (!s) return;
+  s.args = s.args || {};
+  let idx = Object.keys(s.args).length + 1;
+  while (s.args['arg_' + idx] !== undefined) idx += 1;
+  const key = 'arg_' + idx;
+  s.args[key] = `{{input.${key}}}`;
+  syncFlowDerivedParams();
+  drawFlowEditor();
+}
+
+function removeFlowStepArg(si, key) {
+  collectFlowForm();
+  const s = FLOW_STATE.tool.config.flow.steps[si];
+  if (s && s.args) delete s.args[key];
+  syncFlowDerivedParams();
+  drawFlowEditor();
+}
+
+function onFlowStepRuntimeChange(si, rt) {
+  collectFlowForm();
+  const s = FLOW_STATE.tool.config.flow.steps[si];
+  if (!s) return;
+  s.runtime = rt;
+  drawFlowEditor();
+}
+
+function insertFlowSampleCode(si) {
+  collectFlowForm();
+  const s = FLOW_STATE.tool.config.flow.steps[si];
+  if (!s) return;
+  const rt = s.runtime || 'builtin_js';
+  if ((s.code || '').trim() && !confirm('当前脚本编辑器已有代码，是否用示例代码覆盖？')) return;
+  s.code = FLOW_SAMPLES[rt] || FLOW_SAMPLES.builtin_js;
+  drawFlowEditor();
+}
+
+function toggleFlowStepParallel(si, checked) {
+  collectFlowForm();
+  const s = FLOW_STATE.tool.config.flow.steps[si];
+  if (s && si > 0) s.parallel_with_prev = !!checked;
+  drawFlowEditor();
+}
+
+function addFlowStep(kind) {
+  collectFlowForm();
+  const steps = FLOW_STATE.tool.config.flow.steps;
+  if (kind === 'tool') {
+    steps.push({ id: flowUniqueStepId(steps, 'step'), name: '调用工具', kind: 'tool', tool_name: '', args: {} });
+  } else {
+    steps.push({ id: flowUniqueStepId(steps, 'script'), name: '脚本处理', kind: 'script', runtime: 'builtin_js', code: FLOW_SAMPLES.builtin_js });
+  }
+  drawFlowEditor();
+}
+
+function moveFlowStep(si, delta) {
+  collectFlowForm();
+  const steps = FLOW_STATE.tool.config.flow.steps;
+  const target = si + delta;
+  if (target < 0 || target >= steps.length) return;
+  const [item] = steps.splice(si, 1);
+  steps.splice(target, 0, item);
+  if (steps[0]) steps[0].parallel_with_prev = false;
+  drawFlowEditor();
+}
+
+function removeFlowStep(si) {
+  collectFlowForm();
+  const steps = FLOW_STATE.tool.config.flow.steps;
+  if (steps.length <= 1) return;
+  steps.splice(si, 1);
+  if (steps[0]) steps[0].parallel_with_prev = false;
+  drawFlowEditor();
+}
+
+function onFlowOutModeChange(mode) {
+  collectFlowForm();
+  FLOW_STATE.tool.config.flow.output.mode = mode;
+  drawFlowEditor();
+}
+
+function buildFlowTestArgs(params) {
+  const args = {};
+  for (const p of params || []) {
+    if (!p.name) continue;
+    let v = (p.test_value !== undefined && p.test_value !== '') ? p.test_value : (p.default ?? '');
+    if (p.type === 'number' || p.type === 'integer') {
+      if (v === '') continue;
+      args[p.name] = Number(v);
+    } else if (p.type === 'boolean') {
+      if (v === '') continue;
+      args[p.name] = v === 'true' || v === true;
+    } else if ((p.type === 'object' || p.type === 'array') && typeof v === 'string' && v.trim()) {
+      try { args[p.name] = JSON.parse(v); } catch { args[p.name] = v; }
+    } else if (v !== '') {
+      args[p.name] = v;
+    }
+  }
+  return args;
+}
+
+function formatTraceVal(v) {
+  if (v === undefined || v === null) return '';
+  if (typeof v === 'string') return pretty(v);
+  try { return JSON.stringify(v, null, 2); } catch { return String(v); }
+}
+
+function renderFlowRunResult(r) {
+  if (!r) return '';
+  const traces = Array.isArray(r.steps_trace) ? r.steps_trace : [];
+  return `
+    <div class="row" style="margin-bottom:8px">
+      <b class="${r.ok ? 'st-ok' : 'st-bad'}">${r.ok ? '✓ 执行成功' : '✕ 执行失败'}</b>
+      <span class="muted small">总耗时 ${r.duration_ms ?? 0} ms · 执行节点 ${traces.length} 个</span>
+    </div>
+    ${r.error ? `<div class="notice" style="margin-bottom:10px">${esc(r.error)}</div>` : ''}
+    ${traces.length ? `<div class="trace-list">${traces.map(tr => `
+      <div class="trace-card ${tr.status === 'ok' ? 'trace-ok' : 'trace-err'}">
+        <div class="trace-head">
+          <b class="${tr.status === 'ok' ? 'st-ok' : 'st-bad'}">${tr.status === 'ok' ? '✓' : '✕'}</b>
+          <span class="flow-stage-badge ${tr.parallel ? 'parallel' : ''}">Stage ${tr.stage}${tr.parallel ? ' · 并行 ⚡' : ''}</span>
+          <b class="mono">${esc(tr.id)}</b>
+          ${tr.name ? `<span>${esc(tr.name)}</span>` : ''}
+          <span class="badge ${tr.kind === 'tool' ? 'm-GET' : 'm-SCRIPT'}">${tr.kind === 'tool' ? esc(tr.tool_name || 'tool') : esc(runtimeDisplayLabel(tr.runtime))}</span>
+          <span class="muted small" style="margin-left:auto">${tr.duration_ms ?? 0} ms</span>
+        </div>
+        ${tr.error ? `<div class="notice" style="margin-top:8px">${esc(tr.error)}</div>` : ''}
+        ${tr.input !== undefined ? `<details style="margin-top:6px"><summary class="small">节点入参</summary><pre>${esc(formatTraceVal(tr.input))}</pre></details>` : ''}
+        ${Array.isArray(tr.sub_calls) && tr.sub_calls.length ? `<details open style="margin-top:6px"><summary class="small">脚本内动态调用 callTool（共 ${tr.sub_calls.length} 次）</summary>
+          <div class="trace-subcalls">${tr.sub_calls.map((sc, sci) => `
+            <div class="trace-subcall ${sc.status === 'ok' ? '' : 'err'}">
+              <div class="trace-head">
+                <b class="${sc.status === 'ok' ? 'st-ok' : 'st-bad'}">${sc.status === 'ok' ? '✓' : '✕'}</b>
+                <span class="muted small">#${sci + 1}</span>
+                <span class="badge m-GET">${esc(sc.tool_name)}</span>
+                <span class="muted small" style="margin-left:auto">${sc.duration_ms ?? 0} ms</span>
+              </div>
+              ${sc.error ? `<div class="notice" style="margin-top:6px">${esc(sc.error)}</div>` : ''}
+              ${sc.input !== undefined ? `<details style="margin-top:4px"><summary class="small">入参</summary><pre>${esc(formatTraceVal(sc.input))}</pre></details>` : ''}
+              ${sc.output !== undefined ? `<details style="margin-top:4px"><summary class="small">返回</summary><pre>${esc(formatTraceVal(sc.output))}</pre></details>` : ''}
+            </div>`).join('')}</div></details>` : ''}
+        ${tr.logs ? `<details open style="margin-top:6px"><summary class="small">控制台日志 (stdout / console.log)</summary><pre>${esc(tr.logs)}</pre></details>` : ''}
+        ${tr.output !== undefined ? `<div class="small muted" style="margin-top:6px">节点输出</div><pre>${esc(formatTraceVal(tr.output))}</pre>` : ''}
+      </div>`).join('')}</div>` : ''}
+    ${r.ok ? `<div class="small muted" style="margin-top:12px">最终返回（给 AI 的出参）</div><pre>${esc(r.final_output !== undefined ? formatTraceVal(r.final_output) : pretty(r.body))}</pre>` : ''}`;
+}
+
+async function runFlowDraftTest() {
+  collectFlowForm();
+  FLOW_STATE.testing = true;
+  drawFlowEditor();
+  try {
+    const args = buildFlowTestArgs(FLOW_STATE.tool.params);
+    const res = await api('POST', '/api/tools/flow/test', { tool: FLOW_STATE.tool, args });
+    FLOW_STATE.testResult = res;
+    if (res && Array.isArray(res.steps_trace)) {
+      const tf = FLOW_STATE.traceFields || {};
+      const live = FLOW_STATE.stepLiveOutputs || {};
+      for (const tr of res.steps_trace) {
+        if (tr.id && tr.output !== undefined) {
+          live[tr.id] = tr.output;
+          tf[tr.id] = extractTraceFieldPaths(tr.output);
+        }
+      }
+      FLOW_STATE.stepLiveOutputs = live;
+      FLOW_STATE.traceFields = tf;
+    }
+  } catch (e) {
+    FLOW_STATE.testResult = { ok: false, duration_ms: 0, error: e.message, steps_trace: [] };
+  }
+  FLOW_STATE.testing = false;
+  drawFlowEditor();
+  const outEl = $('#flow-test-out');
+  if (outEl) outEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+async function saveCustomTool() {
+  collectFlowForm();
+  const t = JSON.parse(JSON.stringify(FLOW_STATE.tool));
+  if (!t.name) { toast('请填写工具标识（如 my_tool）'); return; }
+  for (const p of t.params) {
+    if (!p.name) { toast('入参表中有空的参数名，请填写或删除该行'); return; }
+    delete p._auto;
+  }
+  if (FLOW_STATE.testResult && FLOW_STATE.testResult.ok && FLOW_STATE.testResult.final_output !== undefined) {
+    try {
+      const s = JSON.stringify(FLOW_STATE.testResult.final_output);
+      if (s && s.length <= 16000) {
+        t.config = t.config || {};
+        t.config.sample_output = s;
+      }
+    } catch {}
+  }
+  try {
+    const saved = t.id ? await api('PUT', '/api/tools/' + t.id, t) : await api('POST', '/api/tools', t);
+    const newPack = ($('#f-newpack') && $('#f-newpack').value || '').trim();
+    const packs = await api('GET', '/api/packs');
+    for (const p of packs) {
+      const want = FLOW_STATE.packSel.has(p.id), has = p.tool_ids.includes(saved.id);
+      if (want && !has) await api('POST', `/api/packs/${p.id}/tools`, { ids: [saved.id] });
+      if (!want && has) await api('DELETE', `/api/packs/${p.id}/tools/${saved.id}`);
+    }
+    let np = null;
+    if (newPack) np = await api('POST', '/api/packs', { name: newPack, description: '', enabled: true, tool_ids: [saved.id] });
+    if (!t.id) localStorage.setItem('a2m_last_packs', JSON.stringify([...FLOW_STATE.packSel, ...(np ? [np.id] : [])]));
+    closeModal();
+    toast('已保存自定义工具 ' + saved.name + (newPack ? '，并放进新流程包「' + newPack + '」（已开启）' : ''));
+    refreshStatus();
+    if (ROUTE === 'tools') render();
+  } catch (e) {
+    toast('保存失败：' + e.message, 5000);
+  }
+}
