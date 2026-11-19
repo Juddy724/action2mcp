@@ -6,6 +6,7 @@ import (
 	"action2mcp/internal/catalog"
 	"action2mcp/internal/config"
 	"action2mcp/internal/console"
+	"action2mcp/internal/flow"
 	"action2mcp/internal/invoke"
 	"action2mcp/internal/login"
 	"action2mcp/internal/mcp"
@@ -28,7 +29,7 @@ import (
 	"time"
 )
 
-const Version = "0.6.3"
+const Version = "0.7.0"
 
 type App struct {
 	dataDir    string
@@ -67,6 +68,8 @@ type App struct {
 	mcpOnce           sync.Once
 	mcpService        *mcpserver.Server
 	mcpSessions       mcp.Manager // Mcp-Session-Id -> *mcp.Session (client name, loaded packs, SSE stream)
+	flowOnce          sync.Once
+	flowService       *flow.Executor
 	updaterOnce       sync.Once
 	updaterService    *updater.Service
 }

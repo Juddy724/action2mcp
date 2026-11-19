@@ -6,6 +6,7 @@ import (
 	"action2mcp/internal/browser"
 	"action2mcp/internal/catalog"
 	"action2mcp/internal/execution"
+	"action2mcp/internal/flow"
 	"action2mcp/internal/invoke"
 	"action2mcp/internal/login"
 	"action2mcp/internal/mcp"
@@ -57,6 +58,7 @@ type Options struct {
 	Analysis     func() *analysis.Service
 	Middlewares  func() *mwtools.Service
 	Approvals    func() *invoke.Gateway
+	Flow         func() *flow.Executor
 	Transfer     func() *transfer.Service
 	Tools        func() *catalog.Service
 	MCPServer    func() *mcpserver.Server
@@ -81,6 +83,7 @@ type Server struct {
 	analysis     func() *analysis.Service
 	middlewares  func() *mwtools.Service
 	approvals    func() *invoke.Gateway
+	flow         func() *flow.Executor
 	transfer     func() *transfer.Service
 	tools        func() *catalog.Service
 	mcpServer    func() *mcpserver.Server
@@ -93,6 +96,6 @@ type Server struct {
 func New(o Options) *Server {
 	return &Server{port: o.Port, store: o.Store, vault: o.Vault, sessions: o.Sessions, quit: o.Quit,
 		status: o.Status, shutdown: o.Shutdown, exit: o.Exit, browser: o.Browser, login: o.Login, engine: o.Engine,
-		analysis: o.Analysis, middlewares: o.Middlewares, approvals: o.Approvals, transfer: o.Transfer, tools: o.Tools,
+		analysis: o.Analysis, middlewares: o.Middlewares, approvals: o.Approvals, flow: o.Flow, transfer: o.Transfer, tools: o.Tools,
 		mcpServer: o.MCPServer, updater: o.Updater, restart: o.Restart, toolsChanged: o.ToolsChanged, dropDriver: o.DropDriver}
 }

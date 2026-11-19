@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Cross-compile Action2MCP and produce portable zips in dist/."""
-import os, shutil, subprocess, zipfile, stat
+import os, re, shutil, subprocess, sys, zipfile, stat
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.join(ROOT, "packaging")
 DIST = os.path.join(ROOT, "dist")
-VERSION = "0.6.3"
+REPO = "Juddy724/action2mcp"
 
 TARGETS = [
     ("windows", "amd64", "Windows-x64"),
@@ -13,6 +13,63 @@ TARGETS = [
     ("darwin", "amd64", "macOS-Intel"),
     ("linux", "amd64", "Linux-x64"),
 ]
+
+DOWNLOAD_ROWS = [
+    ("macOS (Apple 芯片)", "macOS-AppleSilicon"),
+    ("macOS (Intel)", "macOS-Intel"),
+    ("Windows x64", "Windows-x64"),
+    ("Linux x64", "Linux-x64"),
+]
+
+def read_version():
+    app_go = open(os.path.join(ROOT, "internal", "app", "app.go"), encoding="utf-8").read()
+    m = re.search(r'const\s+Version\s*=\s*"([^"]+)"', app_go)
+    if not m:
+        raise RuntimeError("failed to read Version from internal/app/app.go")
+    return m.group(1)
+
+VERSION = read_version()
+
+def replace_marked_block(text, marker, body):
+    start = f"<!-- {marker}:start -->"
+    end = f"<!-- {marker}:end -->"
+    pattern = re.compile(re.escape(start) + r".*?" + re.escape(end), re.S)
+    if not pattern.search(text):
+        raise RuntimeError(f"missing marker {start} ... {end}")
+    return pattern.sub(f"{start}\n{body}\n{end}", text, count=1)
+
+def sync_version_files(version=None):
+    ver = version or read_version()
+    readme_path = os.path.join(ROOT, "README.md")
+    readme_text = open(readme_path, encoding="utf-8").read()
+    ver_line = (
+        f"当前版本：**v{ver}**。安装包见 [Releases（最新版本）](https://github.com/{REPO}/releases/latest)；"
+        "更完整的使用说明在解压后的 README.md 里。升级时请保留原 `data/` 目录和 `secret.key`，即可无缝继承已有工具、流程包与配置。"
+    )
+    table_lines = [
+        f"| 平台 | 安装包 (v{ver}) |",
+        "|---|---|",
+    ]
+    for platform_label, asset_suffix in DOWNLOAD_ROWS:
+        fname = f"Action2MCP-{ver}-{asset_suffix}.zip"
+        url = f"https://github.com/{REPO}/releases/download/v{ver}/{fname}"
+        table_lines.append(f"| {platform_label} | [{fname}]({url}) |")
+    table_lines.append("")
+    table_lines.append(f"> 也可以直接前往 [GitHub Releases 最新版本页](https://github.com/{REPO}/releases/latest) 查看更新说明并下载对应平台安装包。")
+
+    updated = replace_marked_block(readme_text, "version-banner", ver_line)
+    updated = replace_marked_block(updated, "download-table", "\n".join(table_lines))
+    if updated != readme_text:
+        open(readme_path, "w", encoding="utf-8").write(updated)
+        print(f"synced README.md -> v{ver}")
+
+    index_path = os.path.join(ROOT, "web", "index.html")
+    if os.path.exists(index_path):
+        idx_text = open(index_path, encoding="utf-8").read()
+        idx_updated = re.sub(r'(\b(?:style\.css|app\.js)\?v=)[^"]+', rf'\g<1>{ver}', idx_text)
+        if idx_updated != idx_text:
+            open(index_path, "w", encoding="utf-8").write(idx_updated)
+            print(f"synced web/index.html -> v{ver}")
 
 def readme(goos):
     t = open(os.path.join(PKG, "README.tmpl.md"), encoding="utf-8").read()
@@ -47,6 +104,10 @@ def add(z, path, arc, exe=False):
         z.writestr(info, f.read())
 
 def main():
+    if "--sync-version" in sys.argv[1:]:
+        sync_version_files()
+        return
+    sync_version_files()
     shutil.rmtree(DIST, ignore_errors=True)
     os.makedirs(DIST)
     subprocess.check_call(["go", "test", "-count=1", "./..."], cwd=ROOT)

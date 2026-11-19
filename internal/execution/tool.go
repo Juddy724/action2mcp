@@ -327,11 +327,22 @@ func SetJSONPath(root *any, p string, val any) bool {
 
 var placeholderRe = regexp.MustCompile(`\{\{\s*((?:header|cookie)\.[A-Za-z0-9][A-Za-z0-9_-]*|[A-Za-z0-9_\.]+)\s*\}\}`)
 
+var flowInputPlaceholderRe = regexp.MustCompile(`\{\{\s*input\.([A-Za-z0-9_]+)(?:\.[^}]*)?\s*\}\}`)
+
 // Placeholders lists all {{names}} used in the template.
 func (t *Tool) Placeholders() []string {
 	seen := map[string]bool{}
 	var out []string
 	all := strings.Join(configTemplateTexts(t), "\n")
+	if IsFlowMethod(t.Method) {
+		for _, m := range flowInputPlaceholderRe.FindAllStringSubmatch(all, -1) {
+			if !seen[m[1]] {
+				seen[m[1]] = true
+				out = append(out, m[1])
+			}
+		}
+		return out
+	}
 	for _, m := range placeholderRe.FindAllStringSubmatch(all, -1) {
 		if credential.IsServerRef(m[1], IsWSMethod(t.Method)) {
 			continue
@@ -356,13 +367,44 @@ func (t *Tool) Normalize() error {
 	if t.Method == "" {
 		t.Method = "GET"
 	}
-	if IsWSMethod(t.Method) {
+	switch {
+	case IsFlowMethod(t.Method):
+		t.URL = strings.TrimSpace(t.URL)
+		if t.URL == "" {
+			t.URL = "flow://custom"
+		}
+		if t.Config.Flow != nil {
+			for i := range t.Config.Flow.Steps {
+				s := &t.Config.Flow.Steps[i]
+				s.ID = strings.TrimSpace(s.ID)
+				if s.ID == "" {
+					s.ID = fmt.Sprintf("step_%d", i+1)
+				}
+				s.Name = strings.TrimSpace(s.Name)
+				s.Kind = strings.ToLower(strings.TrimSpace(s.Kind))
+				s.ToolName = strings.TrimSpace(s.ToolName)
+				s.Runtime = strings.ToLower(strings.TrimSpace(s.Runtime))
+				if s.Kind == "script" && s.Runtime == "" {
+					s.Runtime = "builtin_js"
+				}
+			}
+			t.Config.Flow.Output.Mode = strings.ToLower(strings.TrimSpace(t.Config.Flow.Output.Mode))
+			if t.Config.Flow.Output.Mode == "" {
+				t.Config.Flow.Output.Mode = "last"
+			}
+			if err := ValidateFlowConfig(t.Config.Flow); err != nil {
+				return err
+			}
+		}
+	case IsWSMethod(t.Method):
 		u, err := url.Parse(t.URL)
 		if err != nil || (u.Scheme != "ws" && u.Scheme != "wss") {
 			return errors.New("WebSocket 工具地址必须以 ws:// 或 wss:// 开头")
 		}
-	} else if _, err := url.Parse(t.URL); err != nil || !strings.HasPrefix(t.URL, "http") {
-		return errors.New("请求地址必须以 http:// 或 https:// 开头")
+	default:
+		if _, err := url.Parse(t.URL); err != nil || !strings.HasPrefix(t.URL, "http") {
+			return errors.New("请求地址必须以 http:// 或 https:// 开头")
+		}
 	}
 	have := map[string]bool{}
 	ps := []domain.Param{}
@@ -505,6 +547,11 @@ func (t *Tool) RenderWith(args map[string]any, resolve func(string) (string, err
 		return "", "", nil, "", err
 	}
 	return t.renderValues(vals, nil)
+}
+
+// BindInputArgs binds and validates top-level tool parameters against args with defaults applied.
+func (t *Tool) BindInputArgs(args map[string]any) (map[string]any, error) {
+	return t.bindValues(args, nil, nil, true, time.Now())
 }
 
 func (t *Tool) bindValues(args map[string]any, resolve func(string) (string, error), extra map[string]any, deferRefs bool, at time.Time) (map[string]any, error) {

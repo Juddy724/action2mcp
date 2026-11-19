@@ -2,6 +2,7 @@ package vault
 
 import (
 	"database/sql"
+	"encoding/json"
 	_ "modernc.org/sqlite"
 	"path/filepath"
 	"strings"
@@ -65,5 +66,22 @@ func TestSnapshotsEncryptionAndSiteHeaderBinding(t *testing.T) {
 		if _, err := v.DecryptSiteHeader(binding[0], binding[1], enc); err == nil {
 			t.Fatal("site/header associated data was not bound")
 		}
+	}
+}
+
+func TestScrubPreservesJSONNumbers(t *testing.T) {
+	raw := `{"head":{"code":"00000000"},"body":{"list":[{"elapse":12345678,"traceId":"abc12345678xyz"}]}}`
+	scrubbed := ScrubSecretText(raw, nil, []string{"12345678"})
+	if strings.Contains(scrubbed, "12345678") {
+		t.Fatalf("secret leaked: %s", scrubbed)
+	}
+	if !json.Valid([]byte(scrubbed)) {
+		t.Fatalf("scrubbed output is no longer valid JSON: %s", scrubbed)
+	}
+	if !strings.Contains(scrubbed, `"elapse":"******"`) {
+		t.Fatalf("expected quoted mask for JSON number, got: %s", scrubbed)
+	}
+	if !strings.Contains(scrubbed, `"traceId":"abc******xyz"`) {
+		t.Fatalf("expected inline mask inside JSON string, got: %s", scrubbed)
 	}
 }

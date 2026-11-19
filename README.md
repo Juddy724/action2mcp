@@ -2,7 +2,9 @@
 
 把网页上的业务操作录制下来，整理成 AI 可调用的 MCP 工具。单个可执行文件，解压即用，数据只保存在本机。
 
-当前版本：**v0.6.2**。安装包见 [Releases](https://github.com/Juddy724/action2mcp/releases/latest)；更完整的使用说明在解压后的 README.md 里。0.6.2 修复拆包后数据库文件名回归，继续读取原 data/a2m.db；升级时请保留整个 data 目录和 secret.key，不会自动删除或合并影子库 a2m.DB()。
+<!-- version-banner:start -->
+当前版本：**v0.7.0**。安装包见 [Releases（最新版本）](https://github.com/Juddy724/action2mcp/releases/latest)；更完整的使用说明在解压后的 README.md 里。升级时请保留原 `data/` 目录和 `secret.key`，即可无缝继承已有工具、流程包与配置。
+<!-- version-banner:end -->
 
 ## 界面预览
 
@@ -28,12 +30,16 @@ AI 调用需要审批时，控制台会弹出卡片；历史记录里的执行�
 
 ## 下载与启动
 
-| 平台 | 安装包 (v0.6.2) |
+<!-- download-table:start -->
+| 平台 | 安装包 (v0.7.0) |
 |---|---|
-| macOS (Apple 芯片) | [Action2MCP-0.6.2-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.6.2/Action2MCP-0.6.2-macOS-AppleSilicon.zip) |
-| macOS (Intel) | [Action2MCP-0.6.2-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.6.2/Action2MCP-0.6.2-macOS-Intel.zip) |
-| Windows x64 | [Action2MCP-0.6.2-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.6.2/Action2MCP-0.6.2-Windows-x64.zip) |
-| Linux x64 | [Action2MCP-0.6.2-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.6.2/Action2MCP-0.6.2-Linux-x64.zip) |
+| macOS (Apple 芯片) | [Action2MCP-0.7.0-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.7.0/Action2MCP-0.7.0-macOS-AppleSilicon.zip) |
+| macOS (Intel) | [Action2MCP-0.7.0-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.7.0/Action2MCP-0.7.0-macOS-Intel.zip) |
+| Windows x64 | [Action2MCP-0.7.0-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.7.0/Action2MCP-0.7.0-Windows-x64.zip) |
+| Linux x64 | [Action2MCP-0.7.0-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.7.0/Action2MCP-0.7.0-Linux-x64.zip) |
+
+> 也可以直接前往 [GitHub Releases 最新版本页](https://github.com/Juddy724/action2mcp/releases/latest) 查看更新说明并下载对应平台安装包。
+<!-- download-table:end -->
 
 解压后运行 `start.command`（macOS）、`start.bat`（Windows）或 `start.sh`（Linux），然后打开 [http://localhost:7788](http://localhost:7788)。电脑上需要已安装 Google Chrome 或 Microsoft Edge；录制会打开一个专用浏览器窗口，和日常使用的浏览器互不影响。
 
@@ -42,6 +48,7 @@ AI 调用需要审批时，控制台会弹出卡片；历史记录里的执行�
 ## 主要功能
 
 - **录制与保存工具**：在控制台或命令行开始录制，按平时的方式在业务网站上点一遍。程序会捕获接口请求，把静态资源、埋点等噪音折叠起来，选中有用的请求即可保存为 MCP 工具。保存时会去掉已识别的登录相关请求头（例如 Cookie、Authorization），并改写为配置引用的密钥；请求体或其他字段里未经识别的原文不会自动清除。调用时再从专用浏览器的登录态补上已识别的凭证。
+- **自定义工具与多工具编排**：在「工具」页可直接创建自定义脚本工具或将多个现有工具、脚本按串行 / 并行（⚡）编排为单个 MCP 工具暴露给 AI。脚本同时支持零依赖内置 JS 引擎（支持正则与 `callTool()` 动态循环/条件调用已有工具）和本机已安装的 Python / Go / Java / Node.js / Shell 运行环境（自动检测并提示缺失环境）；编辑器支持工具与脚本统一的「入参映射」（自动同步对外入参、拆离 MCP 默认值与控制台测试值）、默认折叠的「出参示例」及一键测试运行与逐节点追踪。
 - **录制分析**：可以对已接入的 AI 说「帮我把录制记录里的某某流程识别一下并保存成工具」。AI 会先看录制全貌，给业务请求写清作用，再把完成流程所需的最少请求保存成工具；你没指定流程包时会先问你。可在「接入 AI / 设置」里关闭。
 - **流程包**：按场景把工具和中间件分组，用开关控制 AI 能不能看到。每个包可以写说明、适用场景，以及一份使用说明（Markdown，最长 8KB）。阶梯模式下，使用说明出现在 `load_pack` 的返回里；平铺模式写在连接说明中，改完需要重新连接。
 - **MCP 接入**：Streamable HTTP（`http://localhost:7788/mcp`）或 stdio（`a2m mcp`）。默认是**阶梯模式**：AI 先只看到 `list_packs`、`load_pack`、`unload_pack`、`call_pack_tool` 四个入口，按任务加载流程包。也可以切回平铺模式，让 AI 一连上就看到所有已开启流程包里的工具。关闭的流程包 AI 看不到，也调用不了。

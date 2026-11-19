@@ -3,6 +3,7 @@ package console
 import (
 	"action2mcp/internal/analysis"
 	"action2mcp/internal/execution"
+	"action2mcp/internal/flow"
 	"action2mcp/internal/mcp"
 	"action2mcp/internal/recording"
 	"action2mcp/internal/store"
@@ -302,6 +303,20 @@ func (a *Server) Handler() http.Handler {
 		}
 		writeJSON(w, 200, map[string]any{"tool": t, "input_schema": t.InputSchema()})
 	})
+	mux.HandleFunc("GET /api/tools/{id}/sample-output", func(w http.ResponseWriter, r *http.Request) {
+		t, err := a.store.GetTool(pathID(r))
+		if err != nil {
+			writeErr(w, 404, errors.New("工具不存在"))
+			return
+		}
+		sample, source := a.sampleOutputForTool(t)
+		writeJSON(w, 200, map[string]any{
+			"ok":         true,
+			"has_sample": sample != nil,
+			"source":     source,
+			"sample":     sample,
+		})
+	})
 	saveTool := func(w http.ResponseWriter, r *http.Request, id int64) {
 		var in struct {
 			execution.Tool
@@ -342,6 +357,40 @@ func (a *Server) Handler() http.Handler {
 		a.toolsChanged()
 		writeJSON(w, 200, m)
 	})
+	mux.HandleFunc("GET /api/runtimes", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, map[string]any{"runtimes": flow.DetectRuntimes()})
+	})
+	mux.HandleFunc("POST /api/tools/flow/test", func(w http.ResponseWriter, r *http.Request) {
+		if a.flow == nil || a.flow() == nil {
+			writeErr(w, 500, errors.New("自定义工具编排执行器未就绪"))
+			return
+		}
+		var in struct {
+			Tool execution.Tool `json:"tool"`
+			Args map[string]any `json:"args"`
+		}
+		if err := readJSON(r, &in); err != nil {
+			writeErr(w, 400, err)
+			return
+		}
+		if !execution.IsFlowMethod(in.Tool.Method) {
+			in.Tool.Method = "FLOW"
+		}
+		if strings.TrimSpace(in.Tool.Name) == "" {
+			in.Tool.Name = "test_flow_tool"
+		}
+		if err := in.Tool.Normalize(); err != nil {
+			writeErr(w, 400, err)
+			return
+		}
+		args := fillFlowDefaultArgs(&in.Tool, in.Args)
+		res, err := a.flow().Run(r.Context(), &in.Tool, args, "控制台自定义工具测试")
+		if res == nil && err != nil {
+			writeErr(w, 400, err)
+			return
+		}
+		writeJSON(w, 200, res)
+	})
 	mux.HandleFunc("POST /api/tools/{id}/run", func(w http.ResponseWriter, r *http.Request) {
 		t, err := a.store.GetTool(pathID(r))
 		if err != nil {
@@ -353,6 +402,20 @@ func (a *Server) Handler() http.Handler {
 		}
 		if err := readJSON(r, &in); err != nil {
 			writeErr(w, 400, err)
+			return
+		}
+		if execution.IsFlowMethod(t.Method) {
+			if a.flow == nil || a.flow() == nil {
+				writeErr(w, 500, errors.New("自定义工具编排执行器未就绪"))
+				return
+			}
+			args := fillFlowDefaultArgs(t, in.Args)
+			res, err := a.flow().Run(r.Context(), t, args, "控制台工具运行")
+			if res == nil && err != nil {
+				writeErr(w, 400, err)
+				return
+			}
+			writeJSON(w, 200, res)
 			return
 		}
 		res, err := a.engine().Execute(t, in.Args)
@@ -577,4 +640,102 @@ func (a *Server) buildRequestDraft(q *recording.Request, params []execution.Cand
 func (a *Server) settingsView() map[string]any {
 	return map[string]any{"mcp_mode": a.mcpServer().Mode(), "rec_analysis": a.analysis().Enabled(),
 		"approval_timeout_secs": int(a.store.ApprovalTimeout() / time.Second)}
+}
+
+func fillFlowDefaultArgs(t *execution.Tool, in map[string]any) map[string]any {
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	if t == nil {
+		return out
+	}
+	for _, p := range t.Params {
+		v, ok := out[p.Name]
+		if ok && v != nil {
+			continue
+		}
+		if p.TestValue != "" {
+			out[p.Name] = p.TestValue
+		} else if p.Default != "" {
+			out[p.Name] = p.Default
+		}
+	}
+	return out
+}
+
+func (a *Server) sampleOutputForTool(t *execution.Tool) (any, string) {
+	if t == nil {
+		return nil, ""
+	}
+	scrub := func(s string) string {
+		if a.vault != nil {
+			return a.vault.Scrub(s)
+		}
+		return s
+	}
+	parsePreview := func(raw string) any {
+		raw = strings.TrimSpace(scrub(raw))
+		if raw == "" {
+			return nil
+		}
+		var parsed any
+		if json.Unmarshal([]byte(raw), &parsed) == nil {
+			return summarizeSampleJSON(parsed, 0)
+		}
+		if len(raw) > 2000 {
+			return raw[:2000] + "\n...（已截断）"
+		}
+		return raw
+	}
+	if t.SourceReqID > 0 {
+		if q, err := a.store.GetRequest(t.SourceReqID); err == nil && q != nil && strings.TrimSpace(q.RespBody) != "" {
+			if prev := parsePreview(q.RespBody); prev != nil {
+				return prev, "recording"
+			}
+		}
+	}
+	if strings.TrimSpace(t.Config.SampleOutput) != "" {
+		if prev := parsePreview(t.Config.SampleOutput); prev != nil {
+			return prev, "cached"
+		}
+	}
+	return nil, ""
+}
+
+func summarizeSampleJSON(v any, depth int) any {
+	if depth > 6 {
+		return "..."
+	}
+	switch x := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, val := range x {
+			out[k] = summarizeSampleJSON(val, depth+1)
+		}
+		return out
+	case []any:
+		if len(x) == 0 {
+			return []any{}
+		}
+		limit := 2
+		if len(x) < limit {
+			limit = len(x)
+		}
+		out := make([]any, 0, limit+1)
+		for i := 0; i < limit; i++ {
+			out = append(out, summarizeSampleJSON(x[i], depth+1))
+		}
+		if len(x) > limit {
+			out = append(out, fmt.Sprintf("...（共 %d 项，示例仅展示前 %d 项）", len(x), limit))
+		}
+		return out
+	case string:
+		if len(x) > 400 {
+			return x[:400] + "..."
+		}
+		return x
+	default:
+		return v
+	}
 }
