@@ -1133,18 +1133,17 @@ if ('CommandEvent' in window) {
 
 function renderCopyableConfig(title, id, content, label) {
   return `<div class="cfg-block">
-    <div class="cfg-head">
-      <h3>${esc(title)}</h3>
+    <h3>${esc(title)}</h3>
+    <div class="cfg-code">
       <span class="copy">
-        <button type="button" class="sm copy-button" command="--copy" commandfor="${esc(id)}">
-          <svg class="copy-ico copy-ico-idle" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V3.5A1.5 1.5 0 0 0 9 2H3.5A1.5 1.5 0 0 0 2 3.5V9a1.5 1.5 0 0 0 1.5 1.5h2"/></svg>
-          <svg class="copy-ico copy-ico-ok" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 8.5l3.2 3.2L13 4.8"/></svg>
-          <span>复制</span><span class="sr-only"> ${esc(label)}</span>
+        <button type="button" class="copy-button" command="--copy" commandfor="${esc(id)}" aria-label="复制 ${esc(label)}" title="复制">
+          <svg class="copy-ico copy-ico-idle" viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V3.5A1.5 1.5 0 0 0 9 2H3.5A1.5 1.5 0 0 0 2 3.5V9a1.5 1.5 0 0 0 1.5 1.5h2"/></svg>
+          <svg class="copy-ico copy-ico-ok" viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 8.5l3.2 3.2L13 4.8"/></svg>
         </button>
         <span class="copy-tip" role="status"></span>
       </span>
+      <pre><code id="${esc(id)}">${esc(content)}</code></pre>
     </div>
-    <pre><code id="${esc(id)}">${esc(content)}</code></pre>
   </div>`;
 }
 
