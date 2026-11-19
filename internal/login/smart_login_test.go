@@ -108,7 +108,12 @@ func TestSmartOpenLoginCreatesVaultCredsWhenUnboundAndSucceedsOnNextRelogin(t *t
 		t.Fatalf("expected browser window to open, got %+v", res)
 	}
 
-	waitSitePending(t, a, site, false, 4*time.Second)
+	waitSiteStatus(t, a, site, "valid", 4*time.Second)
+	if baseTab.isClosed() {
+		t.Fatal("expected login window to stay open until user closes it")
+	}
+	bs.Close()
+	waitSitePending(t, a, site, false, 2*time.Second)
 
 	if !capTab.installed.Load() {
 		t.Fatal("expected InstallLoginCapture to be called on the login tab")
@@ -228,7 +233,12 @@ func TestSmartOpenLoginUpdatesBoundVaultRefsAndColdReplayVerifiesPassword(t *tes
 	if !res.Opened || res.AlreadyValid {
 		t.Fatalf("expected SmartOpenLogin to open window when password was wrong, got %+v", res)
 	}
-	waitSitePending(t, a, site, false, 4*time.Second)
+	waitSiteStatus(t, a, site, "valid", 4*time.Second)
+	if baseTab.isClosed() {
+		t.Fatal("expected login window to stay open until user closes it")
+	}
+	bs.Close()
+	waitSitePending(t, a, site, false, 2*time.Second)
 
 	// Verify existing bound Vault refs were updated in-place!
 	gotU, _ := a.vault.Lookup("my_custom_user")
@@ -283,7 +293,12 @@ func TestSmartOpenLoginSSORecordsMethodAndSSOHosts(t *testing.T) {
 	if err != nil || !res.Opened {
 		t.Fatalf("SmartOpenLogin: res=%+v err=%v", res, err)
 	}
-	waitSitePending(t, a, site, false, 5*time.Second)
+	waitSiteStatus(t, a, site, "valid", 5*time.Second)
+	if baseTab.isClosed() {
+		t.Fatal("expected SSO login window to stay open until user closes it")
+	}
+	bs.Close()
+	waitSitePending(t, a, site, false, 2*time.Second)
 
 	updated, err := a.repo.GetSite(site.ID)
 	if err != nil {

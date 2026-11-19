@@ -1071,6 +1071,83 @@ async function removeFromPack(pid, kind, id) {
 }
 async function delPack(id) { if (!confirm('删除这个流程包？（工具本身不会删除）')) return; await api('DELETE', '/api/packs/' + id); render(); }
 
+// ---------- copy button (Invoker Commands + click fallback) ----------
+const copyTimers = new WeakMap();
+let lastCopyMessage = '';
+
+function legacyCopyText(text) {
+  const field = Object.assign(document.createElement('textarea'), { value: text });
+  field.setAttribute('readonly', '');
+  field.style.cssText = 'position:fixed;inset-block-start:0;opacity:0';
+  document.body.append(field);
+  field.select();
+  try { return document.execCommand('copy'); } finally { field.remove(); }
+}
+
+function reportCopyState(button, ok) {
+  const tip = button.nextElementSibling;
+  clearTimeout(copyTimers.get(button));
+  button.removeAttribute('data-copied');
+  button.removeAttribute('data-failed');
+  let message = ok ? '已复制' : '复制失败';
+  if (message === lastCopyMessage) message += '\u00A0';
+  lastCopyMessage = message;
+  if (tip) tip.textContent = '';
+  void button.offsetWidth;
+  button.setAttribute(ok ? 'data-copied' : 'data-failed', '');
+  requestAnimationFrame(() => { if (tip) tip.textContent = message; });
+  copyTimers.set(button, setTimeout(() => {
+    button.removeAttribute('data-copied');
+    button.removeAttribute('data-failed');
+    if (tip) tip.textContent = '';
+  }, 2000));
+}
+
+async function copyElementText(button, target) {
+  const text = target.matches('input, textarea') ? target.value : target.innerText.trim();
+  if (!text) return;
+  try {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      if (!legacyCopyText(text)) throw new Error('Copy failed');
+    }
+    reportCopyState(button, true);
+  } catch {
+    reportCopyState(button, false);
+  }
+}
+
+if ('CommandEvent' in window) {
+  document.addEventListener('command', (event) => {
+    if (event.command === '--copy') copyElementText(event.source, event.target);
+  }, true);
+} else {
+  document.addEventListener('click', (event) => {
+    const button = event.target.closest('button[command="--copy"]');
+    if (!button) return;
+    const target = document.getElementById(button.getAttribute('commandfor'));
+    if (target) copyElementText(button, target);
+  });
+}
+
+function renderCopyableConfig(title, id, content, label) {
+  return `<div class="cfg-block">
+    <div class="cfg-head">
+      <h3>${esc(title)}</h3>
+      <span class="copy">
+        <button type="button" class="sm copy-button" command="--copy" commandfor="${esc(id)}">
+          <svg class="copy-ico copy-ico-idle" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V3.5A1.5 1.5 0 0 0 9 2H3.5A1.5 1.5 0 0 0 2 3.5V9a1.5 1.5 0 0 0 1.5 1.5h2"/></svg>
+          <svg class="copy-ico copy-ico-ok" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 8.5l3.2 3.2L13 4.8"/></svg>
+          <span>复制</span><span class="sr-only"> ${esc(label)}</span>
+        </button>
+        <span class="copy-tip" role="status"></span>
+      </span>
+    </div>
+    <pre><code id="${esc(id)}">${esc(content)}</code></pre>
+  </div>`;
+}
+
 // ---------- settings ----------
 async function pageSettings(app) {
   await refreshStatus();
@@ -1083,13 +1160,14 @@ async function pageSettings(app) {
   const cfgClaude = JSON.stringify({ mcpServers: { action2mcp: { command: exe, args: ['mcp'] } } }, null, 2);
   const cfgCursor = JSON.stringify({ mcpServers: { action2mcp: { url: mcpURL } } }, null, 2);
   const cfgCodex = `[mcp_servers.action2mcp]\ncommand = ${JSON.stringify(exe)}\nargs = ["mcp"]`;
+  const cfgClaudeCode = `claude mcp add --transport http action2mcp ${mcpURL}`;
   app.innerHTML = `
   <div class="card"><h2>接入 AI</h2>
     <p>MCP 地址（Streamable HTTP）：<code>${esc(mcpURL)}</code>　·　只支持命令行方式的客户端，用 <code>${esc(exe)} mcp</code>（stdio）。</p>
-    <h3>Cursor（~/.cursor/mcp.json）</h3><pre>${esc(cfgCursor)}</pre>
-    <h3 style="margin-top:14px">Claude Desktop（claude_desktop_config.json）</h3><pre>${esc(cfgClaude)}</pre>
-    <h3 style="margin-top:14px">Codex（~/.codex/config.toml）</h3><pre>${esc(cfgCodex)}</pre>
-    <h3 style="margin-top:14px">Claude Code</h3><pre>claude mcp add --transport http action2mcp ${esc(mcpURL)}</pre>
+    ${renderCopyableConfig('Cursor（~/.cursor/mcp.json）', 'cfg-cursor', cfgCursor, 'Cursor 配置')}
+    ${renderCopyableConfig('Claude Desktop（claude_desktop_config.json）', 'cfg-claude', cfgClaude, 'Claude Desktop 配置')}
+    ${renderCopyableConfig('Codex（~/.codex/config.toml）', 'cfg-codex', cfgCodex, 'Codex 配置')}
+    ${renderCopyableConfig('Claude Code', 'cfg-claude-code', cfgClaudeCode, 'Claude Code 命令')}
     <p class="muted small">AI 调用工具时，Action2MCP 必须在运行（stdio 方式会自动在后台启动它）。</p>
     <p class="small">当前 MCP 暴露模式：<b>${s.mcp_mode === 'flat' ? '平铺模式' : '阶梯模式'}</b>（在「流程包」页切换）。${s.mcp_mode === 'flat' ? '' : 'AI 会先调用 <code>list_packs</code> 查看流程包，再 <code>load_pack</code> 加载需要的那个；客户端不刷新工具列表时用 <code>call_pack_tool</code> 调用。'}</p></div>
   <div class="card"><h2>录制分析</h2>
@@ -1255,7 +1333,7 @@ async function pageSites(app) {
         ${s.last_error && s.status !== 'valid' ? `<div class="muted small" style="max-width:280px">${esc(s.last_error)}</div>` : ''}
         ${s.cooldown ? `<div class="small st-bad">已暂停自动登录（密码错误）</div>` : ''}</td>
       <td class="small">${esc(s.last_login_at || '-')}<div class="muted small">自动登录 ${s.login_count} 次</div></td>
-      <td style="text-align:right;white-space:nowrap">${s.pending ? `<button onclick="siteCancel(${s.id}, this)">取消</button> ` : ''}<button onclick="siteRelogin(${s.id}, this)">测试重新登录</button> <button onclick="siteOpen(${s.id}, this)">打开浏览器登录</button>
+      <td style="text-align:right;white-space:nowrap">${s.pending ? `<button onclick="siteCancel(${s.id}, this)">${s.status === 'valid' ? '关闭窗口' : '取消'}</button> ` : ''}<button onclick="siteRelogin(${s.id}, this)">测试重新登录</button> <button onclick="siteOpen(${s.id}, this)">打开浏览器登录</button>
         <button onclick="editSite(${s.id})">编辑</button> <button class="danger" onclick="delSite(${s.id})">删除</button></td></tr>`; }).join('')}
     </tbody></table>`}
     <div class="row" style="margin-top:12px"><button onclick="editSite(0)">＋ 添加网站</button><button onclick="render()">刷新</button></div>
@@ -1297,7 +1375,7 @@ async function siteOpen(id, btn, force = false) {
         </div>`);
       $('#modal-body button.pri')?.focus();
     } else {
-      toast(r.message || '已打开登录窗口，完成登录后会自动保存登录配置并关闭窗口', 5500);
+      toast(r.message || '已打开登录窗口，完成登录并确认页面正常后请手动关闭窗口（系统会自动保存登录态与配置）', 6000);
       await render();
     }
   } catch (e) {
