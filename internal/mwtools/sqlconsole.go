@@ -161,7 +161,8 @@ func (a *Service) callWSSQL(ctx context.Context, c *mwCall, args map[string]any)
 	if !c.m.Config.IsSQLConsole() {
 		return c.blocked("该中间件不是 SQL 控制台，不能用 ws_sql_query 调用"), true
 	}
-	if msg, ok := c.need("select"); !ok {
+	if !c.m.Config.Perms["select"] && !c.m.Config.Perms["describe"] {
+		msg, _ := c.need("select")
 		return msg, true
 	}
 	sqlText := strings.TrimSpace(mcp.ArgString(args, "sql"))
@@ -181,8 +182,20 @@ func (a *Service) callWSSQL(ctx context.Context, c *mwCall, args map[string]any)
 		return c.blocked(a.scrubSQLConsoleText(err.Error(), nil, cfgAll, true)), true
 	}
 	cfgVals := ds.ConfigHideValues(&c.m.Config)
-	if err := sqlguard.Check(sqlText, ds.EffectiveMaxRows(&c.m.Config)); err != nil {
-		return c.blocked(a.scrubSQLConsoleText(err.Error(), nil, cfgVals, true)), true
+	maxRows := ds.EffectiveMaxRows(&c.m.Config)
+	kind, err := sqlguard.CheckWithOptions(sqlText, sqlguard.Options{MaxRows: maxRows, AllowDescribe: true})
+	if err != nil {
+		_, checkErr := sqlguard.CheckWithOptions(sqlText, sqlguard.Options{MaxRows: maxRows, AllowDescribe: c.m.Config.Perms["describe"]})
+		return c.blocked(a.scrubSQLConsoleText(checkErr.Error(), nil, cfgVals, true)), true
+	}
+	if kind == sqlguard.KindDescribe {
+		if msg, ok := c.need("describe"); !ok {
+			return msg, true
+		}
+	} else {
+		if msg, ok := c.need("select"); !ok {
+			return msg, true
+		}
 	}
 	if err := a.ensureSQLConsoleCredentials(c.m, nil); err != nil {
 		return c.blocked(a.scrubSQLConsoleText(err.Error(), nil, cfgVals, true)), true
@@ -220,7 +233,9 @@ func (a *Service) callWSSQL(ctx context.Context, c *mwCall, args map[string]any)
 	res, err := a.engine().Send(prepared)
 	text, isErr := formatWSSQLResult(res, err)
 	text = prefix + text
-	text = a.engine().ScrubPrepared(text, prepared, isErr)
+	if isErr {
+		text = a.engine().ScrubPrepared(text, prepared, true)
+	}
 	if pending != nil {
 		a.approvals().Service().RecordResult(pending.Record.ID, text)
 	}

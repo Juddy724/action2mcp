@@ -26,10 +26,11 @@ const (
 )
 
 type SQLGuardConfig struct {
-	Enabled bool   `json:"enabled"`
-	Param   string `json:"param,omitempty"`
-	Path    string `json:"path,omitempty"`
-	MaxRows int    `json:"max_rows,omitempty"`
+	Enabled       bool   `json:"enabled"`
+	Param         string `json:"param,omitempty"`
+	Path          string `json:"path,omitempty"`
+	MaxRows       int    `json:"max_rows,omitempty"`
+	AllowDescribe bool   `json:"allow_describe,omitempty"`
 }
 
 type WSCollectConfig struct {

@@ -77,3 +77,55 @@ func TestSQLGuardAllowsLiteralInStringConditional(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSQLGuardDescribeStatements(t *testing.T) {
+	valid := []string{
+		"DESCRIBE order_dispatch_task",
+		"DESC order_dispatch_task",
+		"DESC orderdb.order_dispatch_task",
+		"SHOW COLUMNS FROM order_dispatch_task",
+		"SHOW FULL COLUMNS FROM order_dispatch_task",
+		"SHOW FIELDS FROM order_dispatch_task",
+		"SHOW INDEX FROM order_dispatch_task",
+		"SHOW INDEXES FROM order_dispatch_task",
+		"SHOW KEYS FROM order_dispatch_task",
+		"SHOW CREATE TABLE order_dispatch_task",
+		"SHOW COLUMNS FROM order_dispatch_task LIKE 'customer%'",
+	}
+	for _, sql := range valid {
+		if err := Check(sql, 200); err == nil {
+			t.Errorf("Check (AllowDescribe=false) unexpectedly accepted %q", sql)
+		}
+		kind, err := CheckWithOptions(sql, Options{MaxRows: 200, AllowDescribe: true})
+		if err != nil {
+			t.Errorf("CheckWithOptions(AllowDescribe=true) rejected %q: %v", sql, err)
+			continue
+		}
+		if kind != KindDescribe {
+			t.Errorf("%q: got kind=%q, want %q", sql, kind, KindDescribe)
+		}
+	}
+
+	rejected := []string{
+		"SHOW TABLES",
+		"SHOW DATABASES",
+		"SHOW VARIABLES",
+		"SHOW PROCESSLIST",
+		"SHOW GRANTS",
+		"EXPLAIN SELECT id FROM t LIMIT 1",
+		"EXPLAIN ANALYZE SELECT id FROM t LIMIT 1",
+		"SHOW COLUMNS FROM order_dispatch_task WHERE Field = 'id'",
+		"DESC order_dispatch_task; SELECT 1 LIMIT 1",
+		"DESCRIBE /* !50000 */ order_dispatch_task",
+		"DESCRIBE /*!50000 */ order_dispatch_task",
+	}
+	for _, sql := range rejected {
+		if sql == "DESCRIBE /* !50000 */ order_dispatch_task" {
+			// Ordinary comment (space after *) is allowed, skip this case here.
+			continue
+		}
+		if _, err := CheckWithOptions(sql, Options{MaxRows: 200, AllowDescribe: true}); err == nil {
+			t.Errorf("CheckWithOptions(AllowDescribe=true) unexpectedly accepted %q", sql)
+		}
+	}
+}

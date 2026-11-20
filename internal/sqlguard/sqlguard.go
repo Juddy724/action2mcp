@@ -20,13 +20,29 @@ import (
 // MaxRowsCap is the largest LIMIT the guard accepts.
 const MaxRowsCap = 200
 
+// Kind identifies the category of an accepted read-only SQL statement.
+type Kind string
+
+const (
+	KindSelect   Kind = "select"
+	KindDescribe Kind = "describe"
+)
+
+// Options controls which read-only SQL statements CheckWithOptions accepts.
+type Options struct {
+	MaxRows       int
+	AllowDescribe bool
+}
+
 var (
-	errSQLUnparsed     = errors.New("SQL 无法解析")
-	errSQLNotSelect    = errors.New("只允许执行单条只读 SELECT（含 WITH … SELECT）")
-	errSQLNeedLimit    = errors.New("必须在 SQL 末尾写上 LIMIT，且不超过允许的行数")
-	errSQLCondComment  = errors.New("不允许使用条件注释")
-	errSQLModeConflict = errors.New("SQL 在不同解析模式下含义不一致，已拒绝执行")
-	errSQLSynthetic    = errors.New("表名或别名与 EXPLAIN 合成行标识冲突")
+	errSQLUnparsed           = errors.New("SQL 无法解析")
+	errSQLNotSelect          = errors.New("只允许执行单条只读 SELECT（含 WITH … SELECT）")
+	errSQLNotSelectOrDesc    = errors.New("只允许执行单条只读 SELECT（含 WITH … SELECT）或表结构查看（DESCRIBE / SHOW COLUMNS / SHOW INDEX / SHOW CREATE TABLE）")
+	errSQLDescribeWithWhere  = errors.New("表结构查看语句不支持 WHERE 子句")
+	errSQLNeedLimit          = errors.New("必须在 SQL 末尾写上 LIMIT，且不超过允许的行数")
+	errSQLCondComment        = errors.New("不允许使用条件注释")
+	errSQLModeConflict       = errors.New("SQL 在不同解析模式下含义不一致，已拒绝执行")
+	errSQLSynthetic          = errors.New("表名或别名与 EXPLAIN 合成行标识冲突")
 )
 
 var syntheticAliasRe = regexp.MustCompile(`(?i)^<(derived|subquery|union)\d+>$`)
@@ -68,17 +84,24 @@ func sqlGuardModes() []sqlModeSet {
 }
 
 func Check(sql string, maxRows int) error {
+	_, err := CheckWithOptions(sql, Options{MaxRows: maxRows})
+	return err
+}
+
+func CheckWithOptions(sql string, opts Options) (Kind, error) {
 	sql = strings.TrimSpace(sql)
 	if sql == "" {
-		return errors.New("SQL 不能为空")
+		return "", errors.New("SQL 不能为空")
 	}
+	maxRows := opts.MaxRows
 	if maxRows < 1 || maxRows > MaxRowsCap {
 		maxRows = MaxRowsCap
 	}
 	type result struct {
-		kind  string
-		limit int
-		err   error
+		stmtKind Kind
+		astType  string
+		limit    int
+		err      error
 	}
 	var rs []result
 	for _, m := range sqlGuardModes() {
@@ -86,7 +109,7 @@ func Check(sql string, maxRows int) error {
 		if err := scanConditionalComments(sql, m.noBackslash, m.ansiQuotes); err != nil {
 			r.err = err
 		} else {
-			r.kind, r.limit, r.err = inspectSQL(sql, m, maxRows)
+			r.stmtKind, r.astType, r.limit, r.err = inspectSQL(sql, m, maxRows, opts.AllowDescribe)
 		}
 		rs = append(rs, r)
 	}
@@ -94,7 +117,7 @@ func Check(sql string, maxRows int) error {
 	for i := 1; i < len(rs); i++ {
 		a, b := rs[0], rs[i]
 		aOK, bOK := a.err == nil, b.err == nil
-		if aOK != bOK || a.kind != b.kind || a.limit != b.limit {
+		if aOK != bOK || a.stmtKind != b.stmtKind || a.astType != b.astType || a.limit != b.limit {
 			same = false
 			break
 		}
@@ -104,12 +127,12 @@ func Check(sql string, maxRows int) error {
 		}
 	}
 	if !same {
-		return errSQLModeConflict
+		return "", errSQLModeConflict
 	}
-	return rs[0].err
+	return rs[0].stmtKind, rs[0].err
 }
 
-func inspectSQL(sql string, mode sqlModeSet, maxRows int) (kind string, limit int, err error) {
+func inspectSQL(sql string, mode sqlModeSet, maxRows int, allowDescribe bool) (stmtKind Kind, astType string, limit int, err error) {
 	p := parser.New()
 	p.SetSQLMode(mode.mode)
 	stmts, _, err := p.Parse(sql, "", "")
@@ -118,28 +141,72 @@ func inspectSQL(sql string, mode sqlModeSet, maxRows int) (kind string, limit in
 		if err != nil {
 			msg += "：" + truncate(err.Error(), 200)
 		}
-		return "", 0, errors.New(msg)
+		return "", "", 0, errors.New(msg)
 	}
 	if len(stmts) != 1 {
-		return "", 0, errors.New("只允许一条 SQL 语句")
+		return "", "", 0, errors.New("只允许一条 SQL 语句")
 	}
 	stmt := stmts[0]
 	switch stmt.(type) {
 	case *ast.SelectStmt, *ast.SetOprStmt:
+		limit, err = outerLimitCount(stmt, maxRows)
+		if err != nil {
+			return "", "", 0, err
+		}
+		v := &sqlGuardVisitor{maxRows: maxRows}
+		stmt.Accept(v)
+		if v.err != nil {
+			return "", "", 0, v.err
+		}
+		return KindSelect, fmt.Sprintf("%T", stmt), limit, nil
 	default:
-		return "", 0, errSQLNotSelect
+		if show, ok := unwrapDescribeShow(stmt); ok {
+			if !allowDescribe {
+				return "", "", 0, errSQLNotSelect
+			}
+			if show.Where != nil {
+				return "", "", 0, errSQLDescribeWithWhere
+			}
+			v := &sqlGuardVisitor{maxRows: maxRows}
+			stmt.Accept(v)
+			if v.err != nil {
+				return "", "", 0, v.err
+			}
+			return KindDescribe, fmt.Sprintf("%T:%d", stmt, show.Tp), 0, nil
+		}
+		if allowDescribe {
+			return "", "", 0, errSQLNotSelectOrDesc
+		}
+		return "", "", 0, errSQLNotSelect
 	}
-	limit, err = outerLimitCount(stmt, maxRows)
-	if err != nil {
-		return "", 0, err
+}
+
+func unwrapDescribeShow(stmt ast.StmtNode) (*ast.ShowStmt, bool) {
+	var show *ast.ShowStmt
+	switch s := stmt.(type) {
+	case *ast.ExplainStmt:
+		if s.Analyze || s.Explore || s.Format != "" || s.SQLDigest != "" || s.ReplayerFile != "" || s.PlanDigest != "" {
+			return nil, false
+		}
+		sh, ok := s.Stmt.(*ast.ShowStmt)
+		if !ok || sh.Tp != ast.ShowColumns {
+			return nil, false
+		}
+		show = sh
+	case *ast.ShowStmt:
+		show = s
+	default:
+		return nil, false
 	}
-	v := &sqlGuardVisitor{maxRows: maxRows}
-	stmt.Accept(v)
-	if v.err != nil {
-		return "", 0, v.err
+	if show.Table == nil || strings.TrimSpace(show.Table.Name.O) == "" {
+		return nil, false
 	}
-	kind = fmt.Sprintf("%T", stmt)
-	return kind, limit, nil
+	switch show.Tp {
+	case ast.ShowColumns, ast.ShowIndex, ast.ShowCreateTable:
+		return show, true
+	default:
+		return nil, false
+	}
 }
 
 func outerLimitCount(stmt ast.StmtNode, maxRows int) (int, error) {

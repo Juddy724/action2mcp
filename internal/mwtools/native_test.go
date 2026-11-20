@@ -58,13 +58,23 @@ func TestNativeObserverPreservesPermissionAuditAndScrubbing(t *testing.T) {
 	if _, ok := observer.Require("SELECT * FROM shop.orders", "select"); !ok {
 		t.Fatal("enabled permission denied")
 	}
+	// DB query successful output is intentionally not scrubbed (business fields are handled by DB layer).
 	text, isError := observer.Complete("SELECT * FROM shop.orders", "value="+secret, nil)
-	if isError || strings.Contains(text, secret) || !strings.Contains(text, vault.Mask) {
-		t.Fatal("successful driver result bypassed scrubbing")
+	if isError || !strings.Contains(text, secret) || strings.Contains(text, vault.Mask) {
+		t.Fatalf("successful db_query result should not be scrubbed: %q", text)
 	}
+	// DB driver errors must still be scrubbed so connection credentials never leak.
 	text, isError = observer.Complete("SELECT * FROM shop.orders", "", errors.New("driver echoed "+secret))
 	if !isError || strings.Contains(text, secret) || !strings.Contains(text, vault.Mask) {
 		t.Fatal("driver error bypassed scrubbing")
+	}
+	// Non-DB native tools (e.g., Redis) continue scrubbing successful results.
+	rm := &mwconfig.Middleware{Name: "native-redis", Type: "redis", Config: mwconfig.MWConfig{PasswordRef: "native_password", Perms: map[string]bool{"read": true}}}
+	rc := &mwCall{a: a, m: rm, tool: "redis_command", client: "test-native", start: time.Now()}
+	rObs := nativeObserver{rc}
+	text, isError = rObs.Complete("GET k", "value="+secret, nil)
+	if isError || strings.Contains(text, secret) || !strings.Contains(text, vault.Mask) {
+		t.Fatal("successful non-DB driver result bypassed scrubbing")
 	}
 	entries = fx.store.ListAudit(m.Name, 10)
 	if len(entries) != 3 || !entries[0].Allowed || entries[0].Action != "SELECT * FROM shop.orders" || strings.Contains(entries[0].Result, secret) {
