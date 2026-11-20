@@ -107,8 +107,8 @@ func mwToolDefs() []ToolDef {
 			map[string]any{"file": str("日志文件路径，例如 BusinessException.log 或 /var/log/app.log"), "lines": map[string]any{"type": "integer", "description": "末尾行数，默认 100，最大 2000"}}, []string{"file"}, mwconfig.WSModeTerminal},
 		{"pod_exec", "websocket", "在 WebSocket 终端里执行一条命令（需要「执行命令」权限，默认关闭）。配置了允许的命令时，管道可以用 | 连接，但每一段的命令都要在允许列表中，不能使用重定向或命令替换。允许列表为空时，命令会原样发到远端 shell。列表里缺的命令请在中间件配置里追加。find 只允许 -name、-mmin、-mtime、-type、-size、-maxdepth；cut 只允许 -c；rg 不能使用 --pre。",
 			map[string]any{"command": str("要执行的命令，例如 ls /app/logs"), "timeout": map[string]any{"type": "integer", "description": "超时秒数（可选，不能超过中间件里配置的超时）"}}, []string{"command"}, mwconfig.WSModeTerminal},
-		{mwconfig.WSSQLQueryTool, "websocket", "在 WebSocket SQL 控制台中间件上执行一条只读查询。必须是单条 SELECT，必须写 LIMIT（不超过允许的行数，最多 200 行），必须走索引。参数 database 填写该中间件已配置的数据源别名；请根据用户的问题，对照工具说明里列出的数据源及其说明，选择最匹配的一项。",
-			map[string]any{"sql": str("一条只读 SELECT，必须带 LIMIT"), "database": str("数据源别名（见工具说明中的数据源列表）"), execution.ApprovalNoteParam: str("操作解释说明与影响分析：请简要说明本次查询的目的、内容以及对业务或系统的影响")}, []string{"sql", "database", execution.ApprovalNoteParam}, mwconfig.WSModeSQLConsole},
+		{mwconfig.WSSQLQueryTool, "websocket", "在 WebSocket SQL 控制台中间件上执行一条只读查询。SELECT 必须是单条、带显式 LIMIT（不超过允许的行数，最多 200 行）且走索引；若中间件开启了「查表结构」权限，也支持 DESCRIBE / DESC / SHOW [FULL] COLUMNS / SHOW INDEX / SHOW CREATE TABLE 查看表结构与索引（无需 LIMIT 与索引预检）。参数 database 填写该中间件已配置的数据源别名；请根据用户的问题，对照工具说明里列出的数据源及其说明，选择最匹配的一项。",
+			map[string]any{"sql": str("一条只读 SELECT（必须带 LIMIT），或已开启「查表结构」时的 DESCRIBE / SHOW COLUMNS / SHOW INDEX / SHOW CREATE TABLE"), "database": str("数据源别名（见工具说明中的数据源列表）"), execution.ApprovalNoteParam: str("操作解释说明与影响分析：请简要说明本次查询的目的、内容以及对业务或系统的影响")}, []string{"sql", "database", execution.ApprovalNoteParam}, mwconfig.WSModeSQLConsole},
 	}
 }
 
@@ -268,6 +268,9 @@ func (a *Service) Summary(m *mwconfig.Middleware) string {
 				s += "；数据源：" + list
 			}
 			s += fmt.Sprintf("；只读查询，必须写 LIMIT 且走索引，最多 %d 行", c.EffectiveMaxRows())
+			if c.Perms["describe"] {
+				s += "；支持 DESCRIBE / SHOW COLUMNS / SHOW INDEX / SHOW CREATE TABLE 查看表结构与索引"
+			}
 		} else if len(c.CommandAllow) > 0 {
 			s += "；pod_exec 只允许：" + strings.Join(c.CommandAllow, "、")
 		} else {
@@ -372,6 +375,15 @@ func (c *mwCall) blocked(msg string) string {
 	return msg
 }
 
+func isDBQueryTool(name string) bool {
+	switch name {
+	case mwconfig.WSSQLQueryTool, "db_query", "db_list_tables", "db_describe_table":
+		return true
+	default:
+		return false
+	}
+}
+
 func (c *mwCall) done(result string, err error) (string, bool) {
 	ms := time.Since(c.start).Milliseconds()
 	if err != nil {
@@ -388,6 +400,9 @@ func (c *mwCall) done(result string, err error) (string, bool) {
 		resMsg = "成功（" + c.auditNote + "）"
 	}
 	c.a.Audit(store.AuditEntry{Client: c.client, MW: c.m.Name, Tool: c.tool, Action: c.action, Perm: c.perm, Allowed: true, Result: resMsg, MS: ms})
+	if isDBQueryTool(c.tool) {
+		return result, false
+	}
 	pw, _ := c.a.Password(c.m)
 	if pw != "" {
 		result = strings.ReplaceAll(result, pw, vault.Mask)

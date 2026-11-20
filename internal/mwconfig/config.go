@@ -95,6 +95,7 @@ var MWPermDefs = map[string][]permDef{
 
 var MWSQLConsolePerms = []permDef{
 	{"select", "查", true, "只读 SELECT：必须带 LIMIT、必须走索引、最多 200 行"},
+	{"describe", "查表结构", false, "只读表结构查看：DESCRIBE / DESC / SHOW [FULL] COLUMNS / SHOW INDEX / SHOW CREATE TABLE"},
 }
 
 func MWPermsOf(m *Middleware) []permDef {

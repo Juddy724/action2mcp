@@ -77,3 +77,55 @@ func TestSQLGuardAllowsLiteralInStringConditional(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSQLGuardDescribeStatements(t *testing.T) {
+	valid := []string{
+		"DESCRIBE ips_multiple_base_task",
+		"DESC ips_multiple_base_task",
+		"DESC socinscore.ips_multiple_base_task",
+		"SHOW COLUMNS FROM ips_multiple_base_task",
+		"SHOW FULL COLUMNS FROM ips_multiple_base_task",
+		"SHOW FIELDS FROM ips_multiple_base_task",
+		"SHOW INDEX FROM ips_multiple_base_task",
+		"SHOW INDEXES FROM ips_multiple_base_task",
+		"SHOW KEYS FROM ips_multiple_base_task",
+		"SHOW CREATE TABLE ips_multiple_base_task",
+		"SHOW COLUMNS FROM ips_multiple_base_task LIKE 'customer%'",
+	}
+	for _, sql := range valid {
+		if err := Check(sql, 200); err == nil {
+			t.Errorf("Check (AllowDescribe=false) unexpectedly accepted %q", sql)
+		}
+		kind, err := CheckWithOptions(sql, Options{MaxRows: 200, AllowDescribe: true})
+		if err != nil {
+			t.Errorf("CheckWithOptions(AllowDescribe=true) rejected %q: %v", sql, err)
+			continue
+		}
+		if kind != KindDescribe {
+			t.Errorf("%q: got kind=%q, want %q", sql, kind, KindDescribe)
+		}
+	}
+
+	rejected := []string{
+		"SHOW TABLES",
+		"SHOW DATABASES",
+		"SHOW VARIABLES",
+		"SHOW PROCESSLIST",
+		"SHOW GRANTS",
+		"EXPLAIN SELECT id FROM t LIMIT 1",
+		"EXPLAIN ANALYZE SELECT id FROM t LIMIT 1",
+		"SHOW COLUMNS FROM ips_multiple_base_task WHERE Field = 'id'",
+		"DESC ips_multiple_base_task; SELECT 1 LIMIT 1",
+		"DESCRIBE /* !50000 */ ips_multiple_base_task",
+		"DESCRIBE /*!50000 */ ips_multiple_base_task",
+	}
+	for _, sql := range rejected {
+		if sql == "DESCRIBE /* !50000 */ ips_multiple_base_task" {
+			// Ordinary comment (space after *) is allowed, skip this case here.
+			continue
+		}
+		if _, err := CheckWithOptions(sql, Options{MaxRows: 200, AllowDescribe: true}); err == nil {
+			t.Errorf("CheckWithOptions(AllowDescribe=true) unexpectedly accepted %q", sql)
+		}
+	}
+}

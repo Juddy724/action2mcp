@@ -289,6 +289,7 @@ func (a *Engine) sendWS(p *PreparedCall, secrets *[]string) (*CallResult, error)
 		_ = pairs
 
 		sql := p.wsSQL
+		var sqlKind sqlguard.Kind
 		if cfg.SqlGuardEnabled() {
 			got, err := ExtractJSONString(messages[0], cfg.SQLGuard.Path)
 			if err != nil {
@@ -297,9 +298,11 @@ func (a *Engine) sendWS(p *PreparedCall, secrets *[]string) (*CallResult, error)
 			if got != sql {
 				return wsResult(p, OutcomeGuardRejected, 0, "", "待执行的 SQL 与批准内容不一致"), nil
 			}
-			if err := sqlguard.Check(sql, cfg.MaxRows()); err != nil {
+			kind, err := sqlguard.CheckWithOptions(sql, sqlguard.Options{MaxRows: cfg.MaxRows(), AllowDescribe: cfg.SQLGuard.AllowDescribe})
+			if err != nil {
 				return wsResult(p, OutcomeGuardRejected, 0, "", err.Error()), nil
 			}
+			sqlKind = kind
 		}
 
 		headers := http.Header{}
@@ -316,7 +319,7 @@ func (a *Engine) sendWS(p *PreparedCall, secrets *[]string) (*CallResult, error)
 		_ = src
 
 		timeout := time.Duration(cfg.timeout()) * time.Millisecond
-		if cfg.SqlGuardEnabled() {
+		if cfg.SqlGuardEnabled() && sqlKind == sqlguard.KindSelect {
 			explainMsg, err := replaceJSONString(messages[0], cfg.SQLGuard.Path, "EXPLAIN "+sql)
 			if err != nil {
 				return wsResult(p, OutcomeGuardRejected, 0, "", err.Error()), nil
@@ -889,7 +892,7 @@ func (a *Engine) freezeWSCall(t *Tool, vals map[string]any, d *deferredCredentia
 		if want != "" && sql != want {
 			return errors.New("参数中的 SQL 与消息模板中的 SQL 不一致")
 		}
-		if err := sqlguard.Check(sql, cfg.MaxRows()); err != nil {
+		if _, err := sqlguard.CheckWithOptions(sql, sqlguard.Options{MaxRows: cfg.MaxRows(), AllowDescribe: cfg.SQLGuard.AllowDescribe}); err != nil {
 			return err
 		}
 		p.wsSQL = sql

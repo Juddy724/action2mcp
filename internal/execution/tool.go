@@ -862,7 +862,9 @@ func (a *Engine) Send(p *PreparedCall) (*CallResult, error) {
 	view := result.Response{Status: res.Status, Body: res.Body, Headers: res.Headers, Error: res.Error, Outcome: res.Outcome, Truncated: res.Truncated}
 	result.Present(result.Config{ResultFormat: p.presentCfg.ResultFormat, ResultSelector: p.presentCfg.ResultSelector, DetectFailure: p.presentCfg.DetectFailure, WebSocket: p.ws, SQLGuard: p.wsConfig.SqlGuardEnabled()}, &view)
 	res.Body, res.Error, res.Outcome, res.Truncated = view.Body, view.Error, view.Outcome, view.Truncated
-	res.Body = a.ScrubApprovalText(res.Body, secrets)
+	if !(p.ws && p.wsConfig.SqlGuardEnabled() && res.Outcome == OutcomeSuccess) {
+		res.Body = a.ScrubApprovalText(res.Body, secrets)
+	}
 	res.ReqBody = a.ScrubApprovalText(res.ReqBody, secrets)
 	res.URL = a.ScrubApprovalText(res.URL, secrets)
 	res.Error = a.ScrubApprovalText(res.Error, secrets)

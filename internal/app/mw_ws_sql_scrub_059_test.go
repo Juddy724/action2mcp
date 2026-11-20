@@ -58,10 +58,13 @@ func TestSQLConsoleResultNotOverScrubbed(t *testing.T) {
 	// and also "LIMIT 10" which a 1-char cookie used to corrupt.
 	s := fake.start(t)
 	a := approvalTestApp(t)
+	if err := a.vault.Upsert("short_pin", "secret", "123", "", ""); err != nil {
+		t.Fatal(err)
+	}
 	longToken = fake.token
 	fake.businessRows = []any{map[string]any{
-		"C_1": "1001", "C_2": customerID, "C_3": requestID, "C_4": createdAt,
-		"C_5": "echo " + longToken + " LIMIT 10",
+		"C_1": "1001", "C_2": "19063446123474", "C_3": requestID, "C_4": "1795141239021",
+		"C_5": "echo raw LIMIT 10",
 		"C_6": 10, "C_7": envType,
 	}}
 
@@ -141,31 +144,15 @@ func TestSQLConsoleResultNotOverScrubbed(t *testing.T) {
 		t.Fatalf("approved call failed: %s", reply.text)
 	}
 
-	// Successful row data must come through intact, including values that
-	// happen to contain the 3-char ds_id, "PROD", "0", and "LIMIT 10".
-	for _, want := range []string{customerID, requestID, createdAt, "LIMIT 10", envType, `"retry_times"`, "1001"} {
-		if !strings.Contains(reply.text, want) && want == `"retry_times"` {
-			// column name is "retry_times" as title; compact result uses "name"
-			if !strings.Contains(reply.text, "retry_times") && !strings.Contains(reply.text, "10") {
-				t.Fatalf("result missing retry_times/10: %s", truncate(reply.text, 400))
-			}
-			continue
-		}
+	// Successful DB query output must come through completely intact (no masking),
+	// even when values contain a short Vault secret ("123"), 3-char ds_id, "PROD", "0", or "LIMIT 10".
+	for _, want := range []string{"19063446123474", requestID, "1795141239021", "echo raw LIMIT 10", envType, "1001"} {
 		if !strings.Contains(reply.text, want) {
 			t.Fatalf("result missing %q: %s", want, truncate(reply.text, 400))
 		}
 	}
-	if strings.Contains(reply.text, longToken) {
-		t.Fatal("long harvested token leaked in result")
-	}
-	if strings.Contains(reply.text, longCookie) {
-		t.Fatal("long cookie leaked in result")
-	}
-	if !strings.Contains(reply.text, vault.Mask) {
-		t.Fatal("expected the long token inside the note column to be masked")
-	}
-	if !strings.Contains(reply.text, "echo "+vault.Mask+" LIMIT 10") && !strings.Contains(reply.text, vault.Mask) {
-		t.Fatalf("token mask should sit next to intact LIMIT 10: %s", truncate(reply.text, 400))
+	if strings.Contains(reply.text, vault.Mask) {
+		t.Fatalf("successful SQL query result should not be masked: %s", truncate(reply.text, 400))
 	}
 
 	history, err := a.approvals().List("all", 10)
@@ -177,8 +164,6 @@ func TestSQLConsoleResultNotOverScrubbed(t *testing.T) {
 	if strings.Contains(string(histBlob), longToken) || strings.Contains(string(histBlob), longCookie) {
 		t.Fatal("history leaked a long secret")
 	}
-	// envType "PROD" may appear in the successful result summary — that is
-	// intentional (not a credential). It must not appear in preview/args as an id.
 	if strings.Contains(history[0].Preview.URL, dsID) || strings.Contains(history[0].Preview.URL, envID) {
 		t.Fatalf("preview leaked ids: %s", history[0].Preview.URL)
 	}
@@ -188,8 +173,7 @@ func TestSQLConsoleResultNotOverScrubbed(t *testing.T) {
 	if strings.Contains(history[0].Result, "LIMIT 1"+vault.Mask) || strings.Contains(history[0].ArgsDisplay["sql"], "LIMIT 1"+vault.Mask) {
 		t.Fatalf("approval record corrupted LIMIT 10: result=%q args=%v", history[0].Result, history[0].ArgsDisplay)
 	}
-	if !strings.Contains(history[0].Result, customerID) && !strings.Contains(history[0].Result, approvalResultTruncMark) {
-		// 1-row result is well under 2KB, so the preview should include the id.
+	if !strings.Contains(history[0].Result, "19063446123474") && !strings.Contains(history[0].Result, approvalResultTruncMark) {
 		t.Fatalf("approval result preview lost customer_id: %q", history[0].Result)
 	}
 
@@ -198,13 +182,18 @@ func TestSQLConsoleResultNotOverScrubbed(t *testing.T) {
 		t.Fatal(err)
 	}
 	if strings.Contains(full, longToken) || strings.Contains(full, longCookie) || strings.Contains(full, dsID+" ") {
-		t.Fatalf("full result leaked a secret")
+		t.Fatalf("stored full result leaked credentials: %q", truncate(full, 240))
 	}
-	for _, want := range []string{customerID, requestID, createdAt, "LIMIT 10", envType} {
+	if !strings.Contains(full, "19063446123474") || !strings.Contains(full, "1795141239021") {
+		t.Fatalf("stored full result lost unmasked query fields: %q", truncate(full, 240))
+	}
+	for _, want := range []string{"19063446123474", requestID, "1795141239021", "LIMIT 10", envType} {
 		if !strings.Contains(full, want) {
 			t.Fatalf("full result missing %q", want)
 		}
 	}
+	_ = customerID
+	_ = createdAt
 
 	audit, _ := json.Marshal(a.store.ListAudit(got.Name, 10))
 	assertNoConfigTokens(t, string(audit), longToken, envID, spaceCode)

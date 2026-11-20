@@ -671,3 +671,83 @@ func firstDatasource(t *testing.T, m *mwconfig.Middleware) mwconfig.MWDatasource
 	}
 	return ds
 }
+
+func TestSQLConsoleDescribePermission(t *testing.T) {
+	fake := newCountingWS(1)
+	fake.businessCols = []any{
+		map[string]any{"field": "C_1", "title": "Field"},
+		map[string]any{"field": "C_2", "title": "Type"},
+	}
+	fake.businessRows = []any{
+		map[string]any{"C_1": "customer_id", "C_2": "bigint"},
+	}
+	s := fake.start(t)
+	a := approvalTestApp(t)
+	m := saveSQLConsole(t, a, fake, s.URL, mwconfig.MWDatasource{Alias: "orders", DSID: json.Number("90001"), Description: "订单库"})
+
+	// By default describe permission is disabled -> DESCRIBE must be denied with permission error.
+	v, err := invokeTool(a, context.Background(), mwconfig.WSSQLQueryTool, map[string]any{
+		"middleware": m.Name, "database": "orders", "sql": "DESCRIBE ips_multiple_base_task",
+	})
+	rep := unpackApprovalReply(v, err)
+	if !rep.isError || !strings.Contains(rep.text, "查表结构") {
+		t.Fatalf("expected describe permission denial, got isError=%v text=%q", rep.isError, rep.text)
+	}
+	if fake.explain != 0 || fake.business != 0 {
+		t.Fatalf("denied describe should not send WS frames: explain=%d business=%d", fake.explain, fake.business)
+	}
+
+	// Enable describe permission on middleware and save.
+	m.Config.Perms["describe"] = true
+	m.Config.Approval = "off"
+	if err := a.store.SaveMiddleware(m); err != nil {
+		t.Fatal(err)
+	}
+
+	// Summary / MCP tool listing should mention describe support.
+	var listedDesc string
+	for _, item := range a.middlewares().ToolList() {
+		if item["name"] == mwconfig.WSSQLQueryTool {
+			listedDesc, _ = item["description"].(string)
+			break
+		}
+	}
+	if !strings.Contains(listedDesc, "DESCRIBE") || !strings.Contains(listedDesc, "SHOW COLUMNS") {
+		t.Fatalf("expected tool description to mention DESCRIBE/SHOW COLUMNS, got: %s", listedDesc)
+	}
+
+	// Valid schema inspection statements must succeed and skip EXPLAIN preflight.
+	for _, stmt := range []string{
+		"DESCRIBE ips_multiple_base_task",
+		"SHOW FULL COLUMNS FROM ips_multiple_base_task",
+		"SHOW INDEX FROM ips_multiple_base_task",
+		"SHOW CREATE TABLE ips_multiple_base_task",
+	} {
+		fake.mu.Lock()
+		prevBiz := fake.business
+		fake.mu.Unlock()
+		v, err := invokeTool(a, context.Background(), mwconfig.WSSQLQueryTool, map[string]any{
+			"middleware": m.Name, "database": "orders", "sql": stmt,
+		})
+		rep := unpackApprovalReply(v, err)
+		if rep.isError || !strings.Contains(rep.text, "customer_id") {
+			t.Fatalf("%q failed: isError=%v text=%q", stmt, rep.isError, rep.text)
+		}
+		fake.mu.Lock()
+		gotExplain := fake.explain
+		gotBiz := fake.business
+		fake.mu.Unlock()
+		if gotExplain != 0 || gotBiz != prevBiz+1 {
+			t.Fatalf("%q expected no EXPLAIN and 1 business query, got explain=%d business=%d", stmt, gotExplain, gotBiz)
+		}
+	}
+
+	// Non-schema SHOW commands remain blocked even with describe enabled.
+	v, err = invokeTool(a, context.Background(), mwconfig.WSSQLQueryTool, map[string]any{
+		"middleware": m.Name, "database": "orders", "sql": "SHOW VARIABLES",
+	})
+	rep = unpackApprovalReply(v, err)
+	if !rep.isError {
+		t.Fatalf("SHOW VARIABLES should remain rejected, got: %q", rep.text)
+	}
+}

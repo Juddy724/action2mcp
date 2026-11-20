@@ -622,8 +622,9 @@ func (m *Middleware) SQLConsoleFingerprint() string {
 		Collect         *execution.WSCollectConfig
 		Auth            *execution.WSAuthConfig
 		Approval        string
+		AllowDescribe   bool
 		Updated         string
-	}{m.Config.URL, m.Config.EffectiveWSMode(), m.Config.sqlPath(), m.Config.WSMessages, m.Config.WSHeaders, m.Config.Datasources, m.Config.DSFieldPaths, m.Config.MaxRows, m.Config.TimeoutSec, m.Config.WSCollect, m.Config.WSAuth, m.Config.SQLConsoleApproval(), m.UpdatedAt})
+	}{m.Config.URL, m.Config.EffectiveWSMode(), m.Config.sqlPath(), m.Config.WSMessages, m.Config.WSHeaders, m.Config.Datasources, m.Config.DSFieldPaths, m.Config.MaxRows, m.Config.TimeoutSec, m.Config.WSCollect, m.Config.WSAuth, m.Config.SQLConsoleApproval(), m.Config.Perms["describe"], m.UpdatedAt})
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
 }
@@ -671,10 +672,17 @@ func (m *Middleware) SQLConsoleTool(ds MWDatasource) (*execution.Tool, error) {
 		headers[k] = v
 	}
 	collect := m.sqlConsoleCollect()
+	allowDescribe := m.Config.Perms["describe"]
+	desc := "在 WebSocket SQL 控制台执行一条只读查询。必须是单条 SELECT，必须写 LIMIT，必须走索引。"
+	sqlParamDesc := "一条只读 SELECT，必须带 LIMIT，且不超过允许的行数"
+	if allowDescribe {
+		desc = "在 WebSocket SQL 控制台执行一条只读查询（SELECT 必须带 LIMIT 且走索引）或表结构查看（DESCRIBE / SHOW COLUMNS / SHOW INDEX / SHOW CREATE TABLE）。"
+		sqlParamDesc = "一条只读 SELECT（必须带 LIMIT）或表结构查看语句（DESCRIBE / SHOW COLUMNS / SHOW INDEX / SHOW CREATE TABLE）"
+	}
 	tool := &execution.Tool{
 		Name:        WSSQLQueryTool,
 		Title:       fmt.Sprintf("WebSocket SQL 查询（%s / %s）", m.Name, ds.Alias),
-		Description: "在 WebSocket SQL 控制台执行一条只读查询。必须是单条 SELECT，必须写 LIMIT，必须走索引。",
+		Description: desc,
 		Method:      "WS",
 		URL:         m.Config.URL,
 		Headers:     headers,
@@ -682,11 +690,11 @@ func (m *Middleware) SQLConsoleTool(ds MWDatasource) (*execution.Tool, error) {
 		Rev:         1,
 		Params: []domain.Param{
 			{Name: "database", Type: "string", Required: true, Description: "数据源别名"},
-			{Name: "sql", Type: "string", Required: true, Description: "一条只读 SELECT，必须带 LIMIT，且不超过允许的行数"},
+			{Name: "sql", Type: "string", Required: true, Description: sqlParamDesc},
 		},
 		Config: execution.ToolConfig{
 			Messages: msgs,
-			SQLGuard: &execution.SQLGuardConfig{Enabled: true, Param: "sql", Path: m.Config.sqlPath(), MaxRows: ds.EffectiveMaxRows(&m.Config)},
+			SQLGuard: &execution.SQLGuardConfig{Enabled: true, Param: "sql", Path: m.Config.sqlPath(), MaxRows: ds.EffectiveMaxRows(&m.Config), AllowDescribe: allowDescribe},
 			Collect:  collect,
 			Auth:     m.sqlConsoleAuth(),
 		},
