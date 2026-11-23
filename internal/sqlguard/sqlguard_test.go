@@ -80,6 +80,11 @@ func TestSQLGuardAllowsLiteralInStringConditional(t *testing.T) {
 
 func TestSQLGuardDescribeStatements(t *testing.T) {
 	valid := []string{
+		"SHOW TABLES",
+		"SHOW FULL TABLES",
+		"SHOW TABLES FROM staffdb",
+		"SHOW TABLES LIKE '%employee%'",
+		"SHOW FULL TABLES FROM staffdb LIKE 'emp_%'",
 		"DESCRIBE order_dispatch_task",
 		"DESC order_dispatch_task",
 		"DESC orderdb.order_dispatch_task",
@@ -107,23 +112,18 @@ func TestSQLGuardDescribeStatements(t *testing.T) {
 	}
 
 	rejected := []string{
-		"SHOW TABLES",
 		"SHOW DATABASES",
 		"SHOW VARIABLES",
 		"SHOW PROCESSLIST",
 		"SHOW GRANTS",
+		"SHOW TABLES WHERE Tables_in_db = 't'",
 		"EXPLAIN SELECT id FROM t LIMIT 1",
 		"EXPLAIN ANALYZE SELECT id FROM t LIMIT 1",
 		"SHOW COLUMNS FROM order_dispatch_task WHERE Field = 'id'",
 		"DESC order_dispatch_task; SELECT 1 LIMIT 1",
-		"DESCRIBE /* !50000 */ order_dispatch_task",
 		"DESCRIBE /*!50000 */ order_dispatch_task",
 	}
 	for _, sql := range rejected {
-		if sql == "DESCRIBE /* !50000 */ order_dispatch_task" {
-			// Ordinary comment (space after *) is allowed, skip this case here.
-			continue
-		}
 		if _, err := CheckWithOptions(sql, Options{MaxRows: 200, AllowDescribe: true}); err == nil {
 			t.Errorf("CheckWithOptions(AllowDescribe=true) unexpectedly accepted %q", sql)
 		}

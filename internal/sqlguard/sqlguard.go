@@ -37,7 +37,7 @@ type Options struct {
 var (
 	errSQLUnparsed           = errors.New("SQL 无法解析")
 	errSQLNotSelect          = errors.New("只允许执行单条只读 SELECT（含 WITH … SELECT）")
-	errSQLNotSelectOrDesc    = errors.New("只允许执行单条只读 SELECT（含 WITH … SELECT）或表结构查看（DESCRIBE / SHOW COLUMNS / SHOW INDEX / SHOW CREATE TABLE）")
+	errSQLNotSelectOrDesc    = errors.New("只允许执行单条只读 SELECT（含 WITH … SELECT）或表结构查看（SHOW TABLES / DESCRIBE / SHOW COLUMNS / SHOW INDEX / SHOW CREATE TABLE）")
 	errSQLDescribeWithWhere  = errors.New("表结构查看语句不支持 WHERE 子句")
 	errSQLNeedLimit          = errors.New("必须在 SQL 末尾写上 LIMIT，且不超过允许的行数")
 	errSQLCondComment        = errors.New("不允许使用条件注释")
@@ -198,11 +198,13 @@ func unwrapDescribeShow(stmt ast.StmtNode) (*ast.ShowStmt, bool) {
 	default:
 		return nil, false
 	}
-	if show.Table == nil || strings.TrimSpace(show.Table.Name.O) == "" {
-		return nil, false
-	}
 	switch show.Tp {
+	case ast.ShowTables:
+		return show, true
 	case ast.ShowColumns, ast.ShowIndex, ast.ShowCreateTable:
+		if show.Table == nil || strings.TrimSpace(show.Table.Name.O) == "" {
+			return nil, false
+		}
 		return show, true
 	default:
 		return nil, false

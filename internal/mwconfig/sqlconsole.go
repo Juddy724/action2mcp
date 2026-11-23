@@ -22,9 +22,10 @@ func defaultWSMessages() []string {
 }
 
 const (
-	WSModeTerminal   = "terminal"
-	WSModeSQLConsole = "sql_console"
-	WSSQLQueryTool   = "ws_sql_query"
+	WSModeTerminal      = "terminal"
+	WSModeSQLConsole    = "sql_console"
+	WSSQLQueryTool      = "ws_sql_query"
+	WSSQLListTablesTool = "ws_sql_list_tables"
 )
 
 // MWSQLDefaults are connection fields shared by every datasource in a SQL 控制台
@@ -676,8 +677,8 @@ func (m *Middleware) SQLConsoleTool(ds MWDatasource) (*execution.Tool, error) {
 	desc := "在 WebSocket SQL 控制台执行一条只读查询。必须是单条 SELECT，必须写 LIMIT，必须走索引。"
 	sqlParamDesc := "一条只读 SELECT，必须带 LIMIT，且不超过允许的行数"
 	if allowDescribe {
-		desc = "在 WebSocket SQL 控制台执行一条只读查询（SELECT 必须带 LIMIT 且走索引）或表结构查看（DESCRIBE / SHOW COLUMNS / SHOW INDEX / SHOW CREATE TABLE）。"
-		sqlParamDesc = "一条只读 SELECT（必须带 LIMIT）或表结构查看语句（DESCRIBE / SHOW COLUMNS / SHOW INDEX / SHOW CREATE TABLE）"
+		desc = "在 WebSocket SQL 控制台执行一条只读查询（SELECT 必须带 LIMIT 且走索引）或表列表/表结构查看（SHOW TABLES / DESCRIBE / SHOW COLUMNS / SHOW INDEX / SHOW CREATE TABLE）。"
+		sqlParamDesc = "一条只读 SELECT（必须带 LIMIT）或表列表/表结构查看语句（SHOW TABLES / DESCRIBE / SHOW COLUMNS / SHOW INDEX / SHOW CREATE TABLE）"
 	}
 	tool := &execution.Tool{
 		Name:        WSSQLQueryTool,

@@ -696,6 +696,13 @@ func TestSQLConsoleDescribePermission(t *testing.T) {
 	if fake.explain != 0 || fake.business != 0 {
 		t.Fatalf("denied describe should not send WS frames: explain=%d business=%d", fake.explain, fake.business)
 	}
+	v, err = invokeTool(a, context.Background(), mwconfig.WSSQLListTablesTool, map[string]any{
+		"middleware": m.Name, "database": "orders",
+	})
+	rep = unpackApprovalReply(v, err)
+	if !rep.isError || !strings.Contains(rep.text, "查表结构") {
+		t.Fatalf("expected ws_sql_list_tables permission denial, got isError=%v text=%q", rep.isError, rep.text)
+	}
 
 	// Enable describe permission on middleware and save.
 	m.Config.Perms["describe"] = true
@@ -718,6 +725,8 @@ func TestSQLConsoleDescribePermission(t *testing.T) {
 
 	// Valid schema inspection statements must succeed and skip EXPLAIN preflight.
 	for _, stmt := range []string{
+		"SHOW TABLES",
+		"SHOW TABLES LIKE '%task%'",
 		"DESCRIBE order_dispatch_task",
 		"SHOW FULL COLUMNS FROM order_dispatch_task",
 		"SHOW INDEX FROM order_dispatch_task",
@@ -740,6 +749,48 @@ func TestSQLConsoleDescribePermission(t *testing.T) {
 		if gotExplain != 0 || gotBiz != prevBiz+1 {
 			t.Fatalf("%q expected no EXPLAIN and 1 business query, got explain=%d business=%d", stmt, gotExplain, gotBiz)
 		}
+	}
+
+	// Dedicated ws_sql_list_tables tool works with and without like filter, skips EXPLAIN, and rejects invalid like input.
+	for _, tc := range []struct {
+		like    string
+		wantSQL string
+	}{
+		{"", "SHOW TABLES"},
+		{"%employee%", "SHOW TABLES LIKE '%employee%'"},
+	} {
+		fake.mu.Lock()
+		prevBiz := fake.business
+		fake.mu.Unlock()
+		args := map[string]any{"middleware": m.Name, "database": "orders"}
+		if tc.like != "" {
+			args["like"] = tc.like
+		}
+		v, err := invokeTool(a, context.Background(), mwconfig.WSSQLListTablesTool, args)
+		rep := unpackApprovalReply(v, err)
+		if rep.isError || !strings.Contains(rep.text, "customer_id") {
+			t.Fatalf("ws_sql_list_tables(%q) failed: isError=%v text=%q", tc.like, rep.isError, rep.text)
+		}
+		fake.mu.Lock()
+		gotExplain := fake.explain
+		gotBiz := fake.business
+		lastMsg := fake.all[len(fake.all)-1]
+		fake.mu.Unlock()
+		if gotExplain != 0 || gotBiz != prevBiz+1 {
+			t.Fatalf("ws_sql_list_tables(%q) expected no EXPLAIN and 1 query, got explain=%d business=%d", tc.like, gotExplain, gotBiz)
+		}
+		if !strings.Contains(lastMsg, tc.wantSQL) {
+			t.Fatalf("ws_sql_list_tables(%q) sent %q, want %q", tc.like, lastMsg, tc.wantSQL)
+		}
+	}
+
+	// Reject SQL injection attempt in like parameter.
+	v, err = invokeTool(a, context.Background(), mwconfig.WSSQLListTablesTool, map[string]any{
+		"middleware": m.Name, "database": "orders", "like": "a' OR '1'='1",
+	})
+	rep = unpackApprovalReply(v, err)
+	if !rep.isError {
+		t.Fatalf("invalid like pattern should be rejected, got: %q", rep.text)
 	}
 
 	// Non-schema SHOW commands remain blocked even with describe enabled.
