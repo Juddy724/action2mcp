@@ -24,21 +24,25 @@ const MaxRowsCap = 200
 type Kind string
 
 const (
-	KindSelect   Kind = "select"
-	KindDescribe Kind = "describe"
+	KindSelect     Kind = "select"
+	KindDescribe   Kind = "describe"
+	KindListTables Kind = "list_tables"
 )
 
 // Options controls which read-only SQL statements CheckWithOptions accepts.
 type Options struct {
-	MaxRows       int
-	AllowDescribe bool
+	MaxRows         int
+	AllowDescribe   bool
+	AllowListTables bool
 }
 
 var (
 	errSQLUnparsed           = errors.New("SQL 无法解析")
 	errSQLNotSelect          = errors.New("只允许执行单条只读 SELECT（含 WITH … SELECT）")
-	errSQLNotSelectOrDesc    = errors.New("只允许执行单条只读 SELECT（含 WITH … SELECT）或表结构查看（SHOW TABLES / DESCRIBE / SHOW COLUMNS / SHOW INDEX / SHOW CREATE TABLE）")
-	errSQLDescribeWithWhere  = errors.New("表结构查看语句不支持 WHERE 子句")
+	errSQLNotSelectOrDesc    = errors.New("只允许执行单条只读 SELECT（含 WITH … SELECT）或表结构查看（DESCRIBE / SHOW COLUMNS / SHOW INDEX / SHOW CREATE TABLE）")
+	errSQLNotSelectOrList    = errors.New("只允许执行单条只读 SELECT（含 WITH … SELECT）或表列表查看（SHOW TABLES）")
+	errSQLNotSelectOrMeta    = errors.New("只允许执行单条只读 SELECT（含 WITH … SELECT）、表列表（SHOW TABLES）或表结构查看（DESCRIBE / SHOW COLUMNS / SHOW INDEX / SHOW CREATE TABLE）")
+	errSQLDescribeWithWhere  = errors.New("表结构/表列表查看语句不支持 WHERE 子句")
 	errSQLNeedLimit          = errors.New("必须在 SQL 末尾写上 LIMIT，且不超过允许的行数")
 	errSQLCondComment        = errors.New("不允许使用条件注释")
 	errSQLModeConflict       = errors.New("SQL 在不同解析模式下含义不一致，已拒绝执行")
@@ -109,7 +113,7 @@ func CheckWithOptions(sql string, opts Options) (Kind, error) {
 		if err := scanConditionalComments(sql, m.noBackslash, m.ansiQuotes); err != nil {
 			r.err = err
 		} else {
-			r.stmtKind, r.astType, r.limit, r.err = inspectSQL(sql, m, maxRows, opts.AllowDescribe)
+			r.stmtKind, r.astType, r.limit, r.err = inspectSQL(sql, m, maxRows, opts.AllowDescribe, opts.AllowListTables)
 		}
 		rs = append(rs, r)
 	}
@@ -132,7 +136,20 @@ func CheckWithOptions(sql string, opts Options) (Kind, error) {
 	return rs[0].stmtKind, rs[0].err
 }
 
-func inspectSQL(sql string, mode sqlModeSet, maxRows int, allowDescribe bool) (stmtKind Kind, astType string, limit int, err error) {
+func notAllowedStmtErr(allowDescribe, allowListTables bool) error {
+	switch {
+	case allowDescribe && allowListTables:
+		return errSQLNotSelectOrMeta
+	case allowDescribe:
+		return errSQLNotSelectOrDesc
+	case allowListTables:
+		return errSQLNotSelectOrList
+	default:
+		return errSQLNotSelect
+	}
+}
+
+func inspectSQL(sql string, mode sqlModeSet, maxRows int, allowDescribe, allowListTables bool) (stmtKind Kind, astType string, limit int, err error) {
 	p := parser.New()
 	p.SetSQLMode(mode.mode)
 	stmts, _, err := p.Parse(sql, "", "")
@@ -160,9 +177,9 @@ func inspectSQL(sql string, mode sqlModeSet, maxRows int, allowDescribe bool) (s
 		}
 		return KindSelect, fmt.Sprintf("%T", stmt), limit, nil
 	default:
-		if show, ok := unwrapDescribeShow(stmt); ok {
-			if !allowDescribe {
-				return "", "", 0, errSQLNotSelect
+		if show, kind, ok := unwrapMetadataShow(stmt); ok {
+			if (kind == KindDescribe && !allowDescribe) || (kind == KindListTables && !allowListTables) {
+				return "", "", 0, notAllowedStmtErr(allowDescribe, allowListTables)
 			}
 			if show.Where != nil {
 				return "", "", 0, errSQLDescribeWithWhere
@@ -172,42 +189,39 @@ func inspectSQL(sql string, mode sqlModeSet, maxRows int, allowDescribe bool) (s
 			if v.err != nil {
 				return "", "", 0, v.err
 			}
-			return KindDescribe, fmt.Sprintf("%T:%d", stmt, show.Tp), 0, nil
+			return kind, fmt.Sprintf("%T:%d", stmt, show.Tp), 0, nil
 		}
-		if allowDescribe {
-			return "", "", 0, errSQLNotSelectOrDesc
-		}
-		return "", "", 0, errSQLNotSelect
+		return "", "", 0, notAllowedStmtErr(allowDescribe, allowListTables)
 	}
 }
 
-func unwrapDescribeShow(stmt ast.StmtNode) (*ast.ShowStmt, bool) {
+func unwrapMetadataShow(stmt ast.StmtNode) (*ast.ShowStmt, Kind, bool) {
 	var show *ast.ShowStmt
 	switch s := stmt.(type) {
 	case *ast.ExplainStmt:
 		if s.Analyze || s.Explore || s.Format != "" || s.SQLDigest != "" || s.ReplayerFile != "" || s.PlanDigest != "" {
-			return nil, false
+			return nil, "", false
 		}
 		sh, ok := s.Stmt.(*ast.ShowStmt)
 		if !ok || sh.Tp != ast.ShowColumns {
-			return nil, false
+			return nil, "", false
 		}
 		show = sh
 	case *ast.ShowStmt:
 		show = s
 	default:
-		return nil, false
+		return nil, "", false
 	}
 	switch show.Tp {
 	case ast.ShowTables:
-		return show, true
+		return show, KindListTables, true
 	case ast.ShowColumns, ast.ShowIndex, ast.ShowCreateTable:
 		if show.Table == nil || strings.TrimSpace(show.Table.Name.O) == "" {
-			return nil, false
+			return nil, "", false
 		}
-		return show, true
+		return show, KindDescribe, true
 	default:
-		return nil, false
+		return nil, "", false
 	}
 }
 

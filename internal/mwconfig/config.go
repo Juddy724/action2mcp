@@ -94,8 +94,9 @@ var MWPermDefs = map[string][]permDef{
 }
 
 var MWSQLConsolePerms = []permDef{
-	{"select", "查", true, "只读 SELECT：必须带 LIMIT、必须走索引、最多 200 行"},
-	{"describe", "查表结构", false, "只读表列表与表结构查看：SHOW TABLES / DESCRIBE / DESC / SHOW [FULL] COLUMNS / SHOW INDEX / SHOW CREATE TABLE"},
+	{"select", "查", true, "ws_sql_query：只读 SELECT，必须带 LIMIT、必须走索引、最多 200 行"},
+	{"describe", "查表结构", false, "ws_sql_query：DESCRIBE / DESC / SHOW [FULL] COLUMNS / SHOW INDEX / SHOW CREATE TABLE"},
+	{"list_tables", "查表列表", false, "ws_sql_list_tables / SHOW TABLES：列出数据库中的表名，支持模糊过滤"},
 }
 
 func MWPermsOf(m *Middleware) []permDef {

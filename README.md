@@ -3,7 +3,7 @@
 把网页上的业务操作录制下来，整理成 AI 可调用的 MCP 工具。单个可执行文件，解压即用，数据只保存在本机。
 
 <!-- version-banner:start -->
-当前版本：**v0.7.4**。安装包见 [Releases（最新版本）](https://github.com/Juddy724/action2mcp/releases/latest)；更完整的使用说明在解压后的 README.md 里。升级时请保留原 `data/` 目录和 `secret.key`，即可无缝继承已有工具、流程包与配置。
+当前版本：**v0.7.5**。安装包见 [Releases（最新版本）](https://github.com/Juddy724/action2mcp/releases/latest)；更完整的使用说明在解压后的 README.md 里。升级时请保留原 `data/` 目录和 `secret.key`，即可无缝继承已有工具、流程包与配置。
 <!-- version-banner:end -->
 
 ## 界面预览
@@ -31,12 +31,12 @@ AI 调用需要审批时，控制台会弹出卡片；历史记录里的执行�
 ## 下载与启动
 
 <!-- download-table:start -->
-| 平台 | 安装包 (v0.7.4) |
+| 平台 | 安装包 (v0.7.5) |
 |---|---|
-| macOS (Apple 芯片) | [Action2MCP-0.7.4-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.7.4/Action2MCP-0.7.4-macOS-AppleSilicon.zip) |
-| macOS (Intel) | [Action2MCP-0.7.4-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.7.4/Action2MCP-0.7.4-macOS-Intel.zip) |
-| Windows x64 | [Action2MCP-0.7.4-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.7.4/Action2MCP-0.7.4-Windows-x64.zip) |
-| Linux x64 | [Action2MCP-0.7.4-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.7.4/Action2MCP-0.7.4-Linux-x64.zip) |
+| macOS (Apple 芯片) | [Action2MCP-0.7.5-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.7.5/Action2MCP-0.7.5-macOS-AppleSilicon.zip) |
+| macOS (Intel) | [Action2MCP-0.7.5-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.7.5/Action2MCP-0.7.5-macOS-Intel.zip) |
+| Windows x64 | [Action2MCP-0.7.5-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.7.5/Action2MCP-0.7.5-Windows-x64.zip) |
+| Linux x64 | [Action2MCP-0.7.5-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.7.5/Action2MCP-0.7.5-Linux-x64.zip) |
 
 > 也可以直接前往 [GitHub Releases 最新版本页](https://github.com/Juddy724/action2mcp/releases/latest) 查看更新说明并下载对应平台安装包。
 <!-- download-table:end -->

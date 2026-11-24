@@ -79,12 +79,7 @@ func TestSQLGuardAllowsLiteralInStringConditional(t *testing.T) {
 }
 
 func TestSQLGuardDescribeStatements(t *testing.T) {
-	valid := []string{
-		"SHOW TABLES",
-		"SHOW FULL TABLES",
-		"SHOW TABLES FROM staffdb",
-		"SHOW TABLES LIKE '%employee%'",
-		"SHOW FULL TABLES FROM staffdb LIKE 'emp_%'",
+	describeStmts := []string{
 		"DESCRIBE order_dispatch_task",
 		"DESC order_dispatch_task",
 		"DESC orderdb.order_dispatch_task",
@@ -97,9 +92,12 @@ func TestSQLGuardDescribeStatements(t *testing.T) {
 		"SHOW CREATE TABLE order_dispatch_task",
 		"SHOW COLUMNS FROM order_dispatch_task LIKE 'customer%'",
 	}
-	for _, sql := range valid {
+	for _, sql := range describeStmts {
 		if err := Check(sql, 200); err == nil {
 			t.Errorf("Check (AllowDescribe=false) unexpectedly accepted %q", sql)
+		}
+		if _, err := CheckWithOptions(sql, Options{MaxRows: 200, AllowListTables: true}); err == nil {
+			t.Errorf("AllowListTables-only unexpectedly accepted describe %q", sql)
 		}
 		kind, err := CheckWithOptions(sql, Options{MaxRows: 200, AllowDescribe: true})
 		if err != nil {
@@ -108,6 +106,30 @@ func TestSQLGuardDescribeStatements(t *testing.T) {
 		}
 		if kind != KindDescribe {
 			t.Errorf("%q: got kind=%q, want %q", sql, kind, KindDescribe)
+		}
+	}
+
+	listStmts := []string{
+		"SHOW TABLES",
+		"SHOW FULL TABLES",
+		"SHOW TABLES FROM staffdb",
+		"SHOW TABLES LIKE '%employee%'",
+		"SHOW FULL TABLES FROM staffdb LIKE 'emp_%'",
+	}
+	for _, sql := range listStmts {
+		if err := Check(sql, 200); err == nil {
+			t.Errorf("Check (AllowListTables=false) unexpectedly accepted %q", sql)
+		}
+		if _, err := CheckWithOptions(sql, Options{MaxRows: 200, AllowDescribe: true}); err == nil {
+			t.Errorf("AllowDescribe-only unexpectedly accepted list_tables %q", sql)
+		}
+		kind, err := CheckWithOptions(sql, Options{MaxRows: 200, AllowListTables: true})
+		if err != nil {
+			t.Errorf("CheckWithOptions(AllowListTables=true) rejected %q: %v", sql, err)
+			continue
+		}
+		if kind != KindListTables {
+			t.Errorf("%q: got kind=%q, want %q", sql, kind, KindListTables)
 		}
 	}
 
@@ -124,8 +146,8 @@ func TestSQLGuardDescribeStatements(t *testing.T) {
 		"DESCRIBE /*!50000 */ order_dispatch_task",
 	}
 	for _, sql := range rejected {
-		if _, err := CheckWithOptions(sql, Options{MaxRows: 200, AllowDescribe: true}); err == nil {
-			t.Errorf("CheckWithOptions(AllowDescribe=true) unexpectedly accepted %q", sql)
+		if _, err := CheckWithOptions(sql, Options{MaxRows: 200, AllowDescribe: true, AllowListTables: true}); err == nil {
+			t.Errorf("CheckWithOptions unexpectedly accepted %q", sql)
 		}
 	}
 }

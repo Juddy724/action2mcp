@@ -685,7 +685,7 @@ func TestSQLConsoleDescribePermission(t *testing.T) {
 	a := approvalTestApp(t)
 	m := saveSQLConsole(t, a, fake, s.URL, mwconfig.MWDatasource{Alias: "orders", DSID: json.Number("90001"), Description: "订单库"})
 
-	// By default describe permission is disabled -> DESCRIBE must be denied with permission error.
+	// By default describe and list_tables permissions are disabled.
 	v, err := invokeTool(a, context.Background(), mwconfig.WSSQLQueryTool, map[string]any{
 		"middleware": m.Name, "database": "orders", "sql": "DESCRIBE order_dispatch_task",
 	})
@@ -700,18 +700,31 @@ func TestSQLConsoleDescribePermission(t *testing.T) {
 		"middleware": m.Name, "database": "orders",
 	})
 	rep = unpackApprovalReply(v, err)
-	if !rep.isError || !strings.Contains(rep.text, "查表结构") {
+	if !rep.isError || !strings.Contains(rep.text, "查表列表") {
 		t.Fatalf("expected ws_sql_list_tables permission denial, got isError=%v text=%q", rep.isError, rep.text)
 	}
 
-	// Enable describe permission on middleware and save.
+	// Enable describe permission ONLY: DESCRIBE succeeds, while list_tables / SHOW TABLES remain denied.
 	m.Config.Perms["describe"] = true
 	m.Config.Approval = "off"
 	if err := a.store.SaveMiddleware(m); err != nil {
 		t.Fatal(err)
 	}
+	v, err = invokeTool(a, context.Background(), mwconfig.WSSQLQueryTool, map[string]any{
+		"middleware": m.Name, "database": "orders", "sql": "SHOW TABLES",
+	})
+	rep = unpackApprovalReply(v, err)
+	if !rep.isError || !strings.Contains(rep.text, "查表列表") {
+		t.Fatalf("SHOW TABLES should be denied when only describe is enabled: isError=%v text=%q", rep.isError, rep.text)
+	}
 
-	// Summary / MCP tool listing should mention describe support.
+	// Enable list_tables permission as well.
+	m.Config.Perms["list_tables"] = true
+	if err := a.store.SaveMiddleware(m); err != nil {
+		t.Fatal(err)
+	}
+
+	// Summary / MCP tool listing should mention describe and list_tables support.
 	var listedDesc string
 	for _, item := range a.middlewares().ToolList() {
 		if item["name"] == mwconfig.WSSQLQueryTool {
@@ -719,8 +732,8 @@ func TestSQLConsoleDescribePermission(t *testing.T) {
 			break
 		}
 	}
-	if !strings.Contains(listedDesc, "DESCRIBE") || !strings.Contains(listedDesc, "SHOW COLUMNS") {
-		t.Fatalf("expected tool description to mention DESCRIBE/SHOW COLUMNS, got: %s", listedDesc)
+	if !strings.Contains(listedDesc, "DESCRIBE") || !strings.Contains(listedDesc, "SHOW COLUMNS") || !strings.Contains(listedDesc, "SHOW TABLES") {
+		t.Fatalf("expected tool description to mention DESCRIBE/SHOW COLUMNS/SHOW TABLES, got: %s", listedDesc)
 	}
 
 	// Valid schema inspection statements must succeed and skip EXPLAIN preflight.

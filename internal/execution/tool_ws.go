@@ -298,7 +298,7 @@ func (a *Engine) sendWS(p *PreparedCall, secrets *[]string) (*CallResult, error)
 			if got != sql {
 				return wsResult(p, OutcomeGuardRejected, 0, "", "待执行的 SQL 与批准内容不一致"), nil
 			}
-			kind, err := sqlguard.CheckWithOptions(sql, sqlguard.Options{MaxRows: cfg.MaxRows(), AllowDescribe: cfg.SQLGuard.AllowDescribe})
+			kind, err := sqlguard.CheckWithOptions(sql, sqlguard.Options{MaxRows: cfg.MaxRows(), AllowDescribe: cfg.SQLGuard.AllowDescribe, AllowListTables: cfg.SQLGuard.AllowListTables})
 			if err != nil {
 				return wsResult(p, OutcomeGuardRejected, 0, "", err.Error()), nil
 			}
@@ -892,7 +892,7 @@ func (a *Engine) freezeWSCall(t *Tool, vals map[string]any, d *deferredCredentia
 		if want != "" && sql != want {
 			return errors.New("参数中的 SQL 与消息模板中的 SQL 不一致")
 		}
-		if _, err := sqlguard.CheckWithOptions(sql, sqlguard.Options{MaxRows: cfg.MaxRows(), AllowDescribe: cfg.SQLGuard.AllowDescribe}); err != nil {
+		if _, err := sqlguard.CheckWithOptions(sql, sqlguard.Options{MaxRows: cfg.MaxRows(), AllowDescribe: cfg.SQLGuard.AllowDescribe, AllowListTables: cfg.SQLGuard.AllowListTables}); err != nil {
 			return err
 		}
 		p.wsSQL = sql

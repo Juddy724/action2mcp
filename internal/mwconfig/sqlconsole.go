@@ -624,8 +624,9 @@ func (m *Middleware) SQLConsoleFingerprint() string {
 		Auth            *execution.WSAuthConfig
 		Approval        string
 		AllowDescribe   bool
+		AllowListTables bool
 		Updated         string
-	}{m.Config.URL, m.Config.EffectiveWSMode(), m.Config.sqlPath(), m.Config.WSMessages, m.Config.WSHeaders, m.Config.Datasources, m.Config.DSFieldPaths, m.Config.MaxRows, m.Config.TimeoutSec, m.Config.WSCollect, m.Config.WSAuth, m.Config.SQLConsoleApproval(), m.Config.Perms["describe"], m.UpdatedAt})
+	}{m.Config.URL, m.Config.EffectiveWSMode(), m.Config.sqlPath(), m.Config.WSMessages, m.Config.WSHeaders, m.Config.Datasources, m.Config.DSFieldPaths, m.Config.MaxRows, m.Config.TimeoutSec, m.Config.WSCollect, m.Config.WSAuth, m.Config.SQLConsoleApproval(), m.Config.Perms["describe"], m.Config.Perms["list_tables"], m.UpdatedAt})
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
 }
@@ -674,11 +675,19 @@ func (m *Middleware) SQLConsoleTool(ds MWDatasource) (*execution.Tool, error) {
 	}
 	collect := m.sqlConsoleCollect()
 	allowDescribe := m.Config.Perms["describe"]
+	allowListTables := m.Config.Perms["list_tables"]
 	desc := "在 WebSocket SQL 控制台执行一条只读查询。必须是单条 SELECT，必须写 LIMIT，必须走索引。"
 	sqlParamDesc := "一条只读 SELECT，必须带 LIMIT，且不超过允许的行数"
-	if allowDescribe {
-		desc = "在 WebSocket SQL 控制台执行一条只读查询（SELECT 必须带 LIMIT 且走索引）或表列表/表结构查看（SHOW TABLES / DESCRIBE / SHOW COLUMNS / SHOW INDEX / SHOW CREATE TABLE）。"
-		sqlParamDesc = "一条只读 SELECT（必须带 LIMIT）或表列表/表结构查看语句（SHOW TABLES / DESCRIBE / SHOW COLUMNS / SHOW INDEX / SHOW CREATE TABLE）"
+	switch {
+	case allowDescribe && allowListTables:
+		desc = "在 WebSocket SQL 控制台执行一条只读查询（SELECT 必须带 LIMIT 且走索引）、表列表（SHOW TABLES）或表结构查看（DESCRIBE / SHOW COLUMNS / SHOW INDEX / SHOW CREATE TABLE）。"
+		sqlParamDesc = "一条只读 SELECT（必须带 LIMIT）、SHOW TABLES 或表结构查看语句（DESCRIBE / SHOW COLUMNS / SHOW INDEX / SHOW CREATE TABLE）"
+	case allowDescribe:
+		desc = "在 WebSocket SQL 控制台执行一条只读查询（SELECT 必须带 LIMIT 且走索引）或表结构查看（DESCRIBE / SHOW COLUMNS / SHOW INDEX / SHOW CREATE TABLE）。"
+		sqlParamDesc = "一条只读 SELECT（必须带 LIMIT）或表结构查看语句（DESCRIBE / SHOW COLUMNS / SHOW INDEX / SHOW CREATE TABLE）"
+	case allowListTables:
+		desc = "在 WebSocket SQL 控制台执行一条只读查询（SELECT 必须带 LIMIT 且走索引）或表列表查看（SHOW TABLES）。"
+		sqlParamDesc = "一条只读 SELECT（必须带 LIMIT）或表列表查看语句（SHOW TABLES）"
 	}
 	tool := &execution.Tool{
 		Name:        WSSQLQueryTool,
@@ -695,7 +704,7 @@ func (m *Middleware) SQLConsoleTool(ds MWDatasource) (*execution.Tool, error) {
 		},
 		Config: execution.ToolConfig{
 			Messages: msgs,
-			SQLGuard: &execution.SQLGuardConfig{Enabled: true, Param: "sql", Path: m.Config.sqlPath(), MaxRows: ds.EffectiveMaxRows(&m.Config), AllowDescribe: allowDescribe},
+			SQLGuard: &execution.SQLGuardConfig{Enabled: true, Param: "sql", Path: m.Config.sqlPath(), MaxRows: ds.EffectiveMaxRows(&m.Config), AllowDescribe: allowDescribe, AllowListTables: allowListTables},
 			Collect:  collect,
 			Auth:     m.sqlConsoleAuth(),
 		},

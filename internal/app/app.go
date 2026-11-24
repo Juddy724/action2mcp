@@ -29,7 +29,7 @@ import (
 	"time"
 )
 
-const Version = "0.7.4"
+const Version = "0.7.5"
 
 type App struct {
 	dataDir    string

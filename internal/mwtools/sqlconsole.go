@@ -164,7 +164,7 @@ func (a *Service) callWSSQL(ctx context.Context, c *mwCall, args map[string]any)
 	if !c.m.Config.IsSQLConsole() {
 		return c.blocked("该中间件不是 SQL 控制台，不能用 ws_sql_query 调用"), true
 	}
-	if !c.m.Config.Perms["select"] && !c.m.Config.Perms["describe"] {
+	if !c.m.Config.Perms["select"] && !c.m.Config.Perms["describe"] && !c.m.Config.Perms["list_tables"] {
 		msg, _ := c.need("select")
 		return msg, true
 	}
@@ -186,16 +186,21 @@ func (a *Service) callWSSQL(ctx context.Context, c *mwCall, args map[string]any)
 	}
 	cfgVals := ds.ConfigHideValues(&c.m.Config)
 	maxRows := ds.EffectiveMaxRows(&c.m.Config)
-	kind, err := sqlguard.CheckWithOptions(sqlText, sqlguard.Options{MaxRows: maxRows, AllowDescribe: true})
+	kind, err := sqlguard.CheckWithOptions(sqlText, sqlguard.Options{MaxRows: maxRows, AllowDescribe: true, AllowListTables: true})
 	if err != nil {
-		_, checkErr := sqlguard.CheckWithOptions(sqlText, sqlguard.Options{MaxRows: maxRows, AllowDescribe: c.m.Config.Perms["describe"]})
+		_, checkErr := sqlguard.CheckWithOptions(sqlText, sqlguard.Options{MaxRows: maxRows, AllowDescribe: c.m.Config.Perms["describe"], AllowListTables: c.m.Config.Perms["list_tables"]})
 		return c.blocked(a.scrubSQLConsoleText(checkErr.Error(), nil, cfgVals, true)), true
 	}
-	if kind == sqlguard.KindDescribe {
+	switch kind {
+	case sqlguard.KindDescribe:
 		if msg, ok := c.need("describe"); !ok {
 			return msg, true
 		}
-	} else {
+	case sqlguard.KindListTables:
+		if msg, ok := c.need("list_tables"); !ok {
+			return msg, true
+		}
+	default:
 		if msg, ok := c.need("select"); !ok {
 			return msg, true
 		}
@@ -214,7 +219,7 @@ func (a *Service) callWSSQLListTables(ctx context.Context, c *mwCall, args map[s
 	if !c.m.Config.IsSQLConsole() {
 		return c.blocked("该中间件不是 SQL 控制台，不能用 ws_sql_list_tables 调用"), true
 	}
-	if msg, ok := c.need("describe"); !ok {
+	if msg, ok := c.need("list_tables"); !ok {
 		return msg, true
 	}
 	alias := strings.TrimSpace(mcp.ArgString(args, "database"))
