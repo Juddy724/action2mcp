@@ -85,3 +85,37 @@ func TestScrubPreservesJSONNumbers(t *testing.T) {
 		t.Fatalf("expected inline mask inside JSON string, got: %s", scrubbed)
 	}
 }
+
+func TestScrubShortPureDigitSecretRespectsDigitBoundaries(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(dir, "fixture.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE vault(id INTEGER PRIMARY KEY, name TEXT UNIQUE, type TEXT, value_enc TEXT, site TEXT, note TEXT, created_at TEXT, updated_at TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	v, err := OpenVault(db, filepath.Join(dir, "secret.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Upsert("short_pin", "secret", "123", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Upsert("short_zero", "secret", "000", "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Must NOT corrupt longer numbers / error codes / business codes.
+	if got := v.Scrub("Error 1235 (0A000): prepared statement disabled; code=C_1000"); got != "Error 1235 (0A000): prepared statement disabled; code=C_1000" {
+		t.Fatalf("short numeric secret corrupted longer numbers: %q", got)
+	}
+	// Must STILL mask standalone short numeric secrets.
+	if got := v.Scrub(`pin=123&code="000"`); got != `pin=******&code="******"` {
+		t.Fatalf("standalone short numeric secrets were not masked: %q", got)
+	}
+	if got := v.Scrub(`{"pin":123}`); got != `{"pin":"******"}` {
+		t.Fatalf("JSON numeric secret was not masked cleanly: %q", got)
+	}
+}

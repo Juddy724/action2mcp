@@ -138,7 +138,7 @@ func (s *Service[T]) Wait(ctx context.Context, args map[string]any, timeout time
 	case "rejected":
 		return nil, fmt.Errorf("用户未批准本次调用。用户意见：%s。请按意见修改参数后再次调用本工具（会再次请求审批）；不要绕过审批。", p.record.Feedback)
 	case "timeout":
-		return nil, errors.New("审批超时，未执行。如需继续请再次调用。")
+		return nil, errors.New("审批超时，未执行（用户当前可能不在控制台旁，请暂停继续发起需要审批的工具调用，先向用户汇报当前进展并等待指示）")
 	default:
 		return nil, errors.New("审批已取消，未执行")
 	}

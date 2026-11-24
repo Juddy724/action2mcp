@@ -375,8 +375,8 @@ func TestApprovalTimeoutCancelAndShutdown(t *testing.T) {
 			if err != nil || len(rows) != 1 || rows[0].Status != expected {
 				t.Fatal("wrong final approval status")
 			}
-			if mode == "timeout" && !strings.Contains(reply.text, "审批超时，未执行。如需继续请再次调用。") {
-				t.Fatal("timeout message missing")
+			if mode == "timeout" && (!strings.Contains(reply.text, "审批超时，未执行") || !strings.Contains(reply.text, "暂停")) {
+				t.Fatalf("timeout message unexpected: %s", reply.text)
 			}
 			requireApprovalStatus(t, a.approvals().Decide(r.ID, r.Nonce, "approve", nil, "", r.PreviewHash), 409)
 		})

@@ -64,9 +64,9 @@ func TestSQLConsoleApprovalDefaultsAlways(t *testing.T) {
 	}()
 	rec := pendingApprovals(t, a, 1)[0]
 	fake.mu.Lock()
-	if fake.conns != 0 {
+	if fake.business != 0 || fake.explain != 1 {
 		fake.mu.Unlock()
-		t.Fatal("default always dialed before approval")
+		t.Fatalf("before approval expected explain=1 business=0, got explain=%d business=%d", fake.explain, fake.business)
 	}
 	fake.mu.Unlock()
 	approveRecord(t, a, rec)
@@ -76,9 +76,72 @@ func TestSQLConsoleApprovalDefaultsAlways(t *testing.T) {
 	}
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	if fake.business != 1 {
-		t.Fatalf("business=%d after approve", fake.business)
+	if fake.business != 1 || fake.explain != 1 {
+		t.Fatalf("after unchanged approve expected explain=1 business=1, got explain=%d business=%d", fake.explain, fake.business)
 	}
+}
+
+func TestSQLConsolePreflightExplainBlocksBeforeApprovalAndReverifiesEdits(t *testing.T) {
+	t.Run("bad EXPLAIN returns directly without popping approval", func(t *testing.T) {
+		fake := newCountingWS(1)
+		fake.typeALL = true
+		s := fake.start(t)
+		a := approvalTestApp(t)
+		m := saveSQLConsole(t, a, fake, s.URL)
+
+		v, rpcErr := invokeTool(a, context.Background(), mwconfig.WSSQLQueryTool, map[string]any{
+			"middleware": m.Name, "database": "orders", "sql": "SELECT id FROM t WHERE id=1 LIMIT 1",
+		})
+		reply := unpackApprovalReply(v, rpcErr)
+		if !reply.isError || !strings.Contains(reply.text, "全表扫描") {
+			t.Fatalf("expected preflight EXPLAIN rejection, got err=%v text=%s", reply.isError, reply.text)
+		}
+		rows, err := a.store.Approvals.List("all", 20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != 0 {
+			t.Fatalf("failed preflight EXPLAIN must not create approval card, got %d", len(rows))
+		}
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		if fake.explain != 1 || fake.business != 0 {
+			t.Fatalf("expected explain=1 business=0, got explain=%d business=%d", fake.explain, fake.business)
+		}
+	})
+
+	t.Run("edited SQL during approval re-runs EXPLAIN before business query", func(t *testing.T) {
+		fake := newCountingWS(1)
+		s := fake.start(t)
+		a := approvalTestApp(t)
+		m := saveSQLConsole(t, a, fake, s.URL)
+
+		done := make(chan approvalReply, 1)
+		go func() {
+			v, err := invokeTool(a, context.Background(), mwconfig.WSSQLQueryTool, map[string]any{
+				"middleware": m.Name, "database": "orders", "sql": "SELECT id FROM t WHERE id=1 LIMIT 1",
+			})
+			done <- unpackApprovalReply(v, err)
+		}()
+		rec := pendingApprovals(t, a, 1)[0]
+		editedArgs := map[string]any{"database": "orders", "sql": "SELECT id FROM t WHERE id=2 LIMIT 1"}
+		prev, err := a.approvals().Preview(rec.ID, rec.Nonce, editedArgs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := a.approvals().Decide(rec.ID, rec.Nonce, "edit", editedArgs, "", prev.PreviewHash); err != nil {
+			t.Fatal(err)
+		}
+		reply := getApprovalReply(t, done)
+		if reply.isError {
+			t.Fatalf("edited call failed: %s", reply.text)
+		}
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		if fake.explain != 2 || fake.business != 1 {
+			t.Fatalf("edited SQL must re-run EXPLAIN: explain=%d business=%d", fake.explain, fake.business)
+		}
+	})
 }
 
 func TestSQLConsoleApprovalOffRunsWithoutCard(t *testing.T) {
@@ -302,9 +365,9 @@ func TestSQLConsoleApprovalMCPCannotChangeOrSee(t *testing.T) {
 		t.Fatalf("MCP args changed stored approval to %q", got.Config.Approval)
 	}
 	fake.mu.Lock()
-	if fake.conns != 0 {
+	if fake.business != 0 || fake.explain != 1 {
 		fake.mu.Unlock()
-		t.Fatal("approval=off argument skipped the approval card")
+		t.Fatalf("approval=off argument ran business SQL before approval: explain=%d business=%d", fake.explain, fake.business)
 	}
 	fake.mu.Unlock()
 	// cancel by rejecting so the goroutine finishes

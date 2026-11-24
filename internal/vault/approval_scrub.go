@@ -138,6 +138,12 @@ func scrubSecretTextMin(text string, vault *Vault, values []string, minLen int) 
 			if hit.Start < 0 || hit.End > len(current.spans) || hit.Start >= hit.End {
 				continue
 			}
+			matched := current.text[hit.Start:hit.End]
+			if isShortPureDigits(matched) &&
+				((hit.Start > 0 && isASCIIWordByte(current.text[hit.Start-1])) ||
+					(hit.End < len(current.text) && isASCIIWordByte(current.text[hit.End]))) {
+				continue
+			}
 			matches = append(matches, approvalTextSpan{current.spans[hit.Start].start, current.spans[hit.End-1].end})
 		}
 		for encoding := approvalPathEncoding; encoding <= approvalHTMLEncoding; encoding++ {
@@ -200,6 +206,26 @@ func scrubSecretTextMin(text string, vault *Vault, values []string, minLen int) 
 func isLikelyJSON(s string) bool {
 	s = strings.TrimSpace(s)
 	return len(s) >= 2 && ((s[0] == '{' && s[len(s)-1] == '}') || (s[0] == '[' && s[len(s)-1] == ']'))
+}
+
+func isASCIIDigit(b byte) bool {
+	return b >= '0' && b <= '9'
+}
+
+func isASCIIWordByte(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_'
+}
+
+func isShortPureDigits(s string) bool {
+	if len(s) == 0 || len(s) >= 6 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !isASCIIDigit(s[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // jsonBareNumberSpans returns byte ranges of unquoted JSON number tokens in a valid JSON document.

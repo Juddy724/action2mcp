@@ -76,8 +76,9 @@ type PreparedCall struct {
 	wsSQL        string
 	wsConfig     ToolConfig
 	presentCfg   ToolConfig // result_format / selector / detect_failure snapshot (HTTP and WS)
-	configErr    error
-	wsStats      *wsSessionStats
+	configErr         error
+	wsStats           *wsSessionStats
+	explainVerifiedFP string
 }
 
 func replaceRequest(r domain.RequestPreview, replace func(string) string) domain.RequestPreview {
@@ -272,6 +273,9 @@ func (e *Engine) ReviewPreview(p, prior *PreparedCall, confirm bool) {
 	if confirm {
 		p.secretValues = append(p.secretValues, prior.secretValues...)
 		p.configValues = append(p.configValues, prior.configValues...)
+		if prior.explainVerifiedFP != "" && p.Fingerprint() == prior.explainVerifiedFP {
+			p.explainVerifiedFP = prior.explainVerifiedFP
+		}
 		prior = p
 	}
 	p.Preview = e.ScrubApprovalPreview(p.Preview, prior.secretValues)

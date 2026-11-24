@@ -146,7 +146,7 @@ func entryToolDefs() []map[string]any {
 			"inputSchema": obj(map[string]any{"pack": map[string]any{"type": "string", "description": "流程包名称或 id；留空 = 全部 / empty = all"}}),
 			"annotations": mcp.Annotations(false, false, false)},
 		{"name": "call_pack_tool", "title": "调用包内工具（兜底）",
-			"description": "【兜底 Fallback】按工具名调用已开启流程包里的工具（包括 db_query、redis_command 等中间件工具）。当 load_pack 之后你的工具列表里没有出现新工具时使用；arguments 按 load_pack 返回的 inputSchema 填写。权限、自动登录等规则与直接调用完全相同。被调工具若是写操作，仍须用户明确要求才调用。\nCall a pack tool by name when your client did not refresh its tool list after load_pack. arguments must follow the tool's inputSchema.",
+			"description": "【兜底 Fallback】按工具名调用已开启流程包里的工具（包括 db_query、redis_command、ws_sql_query 等中间件工具）。当 load_pack 之后你的工具列表里没有出现新工具时使用；arguments 按 load_pack 返回的 inputSchema 填写（需要审批的工具请务必在 arguments 中传入 operation_note，写明本次操作目的、内容与影响范围）。权限、自动登录等规则与直接调用完全相同。被调工具若是写操作，仍须用户明确要求才调用。\nCall a pack tool by name when your client did not refresh its tool list after load_pack. arguments must follow the tool's inputSchema (include operation_note when required for approval).",
 			"inputSchema": obj(map[string]any{
 				"tool":      map[string]any{"type": "string", "description": "工具名（来自 load_pack 的返回）/ tool name"},
 				"arguments": map[string]any{"type": "object", "description": "工具参数 / tool arguments", "additionalProperties": true},

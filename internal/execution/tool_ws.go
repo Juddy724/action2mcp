@@ -220,7 +220,31 @@ type wsSessionStats struct {
 	dials, explain, business, relogins, writes int
 }
 
+// PreflightExplain runs ONLY the read-only EXPLAIN check over WebSocket before user approval
+// so syntax/column/index errors return directly to the caller without popping dead approvals.
+func (a *Engine) PreflightExplain(p *PreparedCall) (*CallResult, error) {
+	secrets := append([]string{}, p.secretValues...)
+	res, err := a.sendWSInternal(p, &secrets, true)
+	if err != nil {
+		return nil, errors.New(a.ScrubApprovalText(err.Error(), secrets))
+	}
+	if res != nil {
+		res.Body = a.ScrubApprovalText(res.Body, secrets)
+		res.ReqBody = a.ScrubApprovalText(res.ReqBody, secrets)
+		res.URL = a.ScrubApprovalText(res.URL, secrets)
+		res.Error = a.ScrubApprovalText(res.Error, secrets)
+		for k, v := range res.Headers {
+			res.Headers[k] = a.ScrubApprovalText(v, secrets)
+		}
+	}
+	return res, nil
+}
+
 func (a *Engine) sendWS(p *PreparedCall, secrets *[]string) (*CallResult, error) {
+	return a.sendWSInternal(p, secrets, false)
+}
+
+func (a *Engine) sendWSInternal(p *PreparedCall, secrets *[]string, explainOnly bool) (*CallResult, error) {
 	if p.configErr != nil {
 		return wsResult(p, OutcomeGuardRejected, 0, "", p.configErr.Error()), nil
 	}
@@ -319,7 +343,9 @@ func (a *Engine) sendWS(p *PreparedCall, secrets *[]string) (*CallResult, error)
 		_ = src
 
 		timeout := time.Duration(cfg.timeout()) * time.Millisecond
-		if cfg.SqlGuardEnabled() && sqlKind == sqlguard.KindSelect {
+		needExplain := cfg.SqlGuardEnabled() && sqlKind == sqlguard.KindSelect &&
+			(explainOnly || p.explainVerifiedFP == "" || p.explainVerifiedFP != p.Fingerprint())
+		if needExplain {
 			explainMsg, err := replaceJSONString(messages[0], cfg.SQLGuard.Path, "EXPLAIN "+sql)
 			if err != nil {
 				return wsResult(p, OutcomeGuardRejected, 0, "", err.Error()), nil
@@ -346,6 +372,13 @@ func (a *Engine) sendWS(p *PreparedCall, secrets *[]string) (*CallResult, error)
 				return res, nil
 			}
 			_ = exRes
+			p.explainVerifiedFP = p.Fingerprint()
+		}
+		if explainOnly {
+			res := wsResult(p, OutcomeSuccess, 200, "", "")
+			res.Relogged = lastRelog
+			res.CredSource = src
+			return res, nil
 		}
 
 		biz, authFail, err := a.roundTripWS(p, headers, messages[0], cfg, timeout, &stats, false, keywords, secrets)

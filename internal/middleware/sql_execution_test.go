@@ -54,3 +54,17 @@ func TestSQLExecutionRetainsResultBudgetAndWriteMetadata(t *testing.T) {
 		t.Fatalf("write=%+v err=%v", write, err)
 	}
 }
+
+func TestMySQLConnectorEnablesInterpolateParams(t *testing.T) {
+	m := &Target{ID: 1, Name: "ob-test", Type: "mysql", Config: Config{Host: "127.0.0.1", Port: 2883, User: "u", Database: "d"}}
+	cfg, err := m.mysqlConnector("pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.InterpolateParams {
+		t.Fatal("expected InterpolateParams=true for OceanBase compatibility")
+	}
+	if cfg.MultiStatements {
+		t.Fatal("MultiStatements must remain false")
+	}
+}

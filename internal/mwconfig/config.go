@@ -329,7 +329,7 @@ func (m *Middleware) Normalize() error {
 			return errors.New("发送的文本帧里要有 {{command}}，调用时会替换成要执行的命令")
 		}
 		if c.CommandAllow == nil {
-			c.CommandAllow = []string{"tail", "head", "ls", "cat", "grep", "pwd"}
+			c.CommandAllow = []string{"tail", "head", "ls", "cat", "grep", "sed", "pwd"}
 		} else {
 			c.CommandAllow = cleanList(c.CommandAllow)
 		}

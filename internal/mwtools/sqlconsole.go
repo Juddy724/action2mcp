@@ -209,10 +209,18 @@ func (a *Service) callWSSQL(ctx context.Context, c *mwCall, args map[string]any)
 	if err != nil {
 		return c.blocked(a.scrubSQLConsoleText(err.Error(), nil, cfgVals, true)), true
 	}
-	return a.execWSSQLTool(ctx, c, ds, tool, sqlText, args, cfgVals)
+	return a.execWSSQLTool(ctx, c, ds, tool, sqlText, kind, args, cfgVals)
 }
 
-func (a *Service) execWSSQLTool(ctx context.Context, c *mwCall, ds mwconfig.MWDatasource, tool *execution.Tool, sqlText string, args map[string]any, cfgVals []string) (string, bool) {
+func appendInformationSchemaHint(sqlText, errText string) string {
+	if strings.Contains(strings.ToLower(sqlText), "information_schema") &&
+		(strings.Contains(errText, "EXPLAIN") || strings.Contains(errText, "索引") || strings.Contains(errText, "主键")) {
+		return errText + "\n提示：information_schema 为系统元数据视图，无法通过索引预检；查看表列表请直接执行 SHOW TABLES（或 SHOW TABLES LIKE '%关键字%'），查看表结构/索引请执行 DESCRIBE <table> / SHOW FULL COLUMNS FROM <table> / SHOW INDEX FROM <table>。"
+	}
+	return errText
+}
+
+func (a *Service) execWSSQLTool(ctx context.Context, c *mwCall, ds mwconfig.MWDatasource, tool *execution.Tool, sqlText string, kind sqlguard.Kind, args map[string]any, cfgVals []string) (string, bool) {
 	callArgs := map[string]any{"sql": sqlText, "database": ds.Alias}
 	prepared, err := a.engine().Prepare(tool, callArgs)
 	if err != nil {
@@ -221,7 +229,19 @@ func (a *Service) execWSSQLTool(ctx context.Context, c *mwCall, ds mwconfig.MWDa
 	prepared.RedactConsole(c.m.Name, ds.Alias, cfgVals)
 	var pending *invoke.Approved
 	prefix := ""
+	preRelogged := false
 	if c.m.Config.SQLConsoleApproval() != "off" {
+		if kind == sqlguard.KindSelect {
+			exRes, exErr := a.engine().PreflightExplain(prepared)
+			if exText, failed := formatWSSQLResult(exRes, exErr); failed {
+				exText = a.engine().ScrubPrepared(exText, prepared, true)
+				exText = appendInformationSchemaHint(sqlText, exText)
+				return c.blocked(exText), true
+			}
+			if exRes != nil && exRes.Relogged {
+				preRelogged = true
+			}
+		}
 		_, explanation := execution.ExtractApprovalNote(tool, args)
 		if explanation != "" {
 			explanation = a.scrubSQLConsoleText(explanation, nil, cfgVals, true)
@@ -240,14 +260,14 @@ func (a *Service) execWSSQLTool(ctx context.Context, c *mwCall, ds mwconfig.MWDa
 		c.auditNote = "未审批，直接执行"
 	}
 	res, err := a.engine().Send(prepared)
+	if preRelogged && res != nil && !res.Relogged {
+		res.Relogged = true
+	}
 	text, isErr := formatWSSQLResult(res, err)
 	text = prefix + text
 	if isErr {
 		text = a.engine().ScrubPrepared(text, prepared, true)
-		if strings.Contains(strings.ToLower(sqlText), "information_schema") &&
-			(strings.Contains(text, "EXPLAIN") || strings.Contains(text, "索引") || strings.Contains(text, "主键")) {
-			text += "\n提示：information_schema 为系统元数据视图，无法通过索引预检；查看表列表请直接执行 SHOW TABLES（或 SHOW TABLES LIKE '%关键字%'），查看表结构/索引请执行 DESCRIBE <table> / SHOW FULL COLUMNS FROM <table> / SHOW INDEX FROM <table>。"
-		}
+		text = appendInformationSchemaHint(sqlText, text)
 	}
 	if pending != nil {
 		a.approvals().Service().RecordResult(pending.Record.ID, text)

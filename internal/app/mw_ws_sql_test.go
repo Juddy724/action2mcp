@@ -323,9 +323,9 @@ func TestSQLConsoleApprovalPreviewHidesIDs(t *testing.T) {
 		t.Fatalf("preview body should be SQL, got %q", rec.Preview.Body)
 	}
 	fake.mu.Lock()
-	if fake.conns != 0 {
+	if fake.business != 0 || fake.explain != 1 {
 		fake.mu.Unlock()
-		t.Fatal("dialed before approval")
+		t.Fatalf("before approval expected explain=1 business=0, got explain=%d business=%d", fake.explain, fake.business)
 	}
 	fake.mu.Unlock()
 	approveRecord(t, a, rec)

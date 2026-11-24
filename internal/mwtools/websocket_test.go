@@ -80,6 +80,31 @@ func TestWSCommandPolicy(t *testing.T) {
 			t.Fatal("accepted " + cmd)
 		}
 	}
+	sedAllow := []string{"cat", "sed"}
+	for _, cmd := range []string{
+		"sed -n '14795,14825p' app.log",
+		"sed -n '10p' app.log",
+		"sed -n '10,+20p' app.log",
+		"cat app.log | sed -n '1,50p'",
+	} {
+		if err := checkExecCommand(cmd, sedAllow); err != nil {
+			t.Fatalf("expected read-only sed to pass (%s): %v", cmd, err)
+		}
+	}
+	for _, cmd := range []string{
+		"sed -i 's/a/b/g' app.log",
+		"sed 's/a/b/' app.log",
+		"sed -n '1,5w /tmp/out' app.log",
+		"sed -n '1,5p' -i app.log",
+		"sed -n '1e id' app.log",
+	} {
+		if err := checkExecCommand(cmd, sedAllow); err == nil {
+			t.Fatal("accepted unsafe sed: " + cmd)
+		}
+	}
+	if err := checkExecCommand("grep foo app.log 2>/dev/null", allow); err == nil || !strings.Contains(err.Error(), "2>/dev/null") || !strings.Contains(err.Error(), "sed -n") {
+		t.Fatalf("expected actionable redirect error, got: %v", err)
+	}
 }
 
 func TestPromptDoesNotCutLogLine(t *testing.T) {

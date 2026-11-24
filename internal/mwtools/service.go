@@ -105,7 +105,7 @@ func mwToolDefs() []ToolDef {
 			map[string]any{"topic": str("Topic / 队列名"), "partitions": map[string]any{"type": "integer", "description": "Kafka 分区数 / RocketMQ 队列数（可选）"}}, []string{"topic"}, ""},
 		{"pod_read_log", "websocket", "在 WebSocket 终端里查看日志文件末尾（需要「查日志」权限）。服务端固定执行 tail，不会运行其他命令。lines 不填默认 100，最大 2000。连接参数（如 app_code、pod_name）填这个中间件地址里要求的那些。",
 			map[string]any{"file": str("日志文件路径，例如 BusinessException.log 或 /var/log/app.log"), "lines": map[string]any{"type": "integer", "description": "末尾行数，默认 100，最大 2000"}}, []string{"file"}, mwconfig.WSModeTerminal},
-		{"pod_exec", "websocket", "在 WebSocket 终端里执行一条命令（需要「执行命令」权限，默认关闭）。配置了允许的命令时，管道可以用 | 连接，但每一段的命令都要在允许列表中，不能使用重定向或命令替换。允许列表为空时，命令会原样发到远端 shell。列表里缺的命令请在中间件配置里追加。find 只允许 -name、-mmin、-mtime、-type、-size、-maxdepth；cut 只允许 -c；rg 不能使用 --pre。",
+		{"pod_exec", "websocket", "在 WebSocket 终端里执行一条命令（需要「执行命令」权限，默认关闭）。配置了允许的命令时，管道可以用 | 连接，但每一段的命令都要在允许列表中，不能使用重定向（如 2>/dev/null）、命令替换或分号串联多条命令。允许列表为空时，命令会原样发到远端 shell。列表里缺的命令请在中间件配置里追加。find 只允许 -name、-mmin、-mtime、-type、-size、-maxdepth；cut 只允许 -c；rg 不能使用 --pre；sed 只允许 -n '起始行,结束行p' 只读打印行区间。",
 			map[string]any{"command": str("要执行的命令，例如 ls /app/logs"), "timeout": map[string]any{"type": "integer", "description": "超时秒数（可选，不能超过中间件里配置的超时）"}}, []string{"command"}, mwconfig.WSModeTerminal},
 		{mwconfig.WSSQLQueryTool, "websocket", "在 WebSocket SQL 控制台中间件上执行一条只读语句。SELECT 需要「查」权限（必须是单条、带显式 LIMIT 且走索引，最多 200 行）；查看表列表请直接执行 SHOW TABLES 或 SHOW TABLES LIKE '%关键字%'（需要「查表列表」权限，无需 LIMIT 与索引预检，勿查 information_schema.tables）；查看表结构与索引请执行 DESCRIBE / DESC / SHOW [FULL] COLUMNS / SHOW INDEX / SHOW CREATE TABLE（需要「查表结构」权限，无需 LIMIT 与索引预检）。参数 database 填写该中间件已配置的数据源别名；请根据用户的问题，对照工具说明里列出的数据源及其说明，选择最匹配的一项。",
 			map[string]any{"sql": str("一条只读 SELECT（必须带 LIMIT），或按已开启权限执行 SHOW TABLES [LIKE '...'] / DESCRIBE / SHOW COLUMNS / SHOW INDEX / SHOW CREATE TABLE"), "database": str("数据源别名（见工具说明中的数据源列表）"), execution.ApprovalNoteParam: str("操作解释说明与影响分析：请简要说明本次查询的目的、内容以及对业务或系统的影响")}, []string{"sql", "database", execution.ApprovalNoteParam}, mwconfig.WSModeSQLConsole},
@@ -416,9 +416,10 @@ func (c *mwCall) done(result string, err error) (string, bool) {
 // callMWTool runs one middleware tool. It returns the text for the agent and whether it is an error.
 func (a *Service) Call(ctx context.Context, client, tool string, args map[string]any) (string, bool) {
 	def, _ := IsTool(tool)
-	name := mcp.ArgString(args, "middleware")
+	name := strings.TrimSpace(mcp.ArgString(args, "middleware"))
 	ms, _ := a.repo.ExposedMiddleware()
 	var m *mwconfig.Middleware
+	var candidates []*mwconfig.Middleware
 	avail := []string{}
 	for _, x := range ms {
 		if x.Type != def.Type {
@@ -427,10 +428,15 @@ func (a *Service) Call(ctx context.Context, client, tool string, args map[string
 		if def.Mode != "" && x.Config.EffectiveWSMode() != def.Mode {
 			continue
 		}
+		candidates = append(candidates, x)
 		avail = append(avail, x.Name)
 		if x.Name == name {
 			m = x
 		}
+	}
+	if m == nil && name == "" && len(candidates) == 1 {
+		m = candidates[0]
+		name = m.Name
 	}
 	if m == nil {
 		msg := fmt.Sprintf("中间件「%s」不存在、类型不匹配，或所在流程包未开启。", name)

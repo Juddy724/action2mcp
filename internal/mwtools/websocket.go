@@ -22,6 +22,7 @@ import (
 var (
 	wsPlaceholderRe = regexp.MustCompile(`\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}`)
 	ansiRe          = regexp.MustCompile("\x1b\\[[0-9;?]*[A-Za-z]|\x1b\\][^\x07]*\x07")
+	sedPrintRangeRe = regexp.MustCompile(`^[0-9]+(,[0-9]+|,\+[0-9]+)?p$`)
 )
 
 func wsPlaceholders(ms []*mwconfig.Middleware) []string {
@@ -218,9 +219,28 @@ func checkCommandArgs(cmd string, args []string) error {
 		return checkCutArgs(args)
 	case "rg":
 		return checkRgArgs(args)
+	case "sed":
+		return checkSedArgs(args)
 	default:
 		return nil
 	}
+}
+
+func checkSedArgs(args []string) error {
+	if len(args) < 2 || args[0] != "-n" || !sedPrintRangeRe.MatchString(args[1]) {
+		return errors.New("sed 只允许 -n '起始行,结束行p' 只读打印行区间（例如 sed -n '100,150p' app.log），不能使用 -i、s/ 或其他脚本")
+	}
+	afterDashDash := false
+	for _, a := range args[2:] {
+		if !afterDashDash && a == "--" {
+			afterDashDash = true
+			continue
+		}
+		if !afterDashDash && strings.HasPrefix(a, "-") {
+			return fmt.Errorf("sed 只允许 -n '起始行,结束行p'，不能使用参数 %s", a)
+		}
+	}
+	return nil
 }
 
 func checkFindArgs(args []string) error {
@@ -360,7 +380,7 @@ func rejectShellMeta(part string) error {
 		case '\'', '"':
 			quote = c
 		case ';', '&', '<', '>', '`', '$':
-			return errors.New("不能使用重定向、命令替换或用分号串联命令")
+			return errors.New("不能使用重定向（如 2>/dev/null）、命令替换或分号串联多条命令；请去掉 2>/dev/null 并将多条命令拆成多次调用（按行号区间查看可用 sed -n '起始行,结束行p' 文件 或 tail -n +起始行 文件 | head -n 行数）")
 		}
 	}
 	return nil

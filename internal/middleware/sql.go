@@ -419,6 +419,7 @@ func (m *Target) mysqlConnector(pw string) (*mysql.Config, error) {
 		}
 	}
 	cfg.Collation = "utf8mb4_general_ci"
+	cfg.InterpolateParams = true
 	return cfg, nil
 }
 

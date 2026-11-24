@@ -4,11 +4,13 @@ import (
 	"action2mcp/internal/execution"
 	"action2mcp/internal/invoke"
 	"action2mcp/internal/middleware"
+	"action2mcp/internal/mwconfig"
 	"action2mcp/internal/store"
 	"action2mcp/internal/vault"
 	"crypto/rand"
 	"encoding/hex"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -66,5 +68,43 @@ func TestCallUnexposedMiddlewareIsAuditedWithoutCollaborators(t *testing.T) {
 	}
 	if len(s.ToolList()) != 0 {
 		t.Fatal("no exposed middleware must yield no tools")
+	}
+}
+
+func TestEmptyMiddlewareAutoSelectsSingleCandidate(t *testing.T) {
+	s, fx := testService(t)
+	p := &store.Pack{Name: "p1", Enabled: true}
+	m1 := &mwconfig.Middleware{Name: "only_mysql", Type: "mysql", Config: mwconfig.MWConfig{
+		Host: "127.0.0.1", Port: 3306, User: "u", Database: "d",
+		Perms: map[string]bool{"select": false},
+	}}
+	if err := fx.store.SaveMiddleware(m1); err != nil {
+		t.Fatal(err)
+	}
+	p.MiddlewareIDs = []int64{m1.ID}
+	if err := fx.store.SavePack(p); err != nil {
+		t.Fatal(err)
+	}
+	// Empty middleware should auto-route to only_mysql (and hit its permission check, NOT "不存在").
+	text, isErr := s.Call(t.Context(), "test", "db_query", map[string]any{"sql": "SELECT 1"})
+	if !isErr || !strings.Contains(text, "only_mysql") || strings.Contains(text, "不存在") {
+		t.Fatalf("expected auto-routing to only_mysql, got: %q", text)
+	}
+
+	// Adding a second mysql middleware must disable auto-selection and list both choices.
+	m2 := &mwconfig.Middleware{Name: "second_mysql", Type: "mysql", Config: mwconfig.MWConfig{
+		Host: "127.0.0.1", Port: 3306, User: "u", Database: "d",
+		Perms: map[string]bool{"select": false},
+	}}
+	if err := fx.store.SaveMiddleware(m2); err != nil {
+		t.Fatal(err)
+	}
+	p.MiddlewareIDs = []int64{m1.ID, m2.ID}
+	if err := fx.store.SavePack(p); err != nil {
+		t.Fatal(err)
+	}
+	text2, isErr2 := s.Call(t.Context(), "test", "db_query", map[string]any{"sql": "SELECT 1"})
+	if !isErr2 || !strings.Contains(text2, "不存在") || !strings.Contains(text2, "only_mysql") || !strings.Contains(text2, "second_mysql") {
+		t.Fatalf("expected disambiguation error listing both, got: %q", text2)
 	}
 }

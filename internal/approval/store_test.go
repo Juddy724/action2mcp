@@ -29,6 +29,13 @@ SELECT '', 'finished', 0, 1, '', '{}', '{}', 'rejected', '', '', '', '历史快�
 	if err := store.Finish(&last); err != nil {
 		t.Fatal(err)
 	}
+	var rawFinal string
+	if err := store.db.QueryRow(`SELECT final_args_display FROM approvals WHERE id=?`, last.ID).Scan(&rawFinal); err != nil {
+		t.Fatal(err)
+	}
+	if rawFinal != "" {
+		t.Fatalf("expected empty final_args_display on cancelled record, got %q", rawFinal)
+	}
 	var pending, finished int
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM approvals WHERE status='pending'`).Scan(&pending); err != nil {
 		t.Fatal(err)

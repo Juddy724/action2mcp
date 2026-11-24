@@ -16,6 +16,12 @@ type SQLStore struct{ db *sql.DB }
 func NewSQLStore(db *sql.DB) *SQLStore { return &SQLStore{db: db} }
 func now() string                      { return time.Now().Format("2006-01-02 15:04:05") }
 func js(v any) string                  { b, _ := json.Marshal(v); return string(b) }
+func finalArgsJSON(m map[string]string) string {
+	if len(m) == 0 {
+		return ""
+	}
+	return js(m)
+}
 
 type storedPreview struct {
 	Preview     domain.RequestPreview `json:"preview"`
@@ -82,7 +88,7 @@ func (s *SQLStore) Finish(r *Record) error {
 	}
 	defer tx.Rollback()
 	res, err := tx.Exec(`UPDATE approvals SET status=?,feedback=?,decided_at=?,final_args_display=?,preview_display=?,result=? WHERE id=? AND status='pending'`,
-		r.Status, r.Feedback, r.DecidedAt, js(r.FinalArgsDisplay), js(storedPreview{r.Preview, r.PreviewHash, r.Explanation}), r.Result, r.ID)
+		r.Status, r.Feedback, r.DecidedAt, finalArgsJSON(r.FinalArgsDisplay), js(storedPreview{r.Preview, r.PreviewHash, r.Explanation}), r.Result, r.ID)
 	if err != nil {
 		return err
 	}
