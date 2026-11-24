@@ -22,10 +22,9 @@ func defaultWSMessages() []string {
 }
 
 const (
-	WSModeTerminal      = "terminal"
-	WSModeSQLConsole    = "sql_console"
-	WSSQLQueryTool      = "ws_sql_query"
-	WSSQLListTablesTool = "ws_sql_list_tables"
+	WSModeTerminal   = "terminal"
+	WSModeSQLConsole = "sql_console"
+	WSSQLQueryTool   = "ws_sql_query"
 )
 
 // MWSQLDefaults are connection fields shared by every datasource in a SQL 控制台

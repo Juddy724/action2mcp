@@ -107,10 +107,8 @@ func mwToolDefs() []ToolDef {
 			map[string]any{"file": str("日志文件路径，例如 BusinessException.log 或 /var/log/app.log"), "lines": map[string]any{"type": "integer", "description": "末尾行数，默认 100，最大 2000"}}, []string{"file"}, mwconfig.WSModeTerminal},
 		{"pod_exec", "websocket", "在 WebSocket 终端里执行一条命令（需要「执行命令」权限，默认关闭）。配置了允许的命令时，管道可以用 | 连接，但每一段的命令都要在允许列表中，不能使用重定向或命令替换。允许列表为空时，命令会原样发到远端 shell。列表里缺的命令请在中间件配置里追加。find 只允许 -name、-mmin、-mtime、-type、-size、-maxdepth；cut 只允许 -c；rg 不能使用 --pre。",
 			map[string]any{"command": str("要执行的命令，例如 ls /app/logs"), "timeout": map[string]any{"type": "integer", "description": "超时秒数（可选，不能超过中间件里配置的超时）"}}, []string{"command"}, mwconfig.WSModeTerminal},
-		{mwconfig.WSSQLQueryTool, "websocket", "在 WebSocket SQL 控制台中间件上执行一条只读查询。SELECT 必须是单条、带显式 LIMIT（不超过允许的行数，最多 200 行）且走索引；开启「查表结构」权限后支持 DESCRIBE / DESC / SHOW [FULL] COLUMNS / SHOW INDEX / SHOW CREATE TABLE；开启「查表列表」权限后支持 SHOW TABLES（无需 LIMIT 与索引预检）。参数 database 填写该中间件已配置的数据源别名；请根据用户的问题，对照工具说明里列出的数据源及其说明，选择最匹配的一项。",
-			map[string]any{"sql": str("一条只读 SELECT（必须带 LIMIT），或按已开启权限执行 DESCRIBE / SHOW COLUMNS / SHOW INDEX / SHOW CREATE TABLE / SHOW TABLES"), "database": str("数据源别名（见工具说明中的数据源列表）"), execution.ApprovalNoteParam: str("操作解释说明与影响分析：请简要说明本次查询的目的、内容以及对业务或系统的影响")}, []string{"sql", "database", execution.ApprovalNoteParam}, mwconfig.WSModeSQLConsole},
-		{mwconfig.WSSQLListTablesTool, "websocket", "列出 WebSocket SQL 控制台指定数据源中的数据库表列表（需要「查表列表」权限），避免猜测表名。可选 like 参数按表名模糊过滤（如 %employee%）；查到表名后再用 ws_sql_query 查看表结构（DESCRIBE）或执行 SELECT。",
-			map[string]any{"database": str("数据源别名（见工具说明中的数据源列表）"), "like": str("表名模糊匹配模式（可选，支持 % 和 _ 通配符，例如 %employee% 或 ips_%；留空列出全部表）"), execution.ApprovalNoteParam: str("操作解释说明与影响分析：请简要说明本次查询的目的、内容以及对业务或系统的影响")}, []string{"database", execution.ApprovalNoteParam}, mwconfig.WSModeSQLConsole},
+		{mwconfig.WSSQLQueryTool, "websocket", "在 WebSocket SQL 控制台中间件上执行一条只读语句。SELECT 需要「查」权限（必须是单条、带显式 LIMIT 且走索引，最多 200 行）；查看表列表请直接执行 SHOW TABLES 或 SHOW TABLES LIKE '%关键字%'（需要「查表列表」权限，无需 LIMIT 与索引预检，勿查 information_schema.tables）；查看表结构与索引请执行 DESCRIBE / DESC / SHOW [FULL] COLUMNS / SHOW INDEX / SHOW CREATE TABLE（需要「查表结构」权限，无需 LIMIT 与索引预检）。参数 database 填写该中间件已配置的数据源别名；请根据用户的问题，对照工具说明里列出的数据源及其说明，选择最匹配的一项。",
+			map[string]any{"sql": str("一条只读 SELECT（必须带 LIMIT），或按已开启权限执行 SHOW TABLES [LIKE '...'] / DESCRIBE / SHOW COLUMNS / SHOW INDEX / SHOW CREATE TABLE"), "database": str("数据源别名（见工具说明中的数据源列表）"), execution.ApprovalNoteParam: str("操作解释说明与影响分析：请简要说明本次查询的目的、内容以及对业务或系统的影响")}, []string{"sql", "database", execution.ApprovalNoteParam}, mwconfig.WSModeSQLConsole},
 	}
 }
 
@@ -154,7 +152,7 @@ func jsonText(v any) string {
 func mwToolAnnotations(name string) (write bool, destructive, idempotent bool) {
 	switch name {
 	case "db_list_tables", "db_describe_table", "redis_scan",
-		"mq_peek", "mq_list_topics", "pod_read_log", mwconfig.WSSQLQueryTool, mwconfig.WSSQLListTablesTool:
+		"mq_peek", "mq_list_topics", "pod_read_log", mwconfig.WSSQLQueryTool:
 		return false, false, true
 	case "db_query":
 		return true, true, false
@@ -274,7 +272,7 @@ func (a *Service) Summary(m *mwconfig.Middleware) string {
 				s += "；支持 DESCRIBE / SHOW COLUMNS / SHOW INDEX / SHOW CREATE TABLE 查看表结构与索引"
 			}
 			if c.Perms["list_tables"] {
-				s += "；支持 ws_sql_list_tables / SHOW TABLES 查看表列表"
+				s += "；支持 SHOW TABLES [LIKE '...'] 查看表列表"
 			}
 		} else if len(c.CommandAllow) > 0 {
 			s += "；pod_exec 只允许：" + strings.Join(c.CommandAllow, "、")
@@ -324,7 +322,7 @@ func (a *Service) ToolListFor(ms []*mwconfig.Middleware, packs map[int64][]strin
 			props[k] = v
 		}
 		req := append([]string{"middleware"}, d.Required...)
-		if d.Name == mwconfig.WSSQLQueryTool || d.Name == mwconfig.WSSQLListTablesTool {
+		if d.Name == mwconfig.WSSQLQueryTool {
 			aliases := sqlConsoleAliases(list)
 			if len(aliases) > 0 {
 				props["database"] = map[string]any{"type": "string", "enum": aliases, "description": "数据源别名。请根据用户的问题，对照下面列出的数据源说明选择最匹配的一项"}
@@ -382,7 +380,7 @@ func (c *mwCall) blocked(msg string) string {
 
 func isDBQueryTool(name string) bool {
 	switch name {
-	case mwconfig.WSSQLQueryTool, mwconfig.WSSQLListTablesTool, "db_query", "db_list_tables", "db_describe_table":
+	case mwconfig.WSSQLQueryTool, "db_query", "db_list_tables", "db_describe_table":
 		return true
 	default:
 		return false
@@ -449,9 +447,6 @@ func (a *Service) Call(ctx context.Context, client, tool string, args map[string
 	case "websocket":
 		if def.Name == mwconfig.WSSQLQueryTool {
 			return a.callWSSQL(ctx, c, args)
-		}
-		if def.Name == mwconfig.WSSQLListTablesTool {
-			return a.callWSSQLListTables(ctx, c, args)
 		}
 		return a.callWS(ctx, c, args)
 	}

@@ -696,15 +696,15 @@ func TestSQLConsoleDescribePermission(t *testing.T) {
 	if fake.explain != 0 || fake.business != 0 {
 		t.Fatalf("denied describe should not send WS frames: explain=%d business=%d", fake.explain, fake.business)
 	}
-	v, err = invokeTool(a, context.Background(), mwconfig.WSSQLListTablesTool, map[string]any{
-		"middleware": m.Name, "database": "orders",
+	v, err = invokeTool(a, context.Background(), mwconfig.WSSQLQueryTool, map[string]any{
+		"middleware": m.Name, "database": "orders", "sql": "SHOW TABLES",
 	})
 	rep = unpackApprovalReply(v, err)
 	if !rep.isError || !strings.Contains(rep.text, "查表列表") {
-		t.Fatalf("expected ws_sql_list_tables permission denial, got isError=%v text=%q", rep.isError, rep.text)
+		t.Fatalf("expected SHOW TABLES permission denial, got isError=%v text=%q", rep.isError, rep.text)
 	}
 
-	// Enable describe permission ONLY: DESCRIBE succeeds, while list_tables / SHOW TABLES remain denied.
+	// Enable describe permission ONLY: DESCRIBE succeeds, while SHOW TABLES remains denied.
 	m.Config.Perms["describe"] = true
 	m.Config.Approval = "off"
 	if err := a.store.SaveMiddleware(m); err != nil {
@@ -724,19 +724,21 @@ func TestSQLConsoleDescribePermission(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Summary / MCP tool listing should mention describe and list_tables support.
+	// Only ws_sql_query should be exposed (no separate ws_sql_list_tables tool), and its description mentions DESCRIBE & SHOW TABLES.
 	var listedDesc string
 	for _, item := range a.middlewares().ToolList() {
+		if item["name"] == "ws_sql_list_tables" {
+			t.Fatal("ws_sql_list_tables should not be exposed as a separate tool")
+		}
 		if item["name"] == mwconfig.WSSQLQueryTool {
 			listedDesc, _ = item["description"].(string)
-			break
 		}
 	}
 	if !strings.Contains(listedDesc, "DESCRIBE") || !strings.Contains(listedDesc, "SHOW COLUMNS") || !strings.Contains(listedDesc, "SHOW TABLES") {
 		t.Fatalf("expected tool description to mention DESCRIBE/SHOW COLUMNS/SHOW TABLES, got: %s", listedDesc)
 	}
 
-	// Valid schema inspection statements must succeed and skip EXPLAIN preflight.
+	// Valid schema inspection and table-listing statements must succeed and skip EXPLAIN preflight.
 	for _, stmt := range []string{
 		"SHOW TABLES",
 		"SHOW TABLES LIKE '%task%'",
@@ -764,49 +766,7 @@ func TestSQLConsoleDescribePermission(t *testing.T) {
 		}
 	}
 
-	// Dedicated ws_sql_list_tables tool works with and without like filter, skips EXPLAIN, and rejects invalid like input.
-	for _, tc := range []struct {
-		like    string
-		wantSQL string
-	}{
-		{"", "SHOW TABLES"},
-		{"%employee%", "SHOW TABLES LIKE '%employee%'"},
-	} {
-		fake.mu.Lock()
-		prevBiz := fake.business
-		fake.mu.Unlock()
-		args := map[string]any{"middleware": m.Name, "database": "orders"}
-		if tc.like != "" {
-			args["like"] = tc.like
-		}
-		v, err := invokeTool(a, context.Background(), mwconfig.WSSQLListTablesTool, args)
-		rep := unpackApprovalReply(v, err)
-		if rep.isError || !strings.Contains(rep.text, "customer_id") {
-			t.Fatalf("ws_sql_list_tables(%q) failed: isError=%v text=%q", tc.like, rep.isError, rep.text)
-		}
-		fake.mu.Lock()
-		gotExplain := fake.explain
-		gotBiz := fake.business
-		lastMsg := fake.all[len(fake.all)-1]
-		fake.mu.Unlock()
-		if gotExplain != 0 || gotBiz != prevBiz+1 {
-			t.Fatalf("ws_sql_list_tables(%q) expected no EXPLAIN and 1 query, got explain=%d business=%d", tc.like, gotExplain, gotBiz)
-		}
-		if !strings.Contains(lastMsg, tc.wantSQL) {
-			t.Fatalf("ws_sql_list_tables(%q) sent %q, want %q", tc.like, lastMsg, tc.wantSQL)
-		}
-	}
-
-	// Reject SQL injection attempt in like parameter.
-	v, err = invokeTool(a, context.Background(), mwconfig.WSSQLListTablesTool, map[string]any{
-		"middleware": m.Name, "database": "orders", "like": "a' OR '1'='1",
-	})
-	rep = unpackApprovalReply(v, err)
-	if !rep.isError {
-		t.Fatalf("invalid like pattern should be rejected, got: %q", rep.text)
-	}
-
-	// Non-schema SHOW commands remain blocked even with describe enabled.
+	// Non-schema SHOW commands remain blocked even with describe and list_tables enabled.
 	v, err = invokeTool(a, context.Background(), mwconfig.WSSQLQueryTool, map[string]any{
 		"middleware": m.Name, "database": "orders", "sql": "SHOW VARIABLES",
 	})

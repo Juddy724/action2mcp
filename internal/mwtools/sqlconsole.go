@@ -12,12 +12,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 )
-
-var safeTableLikeRe = regexp.MustCompile(`^[A-Za-z0-9_%$\-]{1,128}$`)
 
 func formatWSSQLResult(res *execution.CallResult, err error) (string, bool) {
 	if err != nil {
@@ -215,46 +212,6 @@ func (a *Service) callWSSQL(ctx context.Context, c *mwCall, args map[string]any)
 	return a.execWSSQLTool(ctx, c, ds, tool, sqlText, args, cfgVals)
 }
 
-func (a *Service) callWSSQLListTables(ctx context.Context, c *mwCall, args map[string]any) (string, bool) {
-	if !c.m.Config.IsSQLConsole() {
-		return c.blocked("该中间件不是 SQL 控制台，不能用 ws_sql_list_tables 调用"), true
-	}
-	if msg, ok := c.need("list_tables"); !ok {
-		return msg, true
-	}
-	alias := strings.TrimSpace(mcp.ArgString(args, "database"))
-	like := strings.TrimSpace(mcp.ArgString(args, "like"))
-	sqlText := "SHOW TABLES"
-	if like != "" {
-		if !safeTableLikeRe.MatchString(like) {
-			c.action = alias + ": SHOW TABLES LIKE " + like
-			return c.blocked("like 仅支持字母、数字、下划线、短横线、$ 及通配符 % / _（最多 128 字符）"), true
-		}
-		sqlText = fmt.Sprintf("SHOW TABLES LIKE '%s'", like)
-	}
-	c.action = alias + ": " + sqlText
-	allowed := c.m.DatasourceAliases()
-	if alias == "" && len(allowed) > 1 {
-		return c.blocked("请提供 database（数据源别名）。可用：" + strings.Join(allowed, "、")), true
-	}
-	cfgAll := c.m.AllConfigHideValues()
-	ds, err := c.m.LookupDatasource(alias)
-	if err != nil {
-		return c.blocked(a.scrubSQLConsoleText(err.Error(), nil, cfgAll, true)), true
-	}
-	cfgVals := ds.ConfigHideValues(&c.m.Config)
-	if err := a.ensureSQLConsoleCredentials(c.m, nil); err != nil {
-		return c.blocked(a.scrubSQLConsoleText(err.Error(), nil, cfgVals, true)), true
-	}
-	tool, err := c.m.SQLConsoleTool(ds)
-	if err != nil {
-		return c.blocked(a.scrubSQLConsoleText(err.Error(), nil, cfgVals, true)), true
-	}
-	tool.Name = mwconfig.WSSQLListTablesTool
-	tool.Title = fmt.Sprintf("WebSocket 查看表列表（%s / %s）", c.m.Name, ds.Alias)
-	return a.execWSSQLTool(ctx, c, ds, tool, sqlText, args, cfgVals)
-}
-
 func (a *Service) execWSSQLTool(ctx context.Context, c *mwCall, ds mwconfig.MWDatasource, tool *execution.Tool, sqlText string, args map[string]any, cfgVals []string) (string, bool) {
 	callArgs := map[string]any{"sql": sqlText, "database": ds.Alias}
 	prepared, err := a.engine().Prepare(tool, callArgs)
@@ -287,6 +244,10 @@ func (a *Service) execWSSQLTool(ctx context.Context, c *mwCall, ds mwconfig.MWDa
 	text = prefix + text
 	if isErr {
 		text = a.engine().ScrubPrepared(text, prepared, true)
+		if strings.Contains(strings.ToLower(sqlText), "information_schema") &&
+			(strings.Contains(text, "EXPLAIN") || strings.Contains(text, "索引") || strings.Contains(text, "主键")) {
+			text += "\n提示：information_schema 为系统元数据视图，无法通过索引预检；查看表列表请直接执行 SHOW TABLES（或 SHOW TABLES LIKE '%关键字%'），查看表结构/索引请执行 DESCRIBE <table> / SHOW FULL COLUMNS FROM <table> / SHOW INDEX FROM <table>。"
+		}
 	}
 	if pending != nil {
 		a.approvals().Service().RecordResult(pending.Record.ID, text)

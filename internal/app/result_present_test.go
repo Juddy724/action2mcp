@@ -522,7 +522,6 @@ func TestMWAnnotationsMatchSpec(t *testing.T) {
 	check("pod_read_log", true, false, true, false)
 	check("pod_exec", false, true, false, true)
 	check(mwconfig.WSSQLQueryTool, true, false, true, false)
-	check(mwconfig.WSSQLListTablesTool, true, false, true, false)
 }
 
 func TestLoadPackPlainJSONResponse(t *testing.T) {
