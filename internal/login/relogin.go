@@ -281,6 +281,9 @@ func (a *Service) needUserMsg(site *sitecfg.Site, nu *needUser) string {
 	case "manual":
 		return fmt.Sprintf("「%s」需要重新登录（登录方式为「手动登录」）。已弹出浏览器窗口，请在窗口中登录后重试", n)
 	default:
+		if site.Method == sitecfg.MethodForm {
+			return fmt.Sprintf("「%s」需要重新登录：未能在登录页自动完成账号密码填写（可能登录页结构变化或需要切换登录方式），已弹出浏览器窗口，请在窗口中登录后重试", n)
+		}
 		return fmt.Sprintf("「%s」需要重新登录：没能自动通过企业微信登录，已弹出浏览器窗口，请在窗口中登录后重试。如果这个网站用账号密码登录，可以在控制台「配置管理」保存账号密码，并在「登录中心」把登录方式改为「账号密码」", n)
 	}
 }
@@ -332,6 +335,25 @@ if(!best)return false;var a=best.closest('a,button,[role=button],[onclick]')||be
 const clickQuickJS = `(function(){var re=/^(快速登录|一键登录|使用企业微信快速登录|企业微信快速登录)$/;var els=document.querySelectorAll('a,button,[role=button],div,span');
 for(var i=0;i<els.length;i++){var e=els[i];var s=(e.innerText||'').trim();if(re.test(s)&&(e.offsetParent!==null||e.getClientRects().length)){(e.closest('a,button,[role=button]')||e).click();return true}}return false})()`
 
+const clickPassTabJS = `(function(){var re=/^(账号密码登录|账密登录|账号登录|密码登录|用户名登录|使用账号密码登录|账号密码登陆|密码登陆|账号登陆)$/;var els=document.querySelectorAll('a,button,[role=tab],[role=button],li,div,span');
+for(var i=0;i<els.length;i++){var e=els[i];var s=(e.innerText||'').trim();if(!re.test(s))continue;if(!(e.offsetParent!==null||e.getClientRects().length))continue;if(e.children&&e.children.length>2)continue;(e.closest('a,button,[role=tab],[role=button],li')||e).click();return true}return false})()`
+
+func canFillOnHost(site *sitecfg.Site, host string, pi sitecfg.PageInfo) bool {
+	if host == "" || site.IsWeComHost(host) {
+		return false
+	}
+	if credential.SameSite("http://"+host, site.Origin) {
+		return true
+	}
+	if eh := sitecfg.HostOf(site.Entry()); eh != "" && strings.EqualFold(eh, host) {
+		return true
+	}
+	if lh := sitecfg.HostOf(site.Form.LoginURL); lh != "" && strings.EqualFold(lh, host) {
+		return true
+	}
+	return site.IsSSOHost(host) || pi.Pass
+}
+
 func fillJS(user, pass, userSel, passSel, submitSel string) string {
 	j := func(s string) string { b, _ := json.Marshal(s); return string(b) }
 	return `(function(U,P,US,PS,SS){function vis(e){return e&&(e.offsetParent!==null||e.getClientRects().length)}
@@ -372,8 +394,8 @@ func (a *Service) browserLogin(site *sitecfg.Site, fill, cold, restoreOnFail boo
 	defer tab.Close()
 	creds := a.credsFor(site)
 	var (
-		clickedSSO, filled, clickedQuick bool
-		ssoSince, loginSince, filledAt   time.Time
+		clickedSSO, clickedPassTab, filled, clickedQuick bool
+		ssoSince, loginSince, filledAt                   time.Time
 		openedAt                         = time.Now()
 		stableHref                       string
 		stableSince                      time.Time
@@ -432,7 +454,8 @@ func (a *Service) browserLogin(site *sitecfg.Site, fill, cold, restoreOnFail boo
 		}
 		stableHref = ""
 		onSite := credential.SameSite("http://"+h, site.Origin)
-		if !onSite {
+		canFill := fill && canFillOnHost(site, h, pi)
+		if !onSite && !canFill {
 			loginSince = time.Time{}
 			if ssoSince.IsZero() {
 				ssoSince = time.Now()
@@ -452,12 +475,16 @@ func (a *Service) browserLogin(site *sitecfg.Site, fill, cold, restoreOnFail boo
 				stuck = 2 * ssoStuckAfter // some other intermediate page
 			}
 			if pi.Ready == "complete" && time.Since(ssoSince) > stuck {
-				return &needUser{url: pi.Href, reason: "sso"}
+				reason := "sso"
+				if fill && !site.IsWeComHost(h) {
+					reason = "page"
+				}
+				return &needUser{url: pi.Href, reason: reason}
 			}
 			continue
 		}
 		ssoSince = time.Time{}
-		// on the site but not logged in: its own login page
+		// on the site (or its configured cross-domain form login host) and not logged in
 		if loginSince.IsZero() {
 			loginSince = time.Now()
 		}
@@ -469,6 +496,15 @@ func (a *Service) browserLogin(site *sitecfg.Site, fill, cold, restoreOnFail boo
 			var ok bool
 			if tab.Eval(clickSSOJS, &ok) == nil && ok {
 				debugf("%s：点击了企业微信登录按钮", site.Origin)
+				loginSince = time.Now()
+				continue
+			}
+		}
+		if fill && !pi.Pass && !filled && !clickedPassTab && time.Since(loginSince) > 500*time.Millisecond {
+			clickedPassTab = true
+			var ok bool
+			if tab.Eval(clickPassTabJS, &ok) == nil && ok {
+				debugf("%s：点击了账号密码登录切换标签", site.Origin)
 				loginSince = time.Now()
 				continue
 			}
@@ -740,9 +776,11 @@ func (a *Service) watchLoginWindow(site *sitecfg.Site, st *siteState, bs LoginBr
 		syncCookies()
 
 		loggedIn := site.LoggedInPage(pi)
-		// Only fall back to CheckSite when an explicit CheckURL is configured (or we are on the target site
-		// and NOT sitting on an external SSO/QR page), avoiding SPA static-shell false positives.
-		allowCheckSite := site.CheckURL != "" || (onSite && !pi.Pass && !site.IsLoginURL(pi.Href))
+		// Never treat the window as logged in via background CheckSite while it is actively
+		// displaying a password login form or sitting on an external SSO/login host.
+		curHost := sitecfg.HostOf(pi.Href)
+		onLoginPage := pi.Pass || (!onSite && curHost != "" && (site.IsSSOHost(curHost) || site.IsLoginURL(pi.Href)))
+		allowCheckSite := !onLoginPage && (site.CheckURL != "" || (onSite && !site.IsLoginURL(pi.Href)))
 		if !loggedIn && pi.Ready == "complete" && allowCheckSite {
 			if checkedOK && time.Since(lastCheck) < 2*time.Second {
 				loggedIn = true
@@ -1228,6 +1266,7 @@ var (
 	spaScriptStyleRe = regexp.MustCompile(`(?is)<(script|style|head|noscript)\b[^>]*>.*?</(script|style|head|noscript)>`)
 	spaTagRe         = regexp.MustCompile(`(?s)<[^>]+>`)
 	spaMountRe       = regexp.MustCompile(`(?i)\bid\s*=\s*["'](root|app|__next|__nuxt)["']`)
+	spaScriptSrcRe   = regexp.MustCompile(`(?i)<script\b[^>]*\bsrc\s*=`)
 )
 
 func isEmptySPAShell(body, contentType string) bool {
@@ -1235,7 +1274,7 @@ func isEmptySPAShell(body, contentType string) bool {
 	if ct != "" && !strings.Contains(ct, "html") {
 		return false
 	}
-	if !spaMountRe.MatchString(body) {
+	if !spaMountRe.MatchString(body) && !spaScriptSrcRe.MatchString(body) {
 		return false
 	}
 	stripped := spaScriptStyleRe.ReplaceAllString(body, "")
@@ -1267,8 +1306,11 @@ func (a *Service) CheckSite(site *sitecfg.Site) (bool, string) {
 		return false, msg
 	}
 	ct := execution.HeaderGet(res.Headers, "Content-Type")
-	if site.CheckURL == "" && res.Status >= 200 && res.Status < 300 && isEmptySPAShell(res.Body, ct) {
+	if res.Status >= 200 && res.Status < 300 && isEmptySPAShell(res.Body, ct) {
 		why := "首页是未鉴权的前端单页壳，无法仅凭首页判断登录状态，请在登录中心配置「检测地址」"
+		if site.CheckURL != "" {
+			why = "检测地址返回的是未鉴权的前端单页壳（HTML），无法判断登录状态，请改配需要登录态的后端接口或留空"
+		}
 		a.repo.SetSiteStatus(site.ID, "invalid", why, false)
 		return false, why
 	}
@@ -1427,7 +1469,9 @@ func (a *Service) persistInteractiveLogin(site *sitecfg.Site, tab Surface, login
 	}
 	if hasCapture || len(externalHosts) > 0 {
 		changed := false
-		if site.Method != sitecfg.MethodSSO {
+		// Do not silently overwrite an explicitly configured password-login site (with saved credentials)
+		// back to wecom_sso just because an interactive window did not capture a newly typed password.
+		if site.Method != sitecfg.MethodSSO && !(site.Method == sitecfg.MethodForm && site.Form.PasswordRef != "") {
 			site.Method = sitecfg.MethodSSO
 			changed = true
 		}
