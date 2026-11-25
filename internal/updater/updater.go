@@ -1,8 +1,10 @@
-// Package updater checks GitHub Releases periodically and performs atomic in-place binary upgrades.
+// Package updater checks Gitee (domestic) and GitHub (international) Releases periodically
+// and performs atomic in-place binary upgrades.
 package updater
 
 import (
 	"archive/zip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -25,46 +27,74 @@ import (
 )
 
 const (
-	DefaultRepo     = "Juddy724/action2mcp"
-	DefaultInterval = 10 * time.Minute
+	DefaultRepo      = "Juddy724/action2mcp"
+	DefaultGiteeRepo = "tricycle/action2mcp"
+	DefaultInterval  = 10 * time.Minute
+
+	SourceAuto   = "auto"
+	SourceGitee  = "gitee"
+	SourceGitHub = "github"
+
+	regionCacheTTL = 30 * time.Minute
+	probeTimeout   = 3 * time.Second
 )
 
 type UpdateInfo struct {
-	Available      bool   `json:"available"`
-	CurrentVersion string `json:"current_version"`
-	LatestVersion  string `json:"latest_version,omitempty"`
-	ReleaseName    string `json:"release_name,omitempty"`
-	ReleaseNotes   string `json:"release_notes,omitempty"`
-	ReleaseURL     string `json:"release_url,omitempty"`
-	AssetName      string `json:"asset_name,omitempty"`
-	AssetURL       string `json:"asset_url,omitempty"`
-	AssetSHA256    string `json:"asset_sha256,omitempty"`
-	CheckedAt      string `json:"checked_at,omitempty"`
+	Available        bool   `json:"available"`
+	CurrentVersion   string `json:"current_version"`
+	LatestVersion    string `json:"latest_version,omitempty"`
+	ReleaseName      string `json:"release_name,omitempty"`
+	ReleaseNotes     string `json:"release_notes,omitempty"`
+	ReleaseURL       string `json:"release_url,omitempty"`
+	AssetName        string `json:"asset_name,omitempty"`
+	AssetURL         string `json:"asset_url,omitempty"`
+	FallbackAssetURL string `json:"fallback_asset_url,omitempty"`
+	AssetSHA256      string `json:"asset_sha256,omitempty"`
+	Source           string `json:"source,omitempty"`       // "gitee" or "github"
+	SourceLabel      string `json:"source_label,omitempty"` // Human-readable mirror label
+	CheckedAt        string `json:"checked_at,omitempty"`
 }
 
 type Options struct {
-	CurrentVersion string
-	Repo           string
-	APIURL         string // Optional override for unit tests
-	WebReleaseURL  string // Optional override for redirect fallback tests
-	AtomURL        string // Optional override for releases Atom feed tests
-	Interval       time.Duration
-	HTTPClient     *http.Client
-	ExecutablePath func() (string, error)
-	GOOS           string
-	GOARCH         string
+	CurrentVersion     string
+	Repo               string // GitHub owner/repo
+	GiteeRepo          string // Gitee owner/repo
+	Source             string // "auto" (default), "gitee", or "github"
+	SourceFunc         func() string
+	RegionDetector     func() string // Optional override for unit tests; returns SourceGitee or SourceGitHub
+	APIURL             string        // Optional GitHub API override for unit tests
+	WebReleaseURL      string        // Optional GitHub web redirect override for unit tests
+	AtomURL            string        // Optional GitHub releases Atom feed override for unit tests
+	GiteeAPIURL        string        // Optional Gitee API override for unit tests
+	GiteeWebReleaseURL string        // Optional Gitee web redirect override for unit tests
+	GiteeToken         string        // Optional Gitee personal access token (A2M_GITEE_TOKEN)
+	Interval           time.Duration
+	HTTPClient         *http.Client
+	ExecutablePath     func() (string, error)
+	GOOS               string
+	GOARCH             string
 }
 
 type Service struct {
-	opts       Options
-	mu         sync.RWMutex
-	etag       string
-	last       UpdateInfo
-	updatingMu sync.Mutex
-	updating   bool
+	opts           Options
+	mu             sync.RWMutex
+	etags          map[string]string
+	last           UpdateInfo
+	updatingMu     sync.Mutex
+	updating       bool
+	regionMu       sync.Mutex
+	cachedRegion   string
+	cachedRegionAt time.Time
+	githubOnlyMode bool
 }
 
 func New(o Options) *Service {
+	// Keep backwards compatibility with unit tests that only pass a mock GitHub APIURL/WebReleaseURL
+	// without configuring Gitee test endpoints or a region detector.
+	githubOnly := (o.APIURL != "" || o.WebReleaseURL != "") &&
+		o.GiteeAPIURL == "" && o.GiteeWebReleaseURL == "" &&
+		o.Source == "" && o.SourceFunc == nil && o.RegionDetector == nil
+
 	if o.Repo == "" {
 		if env := strings.TrimSpace(os.Getenv("A2M_UPDATE_REPO")); env != "" {
 			o.Repo = env
@@ -72,8 +102,30 @@ func New(o Options) *Service {
 			o.Repo = DefaultRepo
 		}
 	}
+	if o.GiteeRepo == "" {
+		if env := strings.TrimSpace(os.Getenv("A2M_UPDATE_GITEE_REPO")); env != "" {
+			o.GiteeRepo = env
+		} else {
+			o.GiteeRepo = DefaultGiteeRepo
+		}
+	}
+	if o.Source == "" {
+		if env := strings.TrimSpace(os.Getenv("A2M_UPDATE_SOURCE")); env != "" {
+			o.Source = NormalizeSource(env)
+		} else {
+			o.Source = SourceAuto
+		}
+	} else {
+		o.Source = NormalizeSource(o.Source)
+	}
 	if o.APIURL == "" {
 		o.APIURL = strings.TrimSpace(os.Getenv("A2M_UPDATE_API_URL"))
+	}
+	if o.GiteeAPIURL == "" {
+		o.GiteeAPIURL = strings.TrimSpace(os.Getenv("A2M_UPDATE_GITEE_API_URL"))
+	}
+	if o.GiteeToken == "" {
+		o.GiteeToken = strings.TrimSpace(os.Getenv("A2M_GITEE_TOKEN"))
 	}
 	if o.Interval <= 0 {
 		o.Interval = DefaultInterval
@@ -91,8 +143,32 @@ func New(o Options) *Service {
 		o.GOARCH = runtime.GOARCH
 	}
 	return &Service{
-		opts: o,
-		last: UpdateInfo{CurrentVersion: CleanVersion(o.CurrentVersion)},
+		opts:           o,
+		etags:          map[string]string{},
+		last:           UpdateInfo{CurrentVersion: CleanVersion(o.CurrentVersion)},
+		githubOnlyMode: githubOnly,
+	}
+}
+
+func NormalizeSource(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case SourceGitee, "cn", "domestic":
+		return SourceGitee
+	case SourceGitHub, "global", "international", "intl":
+		return SourceGitHub
+	default:
+		return SourceAuto
+	}
+}
+
+func SourceDisplayLabel(src string) string {
+	switch src {
+	case SourceGitee:
+		return "Gitee（国内源）"
+	case SourceGitHub:
+		return "GitHub（国际源）"
+	default:
+		return ""
 	}
 }
 
@@ -122,6 +198,18 @@ func (s *Service) Snapshot() UpdateInfo {
 	return s.last
 }
 
+func (s *Service) effectiveSourceMode() string {
+	if s.githubOnlyMode {
+		return SourceGitHub
+	}
+	if s.opts.SourceFunc != nil {
+		if v := strings.TrimSpace(s.opts.SourceFunc()); v != "" {
+			return NormalizeSource(v)
+		}
+	}
+	return NormalizeSource(s.opts.Source)
+}
+
 func (s *Service) Loop(quit <-chan struct{}) {
 	// Perform an initial check shortly after startup, then every 10 minutes.
 	initTimer := time.NewTimer(5 * time.Second)
@@ -145,27 +233,371 @@ func (s *Service) Loop(quit <-chan struct{}) {
 	}
 }
 
-type ghRelease struct {
-	TagName string `json:"tag_name"`
-	Name    string `json:"name"`
-	Body    string `json:"body"`
-	HTMLURL string `json:"html_url"`
-	Assets  []struct {
-		Name               string `json:"name"`
-		BrowserDownloadURL string `json:"browser_download_url"`
-		URL                string `json:"url"`
-		Digest             string `json:"digest"`
-	} `json:"assets"`
+type releasePayload struct {
+	TagName string         `json:"tag_name"`
+	Name    string         `json:"name"`
+	Body    string         `json:"body"`
+	HTMLURL string         `json:"html_url"`
+	Assets  []releaseAsset `json:"assets"`
+}
+
+type releaseAsset struct {
+	Name               string `json:"name"`
+	BrowserDownloadURL string `json:"browser_download_url"`
+	URL                string `json:"url"`
+	Digest             string `json:"digest"`
 }
 
 func (s *Service) CheckNow() (UpdateInfo, error) {
+	mode := s.effectiveSourceMode()
+	var order []string
+	switch mode {
+	case SourceGitee:
+		order = []string{SourceGitee}
+	case SourceGitHub:
+		order = []string{SourceGitHub}
+	default:
+		primary := s.resolveAutoPrimarySource()
+		if primary == SourceGitee {
+			order = []string{SourceGitee, SourceGitHub}
+		} else {
+			order = []string{SourceGitHub, SourceGitee}
+		}
+	}
+
+	var errs []string
+	for _, src := range order {
+		var (
+			info UpdateInfo
+			err  error
+		)
+		if src == SourceGitee {
+			info, err = s.checkGitee()
+		} else {
+			info, err = s.checkGitHub()
+		}
+		if err == nil {
+			return info, nil
+		}
+		errs = append(errs, fmt.Sprintf("%s: %v", SourceDisplayLabel(src), err))
+	}
+	return s.Snapshot(), errors.New(strings.Join(errs, "；"))
+}
+
+func (s *Service) resolveAutoPrimarySource() string {
+	if s.opts.RegionDetector != nil {
+		if detected := NormalizeSource(s.opts.RegionDetector()); detected == SourceGitee || detected == SourceGitHub {
+			return detected
+		}
+	}
+
+	s.regionMu.Lock()
+	if s.cachedRegion != "" && time.Since(s.cachedRegionAt) < regionCacheTTL {
+		res := s.cachedRegion
+		s.regionMu.Unlock()
+		return res
+	}
+	s.regionMu.Unlock()
+
+	detected := s.probePreferredSource()
+
+	s.regionMu.Lock()
+	s.cachedRegion = detected
+	s.cachedRegionAt = time.Now()
+	s.regionMu.Unlock()
+	return detected
+}
+
+type probeResult struct {
+	ok  bool
+	rtt time.Duration
+}
+
+func (s *Service) probePreferredSource() string {
+	domesticHint := isDomesticHostEnv()
+
+	giteeProbeURL := s.opts.GiteeAPIURL
+	if giteeProbeURL == "" {
+		giteeProbeURL = "https://gitee.com/api/v5/repos/" + s.opts.GiteeRepo + "/releases/latest"
+	}
+	githubProbeURL := s.opts.WebReleaseURL
+	if githubProbeURL == "" {
+		if s.opts.APIURL != "" {
+			githubProbeURL = s.opts.APIURL
+		} else {
+			githubProbeURL = "https://github.com/" + s.opts.Repo + "/releases/latest"
+		}
+	}
+
+	var (
+		wg        sync.WaitGroup
+		giteeRes  probeResult
+		githubRes probeResult
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		giteeRes = s.probeEndpoint(giteeProbeURL, SourceGitee)
+	}()
+	go func() {
+		defer wg.Done()
+		githubRes = s.probeEndpoint(githubProbeURL, SourceGitHub)
+	}()
+	wg.Wait()
+
+	return decidePreferredSource(domesticHint, giteeRes, githubRes)
+}
+
+func decidePreferredSource(domesticHint bool, giteeRes, githubRes probeResult) string {
+	if giteeRes.ok && !githubRes.ok {
+		return SourceGitee
+	}
+	if githubRes.ok && !giteeRes.ok {
+		return SourceGitHub
+	}
+	if giteeRes.ok && githubRes.ok {
+		if domesticHint {
+			if giteeRes.rtt > 1500*time.Millisecond && giteeRes.rtt > githubRes.rtt*3 {
+				return SourceGitHub
+			}
+			return SourceGitee
+		}
+		if giteeRes.rtt < 150*time.Millisecond && githubRes.rtt > 400*time.Millisecond {
+			return SourceGitee
+		}
+		return SourceGitHub
+	}
+	if domesticHint {
+		return SourceGitee
+	}
+	return SourceGitHub
+}
+
+func (s *Service) probeEndpoint(rawURL, src string) probeResult {
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+
+	client := *s.opts.HTTPClient
+	client.Timeout = probeTimeout
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, rawURL, nil)
+	if err != nil {
+		return probeResult{}
+	}
+	req.Header.Set("User-Agent", "Action2MCP-Updater/"+CleanVersion(s.opts.CurrentVersion))
+	if src == SourceGitee && s.opts.GiteeToken != "" {
+		req.Header.Set("Authorization", "token "+s.opts.GiteeToken)
+	}
+
+	start := time.Now()
+	resp, err := client.Do(req)
+	if err != nil {
+		return probeResult{}
+	}
+	resp.Body.Close()
+
+	// Some API endpoints reject HEAD with 405; treat 2xx/3xx as reachable.
+	if resp.StatusCode == http.StatusMethodNotAllowed {
+		reqGet, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+		if err != nil {
+			return probeResult{}
+		}
+		reqGet.Header.Set("User-Agent", "Action2MCP-Updater/"+CleanVersion(s.opts.CurrentVersion))
+		if src == SourceGitee && s.opts.GiteeToken != "" {
+			reqGet.Header.Set("Authorization", "token "+s.opts.GiteeToken)
+		}
+		start = time.Now()
+		resp, err = client.Do(reqGet)
+		if err != nil {
+			return probeResult{}
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+	}
+
+	rtt := time.Since(start)
+	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+		return probeResult{ok: true, rtt: rtt}
+	}
+	return probeResult{ok: false, rtt: rtt}
+}
+
+// isDomesticHostEnv detects mainland China timezone or locale hints without contacting any third-party service.
+func isDomesticHostEnv() bool {
+	tz := strings.ToLower(strings.TrimSpace(os.Getenv("TZ")))
+	if tz == "" {
+		if target, err := os.Readlink("/etc/localtime"); err == nil {
+			tz = strings.ToLower(target)
+		}
+	}
+	for _, marker := range []string{"asia/shanghai", "asia/chongqing", "asia/harbin", "asia/urumqi", "prc", "china standard time"} {
+		if strings.Contains(tz, marker) {
+			return true
+		}
+	}
+	if name, offset := time.Now().Zone(); offset == 8*3600 {
+		upper := strings.ToUpper(strings.TrimSpace(name))
+		if upper == "CST" || strings.Contains(strings.ToLower(name), "china") {
+			// Distinguish mainland China (CST/zh_CN) from Singapore/HK/Taipei (+0800) when TZ symlink wasn't available.
+			if tz == "" {
+				for _, envKey := range []string{"LC_ALL", "LC_MESSAGES", "LANG"} {
+					v := strings.ToLower(strings.TrimSpace(os.Getenv(envKey)))
+					if strings.HasPrefix(v, "zh_cn") || strings.HasPrefix(v, "zh-cn") {
+						return true
+					}
+				}
+				// On Windows Go reports "CST" / "China Standard Time" with no /etc/localtime.
+				if runtime.GOOS == "windows" && strings.Contains(strings.ToLower(name), "china") {
+					return true
+				}
+			}
+		}
+	}
+	for _, envKey := range []string{"LC_ALL", "LC_MESSAGES", "LANG"} {
+		v := strings.ToLower(strings.TrimSpace(os.Getenv(envKey)))
+		if strings.HasPrefix(v, "zh_cn") || strings.HasPrefix(v, "zh-cn") {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) checkGitee() (UpdateInfo, error) {
+	apiURL := s.opts.GiteeAPIURL
+	if apiURL == "" {
+		apiURL = "https://gitee.com/api/v5/repos/" + s.opts.GiteeRepo + "/releases/latest"
+	}
+
+	s.mu.RLock()
+	etag := s.etags[SourceGitee]
+	lastSrc := s.last.Source
+	s.mu.RUnlock()
+
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		return s.Snapshot(), err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "Action2MCP-Updater/"+CleanVersion(s.opts.CurrentVersion))
+	if s.opts.GiteeToken != "" {
+		req.Header.Set("Authorization", "token "+s.opts.GiteeToken)
+	}
+	if etag != "" && lastSrc == SourceGitee {
+		req.Header.Set("If-None-Match", etag)
+	}
+
+	resp, err := s.opts.HTTPClient.Do(req)
+	if err != nil {
+		if fb, ferr := s.checkGiteeViaRedirectFallback(); ferr == nil {
+			return fb, nil
+		}
+		return s.Snapshot(), err
+	}
+	defer resp.Body.Close()
+
+	nowStr := time.Now().Format("2006-01-02 15:04:05")
+	if resp.StatusCode == http.StatusNotModified && lastSrc == SourceGitee {
+		s.mu.Lock()
+		s.last.CheckedAt = nowStr
+		out := s.last
+		s.mu.Unlock()
+		return out, nil
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		if fb, ferr := s.checkGiteeViaRedirectFallback(); ferr == nil {
+			return fb, nil
+		}
+		return s.Snapshot(), fmt.Errorf("Gitee API 返回 HTTP %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return s.Snapshot(), err
+	}
+	var rel releasePayload
+	if err := json.Unmarshal(body, &rel); err != nil {
+		return s.Snapshot(), err
+	}
+	if strings.TrimSpace(rel.TagName) == "" {
+		return s.Snapshot(), errors.New("Gitee 尚未发布 Release 版本")
+	}
+	if strings.TrimSpace(rel.HTMLURL) == "" {
+		rel.HTMLURL = fmt.Sprintf("https://gitee.com/%s/releases/tag/%s", s.opts.GiteeRepo, rel.TagName)
+	}
+
+	info := s.buildUpdateInfo(rel, SourceGitee, nowStr)
+	newETag := strings.TrimSpace(resp.Header.Get("ETag"))
+
+	s.mu.Lock()
+	if newETag != "" {
+		s.etags[SourceGitee] = newETag
+	}
+	s.last = info
+	s.mu.Unlock()
+	return info, nil
+}
+
+func (s *Service) checkGiteeViaRedirectFallback() (UpdateInfo, error) {
+	webURL := s.opts.GiteeWebReleaseURL
+	if webURL == "" {
+		if s.opts.GiteeAPIURL != "" {
+			return s.Snapshot(), errors.New("Gitee API 不可用且未配置重定向地址")
+		}
+		webURL = "https://gitee.com/" + s.opts.GiteeRepo + "/releases/latest"
+	}
+	noRedir := *s.opts.HTTPClient
+	noRedir.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	req, err := http.NewRequest("HEAD", webURL, nil)
+	if err != nil {
+		return s.Snapshot(), err
+	}
+	req.Header.Set("User-Agent", "Action2MCP-Updater/"+CleanVersion(s.opts.CurrentVersion))
+	resp, err := noRedir.Do(req)
+	if err != nil {
+		return s.Snapshot(), err
+	}
+	resp.Body.Close()
+	loc := resp.Header.Get("Location")
+	idx := strings.LastIndex(loc, "/tag/")
+	if idx < 0 {
+		return s.Snapshot(), errors.New("未找到 Gitee 最新版本的重定向标签")
+	}
+	tag := strings.TrimSpace(loc[idx+len("/tag/"):])
+	if tag == "" {
+		return s.Snapshot(), errors.New("Gitee 重定向标签为空")
+	}
+	ver := CleanVersion(tag)
+	suffix := PlatformAssetSuffix(s.opts.GOOS, s.opts.GOARCH)
+	assetName := fmt.Sprintf("Action2MCP-%s-%s.zip", ver, suffix)
+	assetURL := fmt.Sprintf("https://gitee.com/%s/releases/download/%s/%s", s.opts.GiteeRepo, tag, assetName)
+
+	rel := releasePayload{
+		TagName: tag,
+		Name:    "Action2MCP " + tag,
+		HTMLURL: fmt.Sprintf("https://gitee.com/%s/releases/tag/%s", s.opts.GiteeRepo, tag),
+		Assets:  []releaseAsset{{Name: assetName, BrowserDownloadURL: assetURL}},
+	}
+	info := s.buildUpdateInfo(rel, SourceGitee, time.Now().Format("2006-01-02 15:04:05"))
+	s.mu.Lock()
+	if info.ReleaseNotes == "" && s.last.LatestVersion == info.LatestVersion {
+		info.ReleaseNotes = s.last.ReleaseNotes
+	}
+	s.last = info
+	s.mu.Unlock()
+	return info, nil
+}
+
+func (s *Service) checkGitHub() (UpdateInfo, error) {
 	apiURL := s.opts.APIURL
 	if apiURL == "" {
 		apiURL = "https://api.github.com/repos/" + s.opts.Repo + "/releases/latest"
 	}
 
 	s.mu.RLock()
-	etag := s.etag
+	etag := s.etags[SourceGitHub]
+	lastSrc := s.last.Source
 	s.mu.RUnlock()
 
 	req, err := http.NewRequest("GET", apiURL, nil)
@@ -174,7 +606,7 @@ func (s *Service) CheckNow() (UpdateInfo, error) {
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "Action2MCP-Updater/"+CleanVersion(s.opts.CurrentVersion))
-	if etag != "" {
+	if etag != "" && lastSrc == SourceGitHub {
 		req.Header.Set("If-None-Match", etag)
 	}
 
@@ -188,7 +620,7 @@ func (s *Service) CheckNow() (UpdateInfo, error) {
 	defer resp.Body.Close()
 
 	nowStr := time.Now().Format("2006-01-02 15:04:05")
-	if resp.StatusCode == http.StatusNotModified {
+	if resp.StatusCode == http.StatusNotModified && lastSrc == SourceGitHub {
 		s.mu.Lock()
 		s.last.CheckedAt = nowStr
 		out := s.last
@@ -207,17 +639,17 @@ func (s *Service) CheckNow() (UpdateInfo, error) {
 	if err != nil {
 		return s.Snapshot(), err
 	}
-	var rel ghRelease
+	var rel releasePayload
 	if err := json.Unmarshal(body, &rel); err != nil {
 		return s.Snapshot(), err
 	}
 
-	info := s.buildUpdateInfo(rel, nowStr)
+	info := s.buildUpdateInfo(rel, SourceGitHub, nowStr)
 	newETag := strings.TrimSpace(resp.Header.Get("ETag"))
 
 	s.mu.Lock()
 	if newETag != "" {
-		s.etag = newETag
+		s.etags[SourceGitHub] = newETag
 	}
 	s.last = info
 	s.mu.Unlock()
@@ -227,6 +659,9 @@ func (s *Service) CheckNow() (UpdateInfo, error) {
 func (s *Service) checkViaRedirectFallback() (UpdateInfo, error) {
 	webURL := s.opts.WebReleaseURL
 	if webURL == "" {
+		if s.opts.APIURL != "" {
+			return s.Snapshot(), errors.New("GitHub API 不可用且未配置重定向地址")
+		}
 		webURL = "https://github.com/" + s.opts.Repo + "/releases/latest"
 	}
 	noRedir := *s.opts.HTTPClient
@@ -255,22 +690,14 @@ func (s *Service) checkViaRedirectFallback() (UpdateInfo, error) {
 	assetName := fmt.Sprintf("Action2MCP-%s-%s.zip", ver, suffix)
 	assetURL := fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", s.opts.Repo, tag, assetName)
 
-	rel := ghRelease{
+	rel := releasePayload{
 		TagName: tag,
 		Name:    "Action2MCP " + tag,
 		HTMLURL: fmt.Sprintf("https://github.com/%s/releases/tag/%s", s.opts.Repo, tag),
+		Assets:  []releaseAsset{{Name: assetName, BrowserDownloadURL: assetURL}},
 	}
-	rel.Assets = append(rel.Assets, struct {
-		Name               string `json:"name"`
-		BrowserDownloadURL string `json:"browser_download_url"`
-		URL                string `json:"url"`
-		Digest             string `json:"digest"`
-	}{
-		Name:               assetName,
-		BrowserDownloadURL: assetURL,
-	})
 	rel.Body = s.fetchAtomNotes(tag)
-	info := s.buildUpdateInfo(rel, time.Now().Format("2006-01-02 15:04:05"))
+	info := s.buildUpdateInfo(rel, SourceGitHub, time.Now().Format("2006-01-02 15:04:05"))
 	s.mu.Lock()
 	if info.ReleaseNotes == "" && s.last.LatestVersion == info.LatestVersion {
 		info.ReleaseNotes = s.last.ReleaseNotes
@@ -288,6 +715,9 @@ func (s *Service) checkViaRedirectFallback() (UpdateInfo, error) {
 func (s *Service) fetchAtomNotes(tag string) string {
 	feedURL := s.opts.AtomURL
 	if feedURL == "" {
+		if s.opts.APIURL != "" || s.opts.WebReleaseURL != "" {
+			return ""
+		}
 		feedURL = "https://github.com/" + s.opts.Repo + "/releases.atom"
 	}
 	req, err := http.NewRequest("GET", feedURL, nil)
@@ -362,7 +792,7 @@ func htmlToText(h string) string {
 	return strings.TrimSpace(h)
 }
 
-func (s *Service) buildUpdateInfo(rel ghRelease, checkedAt string) UpdateInfo {
+func (s *Service) buildUpdateInfo(rel releasePayload, source, checkedAt string) UpdateInfo {
 	cur := CleanVersion(s.opts.CurrentVersion)
 	latest := CleanVersion(rel.TagName)
 	avail := latest != "" && CompareVersions(latest, cur) > 0
@@ -384,21 +814,42 @@ func (s *Service) buildUpdateInfo(rel ghRelease, checkedAt string) UpdateInfo {
 	if assetURL == "" && latest != "" && suffix != "" {
 		rawSuffix := PlatformAssetSuffix(s.opts.GOOS, s.opts.GOARCH)
 		assetName = fmt.Sprintf("Action2MCP-%s-%s.zip", latest, rawSuffix)
-		assetURL = fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", s.opts.Repo, rel.TagName, assetName)
+		if source == SourceGitee {
+			assetURL = fmt.Sprintf("https://gitee.com/%s/releases/download/%s/%s", s.opts.GiteeRepo, rel.TagName, assetName)
+		} else {
+			assetURL = fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", s.opts.Repo, rel.TagName, assetName)
+		}
+	}
+
+	var fallbackURL string
+	if !s.githubOnlyMode && assetName != "" && rel.TagName != "" {
+		if source == SourceGitee && s.opts.Repo != "" {
+			fallbackURL = fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", s.opts.Repo, rel.TagName, assetName)
+		} else if source == SourceGitHub && s.opts.GiteeRepo != "" {
+			fallbackURL = fmt.Sprintf("https://gitee.com/%s/releases/download/%s/%s", s.opts.GiteeRepo, rel.TagName, assetName)
+		}
 	}
 
 	return UpdateInfo{
-		Available:      avail,
-		CurrentVersion: cur,
-		LatestVersion:  latest,
-		ReleaseName:    rel.Name,
-		ReleaseNotes:   strings.TrimSpace(rel.Body),
-		ReleaseURL:     rel.HTMLURL,
-		AssetName:      assetName,
-		AssetURL:       assetURL,
-		AssetSHA256:    assetSHA,
-		CheckedAt:      checkedAt,
+		Available:        avail,
+		CurrentVersion:   cur,
+		LatestVersion:    latest,
+		ReleaseName:      rel.Name,
+		ReleaseNotes:     strings.TrimSpace(rel.Body),
+		ReleaseURL:       rel.HTMLURL,
+		AssetName:        assetName,
+		AssetURL:         assetURL,
+		FallbackAssetURL: fallbackURL,
+		AssetSHA256:      assetSHA,
+		Source:           source,
+		SourceLabel:      SourceDisplayLabel(source),
+		CheckedAt:        checkedAt,
 	}
+}
+
+type downloadCandidate struct {
+	url    string
+	source string
 }
 
 // ApplyUpdate downloads the release archive for the current platform, verifies its checksum and binary,
@@ -445,43 +896,34 @@ func (s *Service) ApplyUpdate() (UpdateInfo, string, error) {
 	tmpZip := filepath.Join(exeDir, ".a2m-update.tmp.zip")
 	defer os.Remove(tmpZip)
 
-	dlClient := *s.opts.HTTPClient
-	if dlClient.Timeout < 5*time.Minute {
-		dlClient.Timeout = 5 * time.Minute
-	}
-	req, err := http.NewRequest("GET", info.AssetURL, nil)
-	if err != nil {
-		return info, "", err
-	}
-	req.Header.Set("User-Agent", "Action2MCP-Updater/"+info.CurrentVersion)
-	resp, err := dlClient.Do(req)
-	if err != nil {
-		return info, "", fmt.Errorf("下载新版本失败：%v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return info, "", fmt.Errorf("下载新版本失败：HTTP %d", resp.StatusCode)
-	}
-
-	zf, err := os.OpenFile(tmpZip, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if err != nil {
-		return info, "", fmt.Errorf("创建临时文件失败（请检查程序目录写权限）：%v", err)
-	}
-	h := sha256.New()
-	_, copyErr := io.Copy(io.MultiWriter(zf, h), io.LimitReader(resp.Body, 250<<20))
-	closeErr := zf.Close()
-	if copyErr != nil {
-		return info, "", fmt.Errorf("下载中断：%v", copyErr)
-	}
-	if closeErr != nil {
-		return info, "", closeErr
-	}
-
-	if len(info.AssetSHA256) == 64 {
-		gotSum := hex.EncodeToString(h.Sum(nil))
-		if !strings.EqualFold(gotSum, info.AssetSHA256) {
-			return info, "", fmt.Errorf("安装包 SHA-256 校验失败（预期 %s，实际 %s）", info.AssetSHA256[:12], gotSum[:12])
+	candidates := []downloadCandidate{{url: info.AssetURL, source: info.Source}}
+	if info.FallbackAssetURL != "" && info.FallbackAssetURL != info.AssetURL && s.effectiveSourceMode() == SourceAuto {
+		fbSource := SourceGitHub
+		if info.Source == SourceGitHub {
+			fbSource = SourceGitee
 		}
+		candidates = append(candidates, downloadCandidate{url: info.FallbackAssetURL, source: fbSource})
+	}
+
+	var dlErrs []string
+	downloaded := false
+	for i, cand := range candidates {
+		err := s.downloadReleaseZip(cand.url, cand.source, info.CurrentVersion, info.AssetSHA256, tmpZip)
+		if err == nil {
+			downloaded = true
+			if i > 0 {
+				log.Printf("主更新源下载失败，已自动切换至备用源完成下载：%s", cand.url)
+			}
+			break
+		}
+		dlErrs = append(dlErrs, fmt.Sprintf("%s（%v）", SourceDisplayLabel(cand.source), err))
+	}
+	if !downloaded {
+		hint := ""
+		if info.ReleaseURL != "" {
+			hint = "；也可以在浏览器打开下载页手动更新：" + info.ReleaseURL
+		}
+		return info, "", fmt.Errorf("下载新版本失败：%s%s", strings.Join(dlErrs, "；"), hint)
 	}
 
 	wantBin := "a2m"
@@ -512,6 +954,72 @@ func (s *Service) ApplyUpdate() (UpdateInfo, string, error) {
 
 	log.Printf("已完成版本替换：v%s -> v%s (%s)", info.CurrentVersion, info.LatestVersion, exePath)
 	return info, exePath, nil
+}
+
+func (s *Service) downloadReleaseZip(assetURL, source, curVer, expectedSHA, tmpZip string) error {
+	dlClient := *s.opts.HTTPClient
+	if dlClient.Timeout < 5*time.Minute {
+		dlClient.Timeout = 5 * time.Minute
+	}
+	req, err := http.NewRequest("GET", assetURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "Action2MCP-Updater/"+curVer)
+	if source == SourceGitee && s.opts.GiteeToken != "" {
+		req.Header.Set("Authorization", "token "+s.opts.GiteeToken)
+	}
+	resp, err := dlClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	if ct := strings.ToLower(resp.Header.Get("Content-Type")); strings.Contains(ct, "text/html") {
+		return errors.New("返回了网页而非安装包（可能需要登录下载）")
+	}
+
+	zf, err := os.OpenFile(tmpZip, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("创建临时文件失败（请检查程序目录写权限）：%v", err)
+	}
+	h := sha256.New()
+	n, copyErr := io.Copy(io.MultiWriter(zf, h), io.LimitReader(resp.Body, 250<<20))
+	closeErr := zf.Close()
+	if copyErr != nil {
+		return fmt.Errorf("下载中断：%v", copyErr)
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if n < 4 {
+		return errors.New("下载文件为空或损坏")
+	}
+	if !isZipFile(tmpZip) {
+		return errors.New("下载内容不是有效的 ZIP 安装包")
+	}
+	if len(expectedSHA) == 64 {
+		gotSum := hex.EncodeToString(h.Sum(nil))
+		if !strings.EqualFold(gotSum, expectedSHA) {
+			return fmt.Errorf("安装包 SHA-256 校验失败（预期 %s，实际 %s）", expectedSHA[:12], gotSum[:12])
+		}
+	}
+	return nil
+}
+
+func isZipFile(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var magic [4]byte
+	if _, err := io.ReadFull(f, magic[:]); err != nil {
+		return false
+	}
+	return magic[0] == 'P' && magic[1] == 'K' && (magic[2] == 3 || magic[2] == 5 || magic[2] == 7)
 }
 
 func extractBinaryFromZip(zipPath, wantBin, destPath string) error {

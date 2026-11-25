@@ -7,6 +7,7 @@ import (
 	"action2mcp/internal/mcp"
 	"action2mcp/internal/recording"
 	"action2mcp/internal/store"
+	"action2mcp/internal/updater"
 	"action2mcp/web"
 	"crypto/rand"
 	"database/sql"
@@ -576,12 +577,13 @@ func (a *Server) Handler() http.Handler {
 			MCPMode             *string         `json:"mcp_mode"`
 			RecAnalysis         *bool           `json:"rec_analysis"`
 			ApprovalTimeoutSecs json.RawMessage `json:"approval_timeout_secs"`
+			UpdateSource        *string         `json:"update_source"`
 		}
 		if err := readJSON(r, &in); err != nil {
 			writeErr(w, 400, err)
 			return
 		}
-		if in.MCPMode == nil && in.RecAnalysis == nil && in.ApprovalTimeoutSecs == nil {
+		if in.MCPMode == nil && in.RecAnalysis == nil && in.ApprovalTimeoutSecs == nil && in.UpdateSource == nil {
 			writeErr(w, 400, errors.New("没有要更新的设置"))
 			return
 		}
@@ -607,6 +609,14 @@ func (a *Server) Handler() http.Handler {
 				return
 			}
 			updates["approval_timeout_secs"] = strconv.Itoa(secs)
+		}
+		if in.UpdateSource != nil {
+			v := strings.ToLower(strings.TrimSpace(*in.UpdateSource))
+			if v != updater.SourceAuto && v != updater.SourceGitee && v != updater.SourceGitHub {
+				writeErr(w, 400, errors.New("update_source 只能是 auto、gitee 或 github"))
+				return
+			}
+			updates["update_source"] = v
 		}
 		if err := a.store.SetSettings(updates); err != nil {
 			writeErr(w, 500, err)
@@ -638,8 +648,9 @@ func (a *Server) buildRequestDraft(q *recording.Request, params []execution.Cand
 }
 
 func (a *Server) settingsView() map[string]any {
+	src := updater.NormalizeSource(a.store.GetSetting("update_source", updater.SourceAuto))
 	return map[string]any{"mcp_mode": a.mcpServer().Mode(), "rec_analysis": a.analysis().Enabled(),
-		"approval_timeout_secs": int(a.store.ApprovalTimeout() / time.Second)}
+		"approval_timeout_secs": int(a.store.ApprovalTimeout() / time.Second), "update_source": src}
 }
 
 func fillFlowDefaultArgs(t *execution.Tool, in map[string]any) map[string]any {

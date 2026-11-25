@@ -203,6 +203,7 @@ func (a *App) updaterRuntime() *updater.Service {
 		a.updaterService = updater.New(updater.Options{
 			CurrentVersion: Version,
 			HTTPClient:     a.httpClient,
+			SourceFunc:     func() string { return a.store.GetSetting("update_source", updater.SourceAuto) },
 		})
 	})
 	return a.updaterService

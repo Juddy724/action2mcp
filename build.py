@@ -6,6 +6,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.join(ROOT, "packaging")
 DIST = os.path.join(ROOT, "dist")
 REPO = "Juddy724/action2mcp"
+GITEE_REPO = "tricycle/action2mcp"
 
 TARGETS = [
     ("windows", "amd64", "Windows-x64"),
@@ -43,22 +44,33 @@ def sync_version_files(version=None):
     readme_path = os.path.join(ROOT, "README.md")
     readme_text = open(readme_path, encoding="utf-8").read()
     ver_line = (
-        f"当前版本：**v{ver}**。安装包见 [Releases（最新版本）](https://github.com/{REPO}/releases/latest)；"
-        "更完整的使用说明在解压后的 README.md 里。升级时请保留原 `data/` 目录和 `secret.key`，即可无缝继承已有工具、流程包与配置。"
+        f"> **最新版本：v{ver}** ｜ "
+        f"[国内下载（Gitee Releases）](https://gitee.com/{GITEE_REPO}/releases) ｜ "
+        f"[国际下载（GitHub Releases）](https://github.com/{REPO}/releases/latest)\n"
+        "> 升级时保留原 `data/` 目录和 `secret.key`，即可无缝继承已有工具、流程包与配置；内置定时更新会自动按网络环境选择国内（Gitee）或国际（GitHub）源。"
     )
     table_lines = [
-        f"| 平台 | 安装包 (v{ver}) |",
-        "|---|---|",
+        f"| 平台 | 国内下载（Gitee · v{ver}） | 国际下载（GitHub · v{ver}） |",
+        "|---|---|---|",
     ]
     for platform_label, asset_suffix in DOWNLOAD_ROWS:
         fname = f"Action2MCP-{ver}-{asset_suffix}.zip"
-        url = f"https://github.com/{REPO}/releases/download/v{ver}/{fname}"
-        table_lines.append(f"| {platform_label} | [{fname}]({url}) |")
+        gitee_url = f"https://gitee.com/{GITEE_REPO}/releases/download/v{ver}/{fname}"
+        github_url = f"https://github.com/{REPO}/releases/download/v{ver}/{fname}"
+        table_lines.append(f"| {platform_label} | [{fname}]({gitee_url}) | [{fname}]({github_url}) |")
     table_lines.append("")
-    table_lines.append(f"> 也可以直接前往 [GitHub Releases 最新版本页](https://github.com/{REPO}/releases/latest) 查看更新说明并下载对应平台安装包。")
+    table_lines.append(
+        f"> 也可直接访问 [Gitee Releases（国内）](https://gitee.com/{GITEE_REPO}/releases) 或 "
+        f"[GitHub Releases（国际）](https://github.com/{REPO}/releases/latest) 查看完整更新日志并下载。"
+    )
 
     updated = replace_marked_block(readme_text, "version-banner", ver_line)
     updated = replace_marked_block(updated, "download-table", "\n".join(table_lines))
+    updated = re.sub(
+        r'(https://img\.shields\.io/badge/release-v)[0-9]+\.[0-9]+\.[0-9]+',
+        rf'\g<1>{ver}',
+        updated,
+    )
     if updated != readme_text:
         open(readme_path, "w", encoding="utf-8").write(updated)
         print(f"synced README.md -> v{ver}")

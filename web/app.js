@@ -1192,9 +1192,17 @@ async function pageSettings(app) {
     <p class="muted">登录态只保存在本机的 <code>${esc(s.data_dir)}</code> 里（专用浏览器配置 + 本地快照），不会进入工具和导出文件。</p>
     <p>已保存登录态的网站：${Object.keys(creds.domains).length ? Object.entries(creds.domains).map(([d, n]) => `<code>${esc(d)}</code>`).join(' ') : '<span class="muted">暂无</span>'}</p>
     <div class="row"><button onclick="openLogin()">打开浏览器登录</button><button class="danger" onclick="clearCreds()">清除本地登录态快照</button></div></div>
-  <div class="card small muted row" style="justify-content:space-between">
-    <span>Action2MCP ${esc(s.version)} · 进程 ${s.pid} · 数据目录 ${esc(s.data_dir)}${s.update?.checked_at ? ` · 上次检查更新 ${esc(s.update.checked_at)}` : ''}</span>
-    <button type="button" class="sm" onclick="checkUpdateManual(this)">检查更新</button>
+  <div class="card small muted row" style="justify-content:space-between;flex-wrap:wrap;gap:8px">
+    <span>Action2MCP ${esc(s.version)} · 进程 ${s.pid} · 数据目录 ${esc(s.data_dir)}${s.update?.checked_at ? ` · 上次检查更新 ${esc(s.update.checked_at)}` : ''}${s.update?.source_label ? `（${esc(s.update.source_label)}）` : ''}</span>
+    <span class="row" style="gap:8px;align-items:center">
+      <label for="update-source" class="small muted">更新源</label>
+      <select id="update-source" aria-label="更新源" onchange="saveUpdateSource(this.value)" style="width:auto;padding:4px 8px;font-size:12px">
+        <option value="auto" ${(settings.update_source || 'auto') === 'auto' ? 'selected' : ''}>自动（国内 Gitee / 国际 GitHub）</option>
+        <option value="gitee" ${settings.update_source === 'gitee' ? 'selected' : ''}>国内源（Gitee）</option>
+        <option value="github" ${settings.update_source === 'github' ? 'selected' : ''}>国际源（GitHub）</option>
+      </select>
+      <button type="button" class="sm" onclick="checkUpdateManual(this)">检查更新</button>
+    </span>
   </div>`;
 }
 
@@ -1204,6 +1212,8 @@ function openUpdateModal() {
     toast('当前已是最新版本 v' + (STATUS.version || ''));
     return;
   }
+  const sourceName = u.source === 'gitee' ? 'Gitee' : 'GitHub';
+  const sourceBadge = u.source_label ? `<span class="upd-chip">${esc(u.source_label)}</span>` : '';
   openModal(`
     <div class="update-modal">
       <div class="upd-head">
@@ -1214,12 +1224,13 @@ function openUpdateModal() {
             <span class="upd-chip">v${esc(u.current_version || STATUS.version)}</span>
             <span class="upd-arrow" aria-hidden="true">→</span>
             <span class="upd-chip new">v${esc(u.latest_version)}</span>
+            ${sourceBadge}
           </div>
         </div>
       </div>
       <div class="upd-section">
-        <div class="upd-label">更新内容${u.release_url ? `<a href="${esc(u.release_url)}" target="_blank" rel="noopener">在 GitHub 查看 ↗</a>` : ''}</div>
-        <pre class="upd-notes">${esc(u.release_notes || '暂未获取到更新说明，可点击右上方链接在 GitHub 查看。')}</pre>
+        <div class="upd-label">更新内容${u.release_url ? `<a href="${esc(u.release_url)}" target="_blank" rel="noopener">在 ${sourceName} 查看 ↗</a>` : ''}</div>
+        <pre class="upd-notes">${esc(u.release_notes || `暂未获取到更新说明，可点击右上方链接在 ${sourceName} 查看。`)}</pre>
       </div>
       <p class="upd-hint"><span aria-hidden="true">✓</span>更新后服务会自动重启，本地所有配置、工具与登录数据均不受影响。</p>
       <div class="upd-actions">
@@ -1228,6 +1239,16 @@ function openUpdateModal() {
       </div>
     </div>`);
   $('#confirm-update-btn')?.focus();
+}
+
+async function saveUpdateSource(val) {
+  try {
+    await api('PUT', '/api/settings', { update_source: val });
+    const labels = { auto: '自动（国内 Gitee / 国际 GitHub）', gitee: '国内源（Gitee）', github: '国际源（GitHub）' };
+    toast('更新源已切换为：' + (labels[val] || val));
+  } catch (e) {
+    toast('保存更新源失败：' + e.message, 5000);
+  }
 }
 
 async function checkUpdateManual(btn) {

@@ -498,8 +498,15 @@ func TestApprovalDocumentation(t *testing.T) {
 				t.Fatalf("%s is missing approval documentation for %s", path, required)
 			}
 		}
-		if path == "README.md" && !strings.Contains(string(b), "| 平台 | 安装包 (v"+Version+") |") {
-			t.Fatalf("download table version is not %s", Version)
+		if path == "README.md" {
+			wantHeader := "| 平台 | 国内下载（Gitee · v" + Version + "） | 国际下载（GitHub · v" + Version + "） |"
+			if !strings.Contains(string(b), wantHeader) {
+				t.Fatalf("download table version header is not %s", Version)
+			}
+			if !strings.Contains(string(b), "https://gitee.com/tricycle/action2mcp/releases/download/v"+Version+"/") ||
+				!strings.Contains(string(b), "https://github.com/Juddy724/action2mcp/releases/download/v"+Version+"/") {
+				t.Fatalf("README.md is missing Gitee or GitHub v%s download links", Version)
+			}
 		}
 	}
 }

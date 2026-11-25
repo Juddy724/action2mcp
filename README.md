@@ -1,130 +1,125 @@
 # Action2MCP
 
-把网页上的业务操作录制下来，整理成 AI 可调用的 MCP 工具。单个可执行文件，解压即用，数据只保存在本机。
+[![Release](https://img.shields.io/badge/release-v0.7.9-4f46e5)](https://github.com/Juddy724/action2mcp/releases/latest)
+[![Go](https://img.shields.io/badge/Go-1.27%2B-00ADD8)](https://go.dev/)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-64748b)](#下载与安装)
+[![MCP](https://img.shields.io/badge/protocol-MCP%20(HTTP%20%2F%20Stdio)-10b981)](#快速上手)
+
+**把真实业务操作录制为安全可控的 AI（MCP）工具。**  
+无需改造存量后台或手写胶水接口——在专用浏览器里操作一遍即可沉淀为标准化 MCP 工具，同时将数据库、缓存、消息队列与 WebSocket 终端/SQL 控制台统一纳入本地安全网关。单文件跨平台运行，凭证与数据 100% 留在本机。
 
 <!-- version-banner:start -->
-当前版本：**v0.7.8**。安装包见 [Releases（最新版本）](https://github.com/Juddy724/action2mcp/releases/latest)；更完整的使用说明在解压后的 README.md 里。升级时请保留原 `data/` 目录和 `secret.key`，即可无缝继承已有工具、流程包与配置。
+> **最新版本：v0.7.9** ｜ [国内下载（Gitee Releases）](https://gitee.com/tricycle/action2mcp/releases) ｜ [国际下载（GitHub Releases）](https://github.com/Juddy724/action2mcp/releases/latest)
+> 升级时保留原 `data/` 目录和 `secret.key`，即可无缝继承已有工具、流程包与配置；内置定时更新会自动按网络环境选择国内（Gitee）或国际（GitHub）源。
 <!-- version-banner:end -->
+
+---
+
+## 核心特性
+
+| 能力模块 | 说明 |
+| :--- | :--- |
+| **浏览器无感录制** | 启动隔离专用浏览器捕获业务 HTTP / WebSocket 请求，自动折叠静态资源与埋点噪音，支持 AI 自动分析标注并一键生成参数化 MCP 工具。 |
+| **自定义工具与编排** | 支持独立脚本工具与多工具串行/并行（`FLOW`）编排，内置零依赖 JS 引擎（支持正则与 `callTool()` 循环调用），并兼容本机 Python / Go / Java / Node.js / Shell。 |
+| **登录中心与会话自愈** | 按域名管理登录态（企业微信 / 跨域名 SSO / 账密填表 / 手动登录），过期时后台自动重登并补获必要请求头，内置 SPA 空壳防误判与并发单飞锁。 |
+| **中间件与 SQL 护栏** | 统一纳管 MySQL / OceanBase、Redis、RocketMQ / Kafka / RabbitMQ 及 WebSocket 终端 / SQL 控制台；权限**默认只读**，SQL 控制台强制只读 `SELECT`、显式 `LIMIT` 与 `EXPLAIN` 索引预检。 |
+| **流程包与阶梯暴露** | 按业务场景打包工具、中间件与 Markdown SOP 使用指南；默认阶梯模式仅暴露 4 个入口工具（`list_packs` / `load_pack` / `unload_pack` / `call_pack_tool`），大幅降低上下文噪音。 |
+| **人类在环审批** | 写操作与 SQL 控制台支持每次审批，提供「批准 / 在线改参批准 / 附意见拒绝」，预检前置执行，绑定请求指纹防篡改并留存脱敏审计记录。 |
+| **本地优先与双源更新** | 仅监听 `127.0.0.1`，敏感密钥 AES-256-GCM 本地加密，支持双向多编码脱敏与 `.a2m` 零密文共享；内置定时版本检测，自动按国内（Gitee）/ 国际（GitHub）路由更新并一键原地升级。 |
+
+---
 
 ## 界面预览
 
-录制一次操作，业务请求会排在前面，噪音请求自动折叠；也可以给请求写上作用说明，再保存为工具：
+<table>
+  <tr>
+    <td width="50%">
+      <img src="docs/images/console-recording-detail.png" alt="录制详情与业务降噪" />
+      <p align="center"><b>录制降噪与保存工具</b>：自动折叠静态噪音，一键提炼为 MCP 工具</p>
+    </td>
+    <td width="50%">
+      <img src="docs/images/console-middleware.png" alt="中间件权限管理与审计" />
+      <p align="center"><b>中间件安全网关</b>：默认只读权限、SQL 预检护栏与操作审计</p>
+    </td>
+  </tr>
+</table>
 
-![录制列表（演示）](docs/images/console-recordings.png)
+<details>
+<summary>展开查看更多界面截图（流程包阶梯模式 / 人工审批记录）</summary>
+<br />
 
-![录制详情（演示）](docs/images/console-recording-detail.png)
+![流程包与阶梯模式](docs/images/console-packs.png)
+![审批记录与脱敏历史](docs/images/console-approvals.png)
 
-工具、流程包和 MCP 暴露方式都在控制台里配置。流程包可以写使用说明；加载时会返回这份说明，供 AI 参考：
+</details>
 
-![工具列表（演示）](docs/images/console-tools.png)
+---
 
-![流程包与阶梯模式（演示）](docs/images/console-packs.png)
+## 下载与安装
 
-中间件用来把数据库、Redis、消息队列和 WebSocket（终端或 SQL 控制台）交给 AI，权限默认只读。SQL 控制台可以要求每次审批：
-
-![中间件管理（演示）](docs/images/console-middleware.png)
-
-AI 调用需要审批时，控制台会弹出卡片；历史记录里的执行结果默认只显示预览，可以点「查看全部」看完整返回（已按同样规则脱敏）：
-
-![审批记录（演示）](docs/images/console-approvals.png)
-
-## 下载与启动
+电脑需已安装 **Google Chrome** 或 **Microsoft Edge**（录制与自动重登使用独立专用窗口，不影响日常浏览器）。
 
 <!-- download-table:start -->
-| 平台 | 安装包 (v0.7.8) |
-|---|---|
-| macOS (Apple 芯片) | [Action2MCP-0.7.8-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.7.8/Action2MCP-0.7.8-macOS-AppleSilicon.zip) |
-| macOS (Intel) | [Action2MCP-0.7.8-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.7.8/Action2MCP-0.7.8-macOS-Intel.zip) |
-| Windows x64 | [Action2MCP-0.7.8-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.7.8/Action2MCP-0.7.8-Windows-x64.zip) |
-| Linux x64 | [Action2MCP-0.7.8-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.7.8/Action2MCP-0.7.8-Linux-x64.zip) |
+| 平台 | 国内下载（Gitee · v0.7.9） | 国际下载（GitHub · v0.7.9） |
+|---|---|---|
+| macOS (Apple 芯片) | [Action2MCP-0.7.9-macOS-AppleSilicon.zip](https://gitee.com/tricycle/action2mcp/releases/download/v0.7.9/Action2MCP-0.7.9-macOS-AppleSilicon.zip) | [Action2MCP-0.7.9-macOS-AppleSilicon.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.7.9/Action2MCP-0.7.9-macOS-AppleSilicon.zip) |
+| macOS (Intel) | [Action2MCP-0.7.9-macOS-Intel.zip](https://gitee.com/tricycle/action2mcp/releases/download/v0.7.9/Action2MCP-0.7.9-macOS-Intel.zip) | [Action2MCP-0.7.9-macOS-Intel.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.7.9/Action2MCP-0.7.9-macOS-Intel.zip) |
+| Windows x64 | [Action2MCP-0.7.9-Windows-x64.zip](https://gitee.com/tricycle/action2mcp/releases/download/v0.7.9/Action2MCP-0.7.9-Windows-x64.zip) | [Action2MCP-0.7.9-Windows-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.7.9/Action2MCP-0.7.9-Windows-x64.zip) |
+| Linux x64 | [Action2MCP-0.7.9-Linux-x64.zip](https://gitee.com/tricycle/action2mcp/releases/download/v0.7.9/Action2MCP-0.7.9-Linux-x64.zip) | [Action2MCP-0.7.9-Linux-x64.zip](https://github.com/Juddy724/action2mcp/releases/download/v0.7.9/Action2MCP-0.7.9-Linux-x64.zip) |
 
-> 也可以直接前往 [GitHub Releases 最新版本页](https://github.com/Juddy724/action2mcp/releases/latest) 查看更新说明并下载对应平台安装包。
+> 也可直接访问 [Gitee Releases（国内）](https://gitee.com/tricycle/action2mcp/releases) 或 [GitHub Releases（国际）](https://github.com/Juddy724/action2mcp/releases/latest) 查看完整更新日志并下载。
 <!-- download-table:end -->
 
-解压后运行 `start.command`（macOS）、`start.bat`（Windows）或 `start.sh`（Linux），然后打开 [http://localhost:7788](http://localhost:7788)。电脑上需要已安装 Google Chrome 或 Microsoft Edge；录制会打开一个专用浏览器窗口，和日常使用的浏览器互不影响。
+> **提示**：在控制台「接入 AI / 设置」底部可随时手动切换更新源（默认 `自动：国内 Gitee / 国际 GitHub`，主源不可达时自动回退备用源）。
 
-更完整的启动、命令行和客户端配置说明，见安装包里的 README.md。
+---
 
-## 主要功能
+## 快速上手
 
-- **录制与保存工具**：在控制台或命令行开始录制，按平时的方式在业务网站上点一遍。程序会捕获接口请求，把静态资源、埋点等噪音折叠起来，选中有用的请求即可保存为 MCP 工具。保存时会去掉已识别的登录相关请求头（例如 Cookie、Authorization），并改写为配置引用的密钥；请求体或其他字段里未经识别的原文不会自动清除。调用时再从专用浏览器的登录态补上已识别的凭证。
-- **自定义工具与多工具编排**：在「工具」页可直接创建自定义脚本工具或将多个现有工具、脚本按串行 / 并行（⚡）编排为单个 MCP 工具暴露给 AI。脚本同时支持零依赖内置 JS 引擎（支持正则与 `callTool()` 动态循环/条件调用已有工具）和本机已安装的 Python / Go / Java / Node.js / Shell 运行环境（自动检测并提示缺失环境）；编辑器支持工具与脚本统一的「入参映射」（自动同步对外入参、拆离 MCP 默认值与控制台测试值）、默认折叠的「出参示例」及一键测试运行与逐节点追踪。
-- **录制分析**：可以对已接入的 AI 说「帮我把录制记录里的某某流程识别一下并保存成工具」。AI 会先看录制全貌，给业务请求写清作用，再把完成流程所需的最少请求保存成工具；你没指定流程包时会先问你。可在「接入 AI / 设置」里关闭。
-- **流程包**：按场景把工具和中间件分组，用开关控制 AI 能不能看到。每个包可以写说明、适用场景，以及一份使用说明（Markdown，最长 8KB）。阶梯模式下，使用说明出现在 `load_pack` 的返回里；平铺模式写在连接说明中，改完需要重新连接。
-- **MCP 接入**：Streamable HTTP（`http://localhost:7788/mcp`）或 stdio（`a2m mcp`）。默认是**阶梯模式**：AI 先只看到 `list_packs`、`load_pack`、`unload_pack`、`call_pack_tool` 四个入口，按任务加载流程包。也可以切回平铺模式，让 AI 一连上就看到所有已开启流程包里的工具。关闭的流程包 AI 看不到，也调用不了。
-- **登录中心**：为每个网站保存登录方式（企业微信 / 单点登录、账号密码填表或重放、手动登录）。AI 调用时如果发现登录过期，会在后台自动重新登录再重试。录制时如果走了企业微信扫码，结束录制后可以识别并加入登录中心。等待登录最多 5 分钟，可以取消，关闭窗口也会结束等待。
-- **配置管理**：账号、密码等加密保存在本机。工具和登录配置里用 `{{secret.名称}}` 引用。程序会按已登记的密钥（配置项、足够长的 Cookie 等）在 MCP 工具说明、调用结果、错误、审批预览、审计和导出里做脱敏，但这是尽力而为的扫描，受长度和解码深度等上限约束，不能保证任意位置的敏感信息都不会出现。控制台本人可以查看和编辑这些配置。
-- **中间件**：登记 MySQL / OceanBase、Redis、RocketMQ / Kafka / RabbitMQ，以及 WebSocket 终端或 SQL 控制台，加入已开启的流程包后，AI 会看到 `db_query`、`redis_command`、`mq_send`、`pod_read_log`、`ws_sql_query` 等通用工具。每种操作的权限可单独开关，**默认只读**。连接密码同样进入配置管理。
-- **工具审批**：在工具编辑页的「审批模式」选择不审批（off）或每次都审批（always）；写入工具默认每次都审批（`POST` / `PUT` / `PATCH` / `DELETE` / `WS`）。WebSocket SQL 控制台的审批模式可在中间件里配置为每次审批（默认）或关闭；关闭后守卫仍然生效。AI 经 MCP 调用时，控制台弹出待审批卡片，可以批准、改参数后批准，或拒绝并写下原因。等待超时默认 300 秒，可在「接入 AI / 设置」里改为 30–1800 秒。
-- **WebSocket SQL 控制台**：把数据平台的「一条 WebSocket 消息执行 SQL」登记为中间件，AI 用 `ws_sql_query`（中间件名、数据源别名、SQL）查询，和直连数据库的 `db_query` 不是同一个工具。一个库由数据源 ID、envId、envType 三个值确定。`{{header.cookie}}` 从登录中心的 Cookie 罐取值；登录令牌用已收获的请求头注入，不要写进配置。
-- **HTML 结果与写操作标注**：JSON 不会做 HTML 清洗，但仍受结果长度截断、已知密钥脱敏，以及（默认开启的）失败检测约束；明确的 JSON 失败会被标成工具错误。HTML 默认去掉脚本、样式和可识别的导航，转成保留结构的紧凑 Markdown；也可以改回原始 HTML，或只取某个 CSS 选择器区域。清洗后几乎为空（例如页面全靠脚本渲染）会退回原始 HTML 并附说明。页面里的错误提示也会被标成工具错误。写操作工具的 MCP 说明以「【写操作，仅在用户明确要求时调用】」开头；很多站点用 POST 做查询，可在「操作类型」里改成只读。这些选项只能在控制台改，AI 不能改。
+1. **启动控制台**：解压后运行 `start.command`（macOS）、`start.bat`（Windows）或 `start.sh`（Linux），浏览器打开 [http://localhost:7788](http://localhost:7788)。
+2. **录制或纳管能力**：
+   - 在 **「录制」** 页点击开始录制，在专用浏览器完成一遍业务操作后将核心请求保存为工具；
+   - 或在 **「中间件」** 页登记数据库 / Redis / MQ / WebSocket 控制台。
+3. **编排流程包**：在 **「流程包」** 页将工具与中间件按场景分组、编写操作指南（SOP）并开启。
+4. **接入 AI 客户端**：在 **「接入 AI / 设置」** 一键复制适配 Cursor、Claude Desktop、Codex、Claude Code 等客户端的配置：
+   - **Streamable HTTP**：`http://127.0.0.1:7788/mcp`
+   - **Stdio 桥接**：`a2m mcp`
 
-## 使用流程
+更完整的命令行参数、客户端配置及升级迁移细节，请查阅压缩包内附带的 `README.md`。
 
-1. 启动 Action2MCP，打开控制台。
-2. 在「录制」页开始录制，在专用浏览器里走完一遍业务操作，然后结束录制。
-3. 打开这条录制，选中有用的请求，保存为工具，并放进一个流程包。
-4. 在「接入 AI / 设置」里，把 MCP 地址或 `a2m mcp` 命令配到 Cursor、Claude Desktop、Codex、Claude Code 等客户端（控制台里有填好本机路径的配置，可直接复制）。
-5. 需要查库、读缓存或走数据平台 SQL 时，在「中间件」里登记，再加入对应流程包。
-6. 之后直接对 AI 描述要做的事。阶梯模式下，AI 会先看流程包列表，再加载要用的包。
+---
 
-## 登录、密钥与录制数据
+## 安全与边界
 
-- 保存为工具时，程序会去掉已识别的登录相关请求头（例如 Cookie、Authorization），并把已引用的配置项保存为 `{{secret.名称}}` 这类引用，而不是再存一份明文。这不表示请求里任意位置的敏感原文都会被清除。调用时使用专用浏览器里的登录态，以及登录中心收获到的必要请求头。
-- 配置管理里的密钥、足够长的 Cookie 值等已知秘密，会按实现中的脱敏规则从返回给 AI 的结果、审批预览、审计和报错里遮成 `******`。脱敏是对已知模式的扫描，受长度和解码深度等上限约束，不能保证未登记或形态特殊的内容一定被遮掉。数据源 ID、envId、envType 等配置标识会从工具说明、审批预览、审计和报错里隐藏，但成功的查询结果行如果碰巧出现相同内容，会原样保留。
-- 原始录制记录（含请求头）只保存在本机 `data` 目录。控制台显示时会打码，导出 `.a2m` 文件也不包含登录态。删除录制即可清除对应记录。
-- 服务只监听本机地址（`127.0.0.1`），并拒绝其他网站发起的跨站请求。不要把控制台或 MCP 端口暴露到公网。
+- **本地数据隔离**：服务仅监听 `127.0.0.1` 并拦截跨站请求；所有录制记录、登录态与加密密钥（`data/a2m.db`、`data/secret.key`）仅保存在本地目录，导出 `.a2m` 不含任何密文与登录态。
+- **凭据注入与尽力脱敏**：保存工具时自动剥离已识别的登录请求头并改写为 `{{secret.*}}` / `{{header.*}}` 引用；返回给 AI 的结果、审批预览与审计日志会对已登记的密钥与长 Cookie 执行多编码扫描遮罩（受扫描长度/解码深度上限约束，不能代替最小权限原则）。
+- **SQL 护栏与直连约束**：SQL 控制台限制单条只读 `SELECT`（含 `WITH`）+ 显式 `LIMIT`（≤ 200 行）+ `EXPLAIN` 预检；直连数据库建议始终配置只读账号并限定允许库表。
+- **人工审批边界**：工具编辑页与 SQL 控制台可配置**审批模式**（`off` / `always`，**写入工具默认**每次审批），触发时控制台弹出**待审批卡片**（**等待超时**默认 300 秒，可在「**接入 AI / 设置**」调整为 30–1800 秒）。审批仅约束**通过 MCP** 发起的 AI 调用（能直接访问 **localhost HTTP** 的本机客户端仍可**伪造请求**）；请求**已经发出后无法撤回**；**MCP 会话 DELETE** 或 **stdio 桥退出不保证取消**待审批调用（会继续等待用户**拒绝或超时**）；参数**大整数精度**受 JSON `float64` 解码范围限制。
 
-## SQL 控制台的守卫与审批
-
-- 只允许单条只读 `SELECT`（含 `WITH`），必须带显式 `LIMIT`（最多 200 行）。执行前会另开连接做 `EXPLAIN` 索引预检；预检失败或守卫拒绝时，不会向目标发送业务 SQL。结果超过上限会截断并注明。
-- 审批模式在中间件编辑页配置，可选「每次审批」（默认）或「关闭」。关闭后不再弹出审批，审计会记下「未审批，直接执行」，但只读、LIMIT、函数白名单、EXPLAIN 和行数上限仍然生效。审批模式只能在控制台改，不会出现在 MCP 工具说明里，AI 不能查看或修改。
-- 审批预览按设计只包含中间件名、数据源别名和即将执行的 SQL，不展示数据源 ID、环境参数或登录令牌。
-- `EXPLAIN` 只是执行前预检，不保证第二次连接的实际执行计划与预检完全一致，也不提供远端只读事务。
-
-直连数据库的「改 / 删」权限里，「必须带 WHERE」只检查有没有 WHERE 子句，`WHERE 1=1` 也能通过。更可靠的做法是给 AI 使用只读数据库账号，并限制允许的库和表。
-
-## 工具审批的范围与限制
-
-- 审批只约束通过 MCP 发起的 AI 调用；能直接访问 localhost HTTP 的客户端仍可伪造请求，审批不能代替本机访问权限管理。
-- 请求已经发出后无法撤回。
-- MCP 会话 DELETE 和 stdio 桥退出不保证取消待审批调用；这类调用会继续等待用户拒绝或超时。
-- 参数按整体替换：未提交的参数保留原值；非秘密参数原样展示、原样替换。秘密参数整体遮罩，未改动的 `******` 保留原值，输入完整新值则替换整个参数。
-- 大整数精度与现有 MCP JSON 的 float64 解码路径一致，超出其精确范围的整数可能丢失精度。
+---
 
 ## 从源码构建
 
-需要 Go 1.27.3 或更高版本：
+需要 **Go 1.27.3+** 与 **Python 3**（用于打包）：
 
-```
+```bash
+# 运行全量单元测试
 go test ./...
+
+# 构建当前平台二进制
 go build -o a2m ./cmd/a2m
-python3 build.py   # 生成 dist/ 下四个平台的 zip；内部同样执行 go test ./... 与 go build ./cmd/a2m
+
+# 跨平台打包 dist/ 下全部四个平台的发布 zip（自动同步版本号并执行全量测试）
+python3 build.py
 ```
 
-你的数据（录制记录、工具、密钥）只保存在本地 `data/` 目录，不会进入仓库。
+详细的包分层职责、依赖方向与安全边界见 [架构说明（docs/architecture.md）](docs/architecture.md)；自定义工具与编排引擎设计见 [设计文档（docs/custom-tools/design.md）](docs/custom-tools/design.md)。
 
-## 源码包职责
+---
 
-- `cmd/a2m`：程序入口；`internal/app`：仅负责应用组装（compose.go）与生命周期。
-- `internal/config`、`credential`、`vault`：运行配置、凭据引用规则、加密配置与脱敏。
-- `internal/recording`：HTTP/WebSocket 录制采集、录制数据与标注仓储、分组与噪声规则。
-- `internal/site`：站点登录配置与并发安全的站点仓储；`internal/mcp`：MCP 会话、流程包加载状态与 SSE 通知。
-- `internal/domain`：参数/请求预览契约；`internal/approval`：审批状态机、nonce/超时、决定持久化、完整参数替换及历史/结果预算。执行预览与敏感度判定通过类型化端口接入。
-- `internal/result`：HTML/JSON 结果呈现与业务失败检测；`internal/execution`：工具模型与模板、敏感性策略、冻结准备、HTTP/WS 发送与 SQL/EXPLAIN 护栏、凭据绑定、重试与结果清理；通过明确端口接入浏览器登录态和 SQL 控制台。
-- `internal/browser`：专用浏览器/页面/租约、Cookie、录制生命周期与 CDP 事件转发；`internal/login`：站点登录代次、等待/取消/冷却、登录窗口与加密 Header 采集。状态锁由各包私有管理，站点录制登录识别由 `site` 持有。
-- `internal/middleware`：MySQL、Redis、Kafka/RabbitMQ/RocketMQ 原生驱动、SQL/键/主题范围检查、结果预算与连接缓存；通过显式端口接入凭据解析和权限/审计。
-- `internal/mwconfig`、`store`、`catalog`：中间件配置、数据库迁移与审计、工具目录；`internal/analysis`：`rec_*` 录制分析工具；`internal/mcpserver`：MCP HTTP 端点与调用路由；`internal/invoke`：审批等待与执行前校验；`internal/mwtools`：数据库/Redis/MQ、WebSocket 终端与 SQL 控制台工具；`internal/console`：本地控制台 API；`internal/transfer`：不含密钥的导入导出。
-- `internal/cdp`、`htmlmd`、`ahocorasick`、`sqlguard`：底层协议和独立算法；`web`：内嵌控制台资源。
+## 已知限制
 
-依赖方向和安全边界见 [架构说明](docs/architecture.md)。
-
-## 目前的限制
-
-- 跨域 iframe 里的请求，以及 Service Worker 发出的请求，暂时录不到。
-- 部分 AI 客户端收到 `tools/list_changed` 通知后不会刷新工具列表。这时可以用 `load_pack` 返回的信息，通过 `call_pack_tool` 调用，功能不受影响。
-- 流程包的加载状态只保存在内存里，Action2MCP 重启后需要重新 `load_pack`（MCP 连接本身在重启后也需要重连）。
-- Redis 集群 / 哨兵模式、TLS，以及 Kafka 的 SASL 登录已经实现，但还没有在真实的集群环境里测过。RabbitMQ 无法列出队列；查看消息后消息会退回队列，并被标记为重新投递。
-- 同一台电脑上同时运行两份 Action2MCP 时，请在 `data/config.json` 里给其中一份换个端口。
-
-中间件和升级迁移的更细说明，见安装包里的 README.md。
+- 暂不支持录制跨域 `iframe` 及 `Service Worker` 发出的请求。
+- 若部分 AI 客户端未响应 `tools/list_changed` 动态刷新，可直接通过 `call_pack_tool` 调用已加载流程包中的工具。
+- 流程包加载状态保存在内存中，重启 Action2MCP 后需重新 `load_pack`。
+- 同机启动多个实例时，请在各自 `data/config.json` 中修改监听端口。
