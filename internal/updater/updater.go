@@ -381,43 +381,41 @@ func (s *Service) probeEndpoint(rawURL, src string) probeResult {
 	client.Timeout = probeTimeout
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, rawURL, nil)
-	if err != nil {
-		return probeResult{}
-	}
-	req.Header.Set("User-Agent", "Action2MCP-Updater/"+CleanVersion(s.opts.CurrentVersion))
-	if src == SourceGitee && s.opts.GiteeToken != "" {
-		req.Header.Set("Authorization", "token "+s.opts.GiteeToken)
-	}
-
-	start := time.Now()
-	resp, err := client.Do(req)
-	if err != nil {
-		return probeResult{}
-	}
-	resp.Body.Close()
-
-	// Some API endpoints reject HEAD with 405; treat 2xx/3xx as reachable.
-	if resp.StatusCode == http.StatusMethodNotAllowed {
-		reqGet, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	do := func(method string) (int, time.Duration, error) {
+		req, err := http.NewRequestWithContext(ctx, method, rawURL, nil)
 		if err != nil {
-			return probeResult{}
+			return 0, 0, err
 		}
-		reqGet.Header.Set("User-Agent", "Action2MCP-Updater/"+CleanVersion(s.opts.CurrentVersion))
+		req.Header.Set("User-Agent", "Action2MCP-Updater/"+CleanVersion(s.opts.CurrentVersion))
 		if src == SourceGitee && s.opts.GiteeToken != "" {
-			reqGet.Header.Set("Authorization", "token "+s.opts.GiteeToken)
+			req.Header.Set("Authorization", "token "+s.opts.GiteeToken)
 		}
-		start = time.Now()
-		resp, err = client.Do(reqGet)
+		start := time.Now()
+		resp, err := client.Do(req)
 		if err != nil {
-			return probeResult{}
+			return 0, 0, err
 		}
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		if method == http.MethodGet {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		}
 		resp.Body.Close()
+		return resp.StatusCode, time.Since(start), nil
 	}
 
-	rtt := time.Since(start)
-	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+	code, rtt, err := do(http.MethodHead)
+	if err != nil {
+		return probeResult{}
+	}
+	if code >= 200 && code < 400 {
+		return probeResult{ok: true, rtt: rtt}
+	}
+	// Gitee's releases API answers HEAD with 401, and some hosts use 405.
+	// A successful GET still means the source is reachable.
+	code, rtt, err = do(http.MethodGet)
+	if err != nil {
+		return probeResult{}
+	}
+	if code >= 200 && code < 400 {
 		return probeResult{ok: true, rtt: rtt}
 	}
 	return probeResult{ok: false, rtt: rtt}

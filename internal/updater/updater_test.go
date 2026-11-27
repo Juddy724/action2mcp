@@ -379,3 +379,54 @@ func TestDualSourceRoutingAndDownloadFailover(t *testing.T) {
 	}
 }
 
+func TestProbePrefersGiteeWhenHeadUnauthorizedButGetOK(t *testing.T) {
+	var giteeHead, giteeGet, githubHead atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/gitee/api/releases/latest":
+			// Match Gitee's real /api/v5/repos/.../releases/latest behavior.
+			if r.Method == http.MethodHead {
+				giteeHead.Add(1)
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			giteeGet.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"tag_name":"v0.7.9"}`))
+		case "/github/releases/latest":
+			githubHead.Add(1)
+			w.Header().Set("Location", "https://github.com/Juddy724/action2mcp/releases/tag/v0.7.9")
+			w.WriteHeader(http.StatusFound)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	u := New(Options{
+		CurrentVersion: "0.7.8",
+		Source:         SourceAuto,
+		GiteeAPIURL:    srv.URL + "/gitee/api/releases/latest",
+		WebReleaseURL:  srv.URL + "/github/releases/latest",
+		HTTPClient:     srv.Client(),
+	})
+	giteeURL := srv.URL + "/gitee/api/releases/latest"
+	githubURL := srv.URL + "/github/releases/latest"
+	giteeRes := u.probeEndpoint(giteeURL, SourceGitee)
+	githubRes := u.probeEndpoint(githubURL, SourceGitHub)
+	if !giteeRes.ok {
+		t.Fatalf("expected Gitee reachable after HEAD 401 + GET 200, got %+v", giteeRes)
+	}
+	if !githubRes.ok {
+		t.Fatalf("expected GitHub reachable via HEAD 302, got %+v", githubRes)
+	}
+	if giteeHead.Load() != 1 || giteeGet.Load() != 1 {
+		t.Fatalf("gitee probe hits head=%d get=%d", giteeHead.Load(), giteeGet.Load())
+	}
+	if githubHead.Load() != 1 {
+		t.Fatalf("expected GitHub HEAD probe, got %d", githubHead.Load())
+	}
+	if got := decidePreferredSource(true, giteeRes, githubRes); got != SourceGitee {
+		t.Fatalf("expected domestic auto mode to keep Gitee, got %q", got)
+	}
+}
